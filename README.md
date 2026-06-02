@@ -6,6 +6,33 @@ It is designed for use in the Codex app, where multiple role-oriented agents may
 
 The goal is to validate transaction-safe handoff operations, role configuration, dependency promotion, event logging, and bounded wait behavior without affecting the active project handoff queue.
 
+## Requirements
+
+Minimum runtime requirements:
+
+- Python 3.10 or newer
+- Python standard library `sqlite3` support
+- A local filesystem path where Baton can create `.baton/` runtime state
+
+Supported operating systems:
+
+- macOS and Linux are the intended targets.
+- Other Unix-like systems should work if Python 3.10+ and SQLite support are available.
+- Windows is not currently tested.
+
+No third-party Python packages are required.
+
+The shell tests require additional Unix command-line tools:
+
+- `bash`
+- `mktemp`
+- `awk`
+- `grep`
+- `sed`
+- `sleep`
+
+This repository is currently tested on macOS with Python 3.12.
+
 ## Quick Start
 
 ```bash
@@ -19,6 +46,8 @@ Agent prompt:
 ```text
 docs/agent-prompt.md
 ```
+
+When running Baton with Codex role agents, add the agent prompt from `docs/agent-prompt.md` to the worker agent instructions. It defines the bounded wait loop, shift handling, claim/finish rules, and CR review behavior that agents are expected to follow.
 
 Schema reference:
 
@@ -367,7 +396,8 @@ Stop/resume commands do not move jobs or change job status. They only affect fut
 ## Limitations
 
 - It does not import or export Markdown handoff files.
-- It does not enforce a full permission model beyond target-role claim/finish checks.
+- It does not enforce a full permission model for handoff jobs beyond target-role claim/finish checks.
+- CR review actions use role permissions, but user-level authentication is outside Baton.
 - It is not the active repository handoff workflow.
 
 ## License

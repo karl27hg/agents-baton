@@ -12,6 +12,8 @@ CR_DIR="$TMP/change-requests"
 "$CLI" --db "$DB" role permission-add architecture cr.review >/dev/null
 "$CLI" --db "$DB" role permission-add architecture cr.approve >/dev/null
 "$CLI" --db "$DB" role permission-list architecture | grep "cr.approve" >/dev/null
+"$CLI" --db "$DB" role add product --display-name "Product" >/dev/null
+"$CLI" --db "$DB" role permission-add product cr.approve >/dev/null
 
 if "$CLI" --db "$DB" cr wait-review --role frontend --timeout 1 --interval 1 >/dev/null 2>&1; then
   echo "ERROR: role without cr.review unexpectedly waited for CR review" >&2
@@ -58,6 +60,16 @@ if "$CLI" --db "$DB" cr mark-implemented "$CR_ID" --role sm --evidence "No imple
   echo "ERROR: CR without implementation handoff was unexpectedly marked implemented" >&2
   exit 1
 fi
+"$CLI" --db "$DB" role permission-add architecture cr.assign_implementation >/dev/null
+if "$CLI" --db "$DB" cr create-handoff "$CR_ID" \
+  --by-role architecture \
+  --role frontend \
+  --title "Unauthorized implementation assignment" \
+  --objective "Verify non-reviewer roles cannot assign implementation." \
+  --exit-criteria "This command should fail." >/dev/null 2>&1; then
+  echo "ERROR: non-reviewer role unexpectedly created implementation handoff" >&2
+  exit 1
+fi
 IMPLEMENT_LINE="$("$CLI" --db "$DB" cr create-handoff "$CR_ID" \
   --by-role sm \
   --role frontend \
@@ -83,6 +95,18 @@ ARCH_CR_LINE="$("$CLI" --db "$DB" cr create \
 ARCH_CR_ID="$(awk '{print $1}' <<<"$ARCH_CR_LINE")"
 "$CLI" --db "$DB" cr submit "$ARCH_CR_ID" --role planning >/dev/null
 "$CLI" --db "$DB" cr approve "$ARCH_CR_ID" --role architecture --evidence "Architecture approved." >/dev/null
+
+PRODUCT_CR_LINE="$("$CLI" --db "$DB" cr create \
+  --title "Product reviewed change" \
+  --author-role planning \
+  --reviewer-role product \
+  --dir "$CR_DIR")"
+PRODUCT_CR_ID="$(awk '{print $1}' <<<"$PRODUCT_CR_LINE")"
+"$CLI" --db "$DB" cr submit "$PRODUCT_CR_ID" --role planning >/dev/null
+if "$CLI" --db "$DB" cr approve "$PRODUCT_CR_ID" --role product --evidence "Product approved." >/dev/null 2>&1; then
+  echo "ERROR: role with cr.approve but without cr.review unexpectedly approved CR" >&2
+  exit 1
+fi
 
 WAIT_DB="$TMP/wait.sqlite3"
 WAIT_OUT="$TMP/wait-review.out"

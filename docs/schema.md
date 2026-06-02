@@ -232,6 +232,9 @@ finished
 promoted
 control_stopped
 control_resumed
+shift_started
+shift_extended
+shift_ended
 ```
 
 Claim event example:
@@ -353,6 +356,19 @@ Columns:
 | `to_status` | `text` | no | New CR status. |
 | `message` | `text` | no | Evidence, reason, or linked job ID. |
 | `created_at` | `text` | yes | UTC event timestamp. |
+
+Current CR event types:
+
+```text
+created
+submitted
+resubmitted
+revision_requested
+approved
+rejected
+implementation_handoff_created
+implemented
+```
 
 ## `cr_handoffs`
 

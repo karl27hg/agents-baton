@@ -232,6 +232,9 @@ finished
 promoted
 control_stopped
 control_resumed
+shift_started
+shift_extended
+shift_ended
 ```
 
 Claim event 예:
@@ -353,6 +356,19 @@ cancelled
 | `to_status` | `text` | 아니오 | 변경된 CR 상태입니다. |
 | `message` | `text` | 아니오 | evidence, reason, 연결된 job ID입니다. |
 | `created_at` | `text` | 예 | UTC 이벤트 시각입니다. |
+
+현재 CR 이벤트 타입:
+
+```text
+created
+submitted
+resubmitted
+revision_requested
+approved
+rejected
+implementation_handoff_created
+implemented
+```
 
 ## `cr_handoffs`
 

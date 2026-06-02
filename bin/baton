@@ -731,7 +731,9 @@ def command_cr_resubmit(args: argparse.Namespace) -> int:
 
 
 def assert_reviewer_action(con: sqlite3.Connection, cr_id: str, role: str, permission: str) -> tuple[sqlite3.Row, str]:
-    actor_role = require_permission(con, role, permission)
+    actor_role = require_permission(con, role, "cr.review")
+    if permission != "cr.review":
+        actor_role = require_permission(con, role, permission)
     row = con.execute("select * from change_requests where cr_id = ?", (cr_id,)).fetchone()
     if not row:
         raise SystemExit(f"ERROR: unknown CR: {cr_id}")
@@ -833,10 +835,7 @@ def command_cr_create_handoff(args: argparse.Namespace) -> int:
     with connect(args.db) as con:
         init_schema(con)
         begin_immediate(con)
-        actor_role = require_permission(con, args.by_role, "cr.assign_implementation")
-        row = con.execute("select * from change_requests where cr_id = ?", (args.cr_id,)).fetchone()
-        if not row:
-            raise SystemExit(f"ERROR: unknown CR: {args.cr_id}")
+        row, actor_role = assert_reviewer_action(con, args.cr_id, args.by_role, "cr.assign_implementation")
         if row["status"] != "approved":
             raise SystemExit(f"ERROR: CR must be approved: {args.cr_id} status={row['status']}")
         job_id, status, role = create_handoff_job(
@@ -866,10 +865,7 @@ def command_cr_mark_implemented(args: argparse.Namespace) -> int:
     with connect(args.db) as con:
         init_schema(con)
         begin_immediate(con)
-        actor_role = require_permission(con, args.role, "cr.mark_implemented")
-        row = con.execute("select * from change_requests where cr_id = ?", (args.cr_id,)).fetchone()
-        if not row:
-            raise SystemExit(f"ERROR: unknown CR: {args.cr_id}")
+        row, actor_role = assert_reviewer_action(con, args.cr_id, args.role, "cr.mark_implemented")
         if row["status"] != "approved":
             raise SystemExit(f"ERROR: CR must be approved: {args.cr_id} status={row['status']}")
         unfinished = con.execute(
