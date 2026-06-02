@@ -1,8 +1,8 @@
-# Agent Usage: SQLite Baton Prototype
+# Agent Usage: Baton
 
-This document is for agents testing the SQLite Baton prototype.
+This document is for agents using or testing Baton.
 
-Do not use this prototype to operate the live repository handoff queue unless the user explicitly asks for an experiment.
+Do not use a test Baton database to operate a live repository handoff queue unless the user explicitly asks for an experiment.
 
 ## Agent Rules
 
@@ -13,7 +13,7 @@ Do not use this prototype to operate the live repository handoff queue unless th
 - Claim only jobs targeted to your role.
 - Finish only jobs that you have claimed for your role.
 - Record concrete evidence when finishing.
-- Do not treat prototype DB state as active project workflow state.
+- Do not treat Baton DB state as active project workflow state.
 
 ## Minimal Agent Flow
 
@@ -50,7 +50,7 @@ bin/baton --db /tmp/baton.sqlite3 register \
 
 ## Role Configuration
 
-Agents can test role configuration in prototype databases:
+Agents can test role configuration in Baton databases:
 
 ```bash
 bin/baton --db /tmp/baton.sqlite3 role add content-design --display-name "Content Design"
@@ -66,7 +66,7 @@ bin/baton --db /tmp/baton.sqlite3 role permission-add architecture cr.review
 bin/baton --db /tmp/baton.sqlite3 role permission-add architecture cr.approve
 ```
 
-Do not change active project roles based on prototype results without SM/user approval.
+Do not change active project roles based on Baton results without SM/user approval.
 
 ## CR Author Flow
 
@@ -100,7 +100,7 @@ bin/baton --db /tmp/baton.sqlite3 finish HO-YYYY-MM-DD-001 \
 Reviewer roles need `cr.review` plus the action-specific permission such as `cr.approve` or `cr.request_revision`.
 
 ```bash
-bin/baton --db /tmp/baton.sqlite3 cr wait-review --role sm --timeout 900 --interval 30
+bin/baton --db /tmp/baton.sqlite3 cr wait-review --role sm --timeout 900 --interval 3
 ```
 
 Possible review actions:
@@ -172,11 +172,13 @@ If multiple agents share one workspace, prefer explicit `--claimed-by <profile-n
 Use bounded waits by default:
 
 ```bash
-bin/baton --db /tmp/baton.sqlite3 wait --role frontend --timeout 900 --interval 30
-bin/baton --db /tmp/baton.sqlite3 cr wait-review --role sm --timeout 900 --interval 30
+bin/baton --db /tmp/baton.sqlite3 wait --role frontend --timeout 900 --interval 3
+bin/baton --db /tmp/baton.sqlite3 cr wait-review --role sm --timeout 900 --interval 3
 ```
 
 Avoid `--timeout 0` unless the user explicitly asks for a forever-wait experiment. For normal worker operation, repeat bounded waits while the role shift is active.
+
+`--interval` controls the polling sleep between checks. It defaults to 3 seconds and must be at least 1 second.
 
 ## Shift Usage
 
@@ -218,4 +220,4 @@ Stopping wait loops must not be treated as cancelling handoff jobs. It only cont
 
 `resume` clears manual stops. If the shift has expired, extend or restart the shift before starting another wait.
 
-`stop` writes the stop flag immediately, but a running wait exits only when it next checks the flag. With the default interval, this can take up to 30 seconds.
+`stop` writes the stop flag immediately, but a running wait exits only when it next checks the flag. With the default interval, this can take up to 3 seconds.

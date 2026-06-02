@@ -1,8 +1,8 @@
 # SQLite 스키마
 
-이 문서는 SQLite 기반 Baton prototype에서 사용하는 테이블 구조와 record의 용도를 설명합니다.
+이 문서는 SQLite 기반 Baton에서 사용하는 테이블 구조와 record의 용도를 설명합니다.
 
-이 prototype에서는 SQLite DB가 handoff runtime state의 기준입니다. Agent는 record를 직접 수정하지 말고 `baton` 명령을 사용해야 합니다.
+이 Baton workflow에서는 SQLite DB가 handoff runtime state의 기준입니다. Agent는 record를 직접 수정하지 말고 `baton` 명령을 사용해야 합니다.
 
 ## 개요
 
@@ -255,7 +255,7 @@ created_at=2026-06-02 09:10:00 UTC
 
 - wait loop의 중지/재개 제어를 저장합니다.
 - role agent의 최대 작동 시간을 나타내는 optional shift deadline을 저장합니다.
-- SQLite prototype에서는 파일 flag check를 대체합니다.
+- Baton SQLite workflow에서는 파일 flag check를 대체합니다.
 - job status 자체는 변경하지 않습니다.
 
 컬럼:

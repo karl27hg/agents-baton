@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SQLite-backed Baton CLI prototype."""
+"""SQLite-backed Baton CLI."""
 
 from __future__ import annotations
 
@@ -68,6 +68,16 @@ def parse_duration(value: str) -> timedelta:
     if unit == "d":
         return timedelta(days=amount)
     raise SystemExit(f"ERROR: unsupported duration unit: {unit}")
+
+
+def parse_poll_interval(value: str) -> int:
+    try:
+        interval = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("interval must be an integer number of seconds") from exc
+    if interval < 1:
+        raise argparse.ArgumentTypeError("interval must be at least 1 second")
+    return interval
 
 
 def today_text() -> str:
@@ -1298,7 +1308,7 @@ def command_wait(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="SQLite-backed Baton CLI prototype")
+    parser = argparse.ArgumentParser(description="SQLite-backed Baton CLI")
     parser.add_argument("--db", default=".baton/baton.sqlite3")
     parser.add_argument("--agent-id-file", default="", help="local non-shared agent identity file")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1415,7 +1425,7 @@ def build_parser() -> argparse.ArgumentParser:
     cr_wait_review = cr_sub.add_parser("wait-review")
     cr_wait_review.add_argument("--role", required=True)
     cr_wait_review.add_argument("--timeout", type=int, default=900, help="seconds; 0 means forever")
-    cr_wait_review.add_argument("--interval", type=int, default=30)
+    cr_wait_review.add_argument("--interval", type=parse_poll_interval, default=3)
     cr_wait_review.set_defaults(func=command_cr_wait_review)
 
     next_parser = sub.add_parser("next")
@@ -1483,7 +1493,7 @@ def build_parser() -> argparse.ArgumentParser:
     wait = sub.add_parser("wait")
     wait.add_argument("--role", required=True)
     wait.add_argument("--timeout", type=int, default=900, help="seconds; 0 means forever")
-    wait.add_argument("--interval", type=int, default=30)
+    wait.add_argument("--interval", type=parse_poll_interval, default=3)
     wait.set_defaults(func=command_wait)
     return parser
 

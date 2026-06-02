@@ -9,6 +9,16 @@ OUT="$TMP.wait.out"
 
 "$CLI" --db "$DB" init >/dev/null
 
+if "$CLI" --db "$DB" wait --role frontend --timeout 1 --interval 0 >/dev/null 2>&1; then
+  echo "ERROR: expected wait --interval 0 to fail" >&2
+  exit 1
+fi
+
+if "$CLI" --db "$DB" cr wait-review --role sm --timeout 1 --interval 0 >/dev/null 2>&1; then
+  echo "ERROR: expected cr wait-review --interval 0 to fail" >&2
+  exit 1
+fi
+
 set +e
 "$CLI" --db "$DB" wait --role frontend --timeout 30 --interval 1 >"$OUT" 2>&1 &
 WAIT_PID="$!"

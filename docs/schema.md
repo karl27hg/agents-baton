@@ -1,8 +1,8 @@
 # SQLite Schema
 
-This document explains the SQLite tables used by the Baton prototype.
+This document explains the SQLite tables used by the Baton.
 
-The SQLite database is the runtime authority for handoff state in this prototype. Agents should use `baton` commands instead of editing records directly.
+The SQLite database is the runtime authority for handoff state in this Baton workflow. Agents should use `baton` commands instead of editing records directly.
 
 ## Overview
 
@@ -255,7 +255,7 @@ Purpose:
 
 - Stores stop/resume controls for wait loops.
 - Stores optional shift deadlines for role agent operating windows.
-- Replaces file flag checks in the SQLite prototype.
+- Replaces file flag checks in the Baton SQLite workflow.
 - Does not change job status.
 
 Columns:

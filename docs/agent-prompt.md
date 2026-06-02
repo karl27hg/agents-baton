@@ -1,6 +1,6 @@
 # Agent Prompt: SQLite Baton Wait Worker
 
-Use this prompt when an agent is assigned to wait for and process handoff work through the SQLite Baton prototype.
+Use this prompt when an agent is assigned to wait for and process handoff work through the Baton.
 
 ## Role Setup
 
@@ -36,18 +36,19 @@ If several agents share the same workspace, do not let them unintentionally shar
 - Do not send periodic waiting updates while `baton wait` is running.
 - Report only when `wait` returns, times out, or is stopped.
 - Avoid `--timeout 0` unless the user explicitly asks for a forever-wait experiment.
+- Keep `--interval` at 1 second or higher; the default is 3 seconds.
 - Keep repeating bounded waits while the shift is active.
 
 Recommended command:
 
 ```bash
-bin/baton --db <db> wait --role <role> --timeout 900 --interval 30
+bin/baton --db <db> wait --role <role> --timeout 900 --interval 3
 ```
 
 Reviewer roles waiting for CR review work use:
 
 ```bash
-bin/baton --db <db> cr wait-review --role <role> --timeout 900 --interval 30
+bin/baton --db <db> cr wait-review --role <role> --timeout 900 --interval 3
 ```
 
 Exit handling:

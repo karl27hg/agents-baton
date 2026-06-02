@@ -29,7 +29,7 @@ Recommended options:
 - Git clone plus tag checkout: acceptable for local-only use, but the consuming project will not record the expected Baton revision unless you document it separately.
 - Release archive download: useful for one-off installation, but harder to update consistently than a submodule.
 
-Plain `git clone` is fine for experimentation. For stable use across projects, use a tag such as `v0.1.2` and update intentionally when a new Baton release is chosen.
+Plain `git clone` is fine for experimentation. For stable use across projects, use a tag such as `v0.1.3` and update intentionally when a new Baton release is chosen.
 
 ## Add Baton As A Submodule
 
@@ -44,7 +44,7 @@ Pin to a release tag:
 
 ```bash
 cd tools/baton
-git checkout v0.1.2
+git checkout v0.1.3
 cd ../..
 git add tools/baton
 git commit -m "Add Baton workflow tool"
@@ -63,7 +63,7 @@ The last command uses Baton's default bounded wait settings:
 
 ```text
 --timeout 900
---interval 30
+--interval 3
 ```
 
 ## Add Baton As A Plain Clone
@@ -82,7 +82,7 @@ For stable use, check out a release tag after cloning:
 ```bash
 cd tools/baton
 git fetch --tags
-git checkout v0.1.2
+git checkout v0.1.3
 ```
 
 Record the selected version in the consuming project's documentation or onboarding notes.
@@ -163,7 +163,7 @@ Before waiting, start or extend your shift:
 tools/baton/bin/baton shift start --role frontend
 
 Then repeat bounded waits while the shift is active:
-tools/baton/bin/baton wait --role frontend --timeout 900 --interval 30
+tools/baton/bin/baton wait --role frontend --timeout 900 --interval 3
 
 When work appears, re-check with next, claim it, complete only the claimed task, then finish it with concrete evidence.
 Do not edit Baton SQLite records directly.
@@ -181,7 +181,7 @@ Before waiting, start or extend your shift:
 tools/baton/bin/baton shift start --role sm
 
 Then repeat bounded CR review waits while the shift is active:
-tools/baton/bin/baton cr wait-review --role sm --timeout 900 --interval 30
+tools/baton/bin/baton cr wait-review --role sm --timeout 900 --interval 3
 
 When a CR appears, inspect the Markdown file, then approve, reject, or request revision through Baton.
 If approved implementation should proceed, create implementation handoffs through Baton.
@@ -237,10 +237,10 @@ When using a submodule:
 ```bash
 cd tools/baton
 git fetch --tags
-git checkout v0.1.2
+git checkout v0.1.3
 cd ../..
 git add tools/baton
-git commit -m "Update Baton to v0.1.2"
+git commit -m "Update Baton to v0.1.3"
 ```
 
 When using a plain clone:
@@ -248,7 +248,7 @@ When using a plain clone:
 ```bash
 cd tools/baton
 git fetch --tags
-git checkout v0.1.2
+git checkout v0.1.3
 ```
 
 ## When To Avoid Sharing One Database

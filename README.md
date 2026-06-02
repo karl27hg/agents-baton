@@ -227,7 +227,7 @@ bin/baton cr submit CR-YYYY-MM-DD-001 --role planning
 Reviewer roles can wait for submitted CRs:
 
 ```bash
-bin/baton cr wait-review --role sm --timeout 900 --interval 30
+bin/baton cr wait-review --role sm --timeout 900 --interval 3
 ```
 
 If the CR needs more work, request a revision. Baton creates a revision handoff for the author role, and another revision cannot be requested until the CR is resubmitted.
@@ -327,18 +327,18 @@ tests/shift.sh
 
 The concurrent claim test starts two separate CLI processes against the same open job and expects exactly one claim to succeed.
 
-## Wait Prototype
+## Wait
 
 `wait` repeatedly promotes ready work and checks the target role queue.
 
 ```bash
-bin/baton wait --role frontend --timeout 900 --interval 30
+bin/baton wait --role frontend --timeout 900 --interval 3
 ```
 
 Default wait settings:
 
 - `--timeout 900`: wait for up to 900 seconds.
-- `--interval 30`: poll every 30 seconds.
+- `--interval 3`: poll every 3 seconds. The minimum accepted interval is 1 second.
 
 Exit behavior:
 
