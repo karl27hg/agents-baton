@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-CLI="$ROOT/baton"
+CLI="$ROOT/bin/baton"
 TMP="$(mktemp /tmp/baton-concurrent.XXXXXX)"
 DB="$TMP.sqlite3"
 OUT_A="$TMP.a.out"

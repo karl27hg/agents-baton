@@ -98,7 +98,7 @@ def default_agent_id_file() -> Path:
     override = os.environ.get("BATON_AGENT_ID_FILE") or os.environ.get("HANDOFF_AGENT_ID_FILE")
     if override:
         return Path(override)
-    return Path("baton-sqlite/.local/agent-id")
+    return Path(".baton/agent-id")
 
 
 def agent_id_file(args: argparse.Namespace) -> Path:
@@ -1303,7 +1303,7 @@ def command_wait(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="SQLite-backed Baton CLI prototype")
-    parser.add_argument("--db", default="baton-sqlite/baton.sqlite3")
+    parser.add_argument("--db", default=".baton/baton.sqlite3")
     parser.add_argument("--agent-id-file", default="", help="local non-shared agent identity file")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1462,13 +1462,13 @@ def build_parser() -> argparse.ArgumentParser:
     shift_start_scope = shift_start.add_mutually_exclusive_group(required=True)
     shift_start_scope.add_argument("--all", action="store_true")
     shift_start_scope.add_argument("--role")
-    shift_start.add_argument("--duration", required=True, help="duration such as 900, 30m, 8h, or 1d")
+    shift_start.add_argument("--duration", default="4h", help="duration such as 900, 30m, 8h, or 1d; default: 4h")
     shift_start.set_defaults(func=command_shift_start)
     shift_extend = shift_sub.add_parser("extend")
     shift_extend_scope = shift_extend.add_mutually_exclusive_group(required=True)
     shift_extend_scope.add_argument("--all", action="store_true")
     shift_extend_scope.add_argument("--role")
-    shift_extend.add_argument("--duration", required=True, help="duration such as 900, 30m, 8h, or 1d")
+    shift_extend.add_argument("--duration", default="1h", help="duration such as 900, 30m, 8h, or 1d; default: 1h")
     shift_extend.set_defaults(func=command_shift_extend)
     shift_end = shift_sub.add_parser("end")
     shift_end_scope = shift_end.add_mutually_exclusive_group(required=True)

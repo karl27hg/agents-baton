@@ -1,0 +1,125 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="760" viewBox="0 0 1180 760" role="img" aria-labelledby="title desc">
+  <title id="title">Baton workflow overview</title>
+  <desc id="desc">A flowchart showing how Baton coordinates change requests, review, revision handoffs, implementation handoffs, wait loops, shift controls, and SQLite state.</desc>
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; }
+      .box { fill: #ffffff; stroke: #334155; stroke-width: 2; rx: 8; }
+      .db { fill: #eef2ff; stroke: #4338ca; stroke-width: 2; rx: 8; }
+      .doc { fill: #ecfdf5; stroke: #047857; stroke-width: 2; rx: 8; }
+      .ctrl { fill: #fff7ed; stroke: #c2410c; stroke-width: 2; rx: 8; }
+      .agent { fill: #f0f9ff; stroke: #0369a1; stroke-width: 2; rx: 8; }
+      .decision { fill: #fefce8; stroke: #a16207; stroke-width: 2; }
+      .title { font: 700 28px Arial, sans-serif; fill: #0f172a; }
+      .label { font: 700 16px Arial, sans-serif; fill: #0f172a; }
+      .small { font: 13px Arial, sans-serif; fill: #334155; }
+      .tiny { font: 12px Arial, sans-serif; fill: #475569; }
+      .arrow { stroke: #334155; stroke-width: 2.4; fill: none; marker-end: url(#arrow); }
+      .dash { stroke: #64748b; stroke-width: 2; fill: none; stroke-dasharray: 6 5; marker-end: url(#arrow-muted); }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L8,3 z" fill="#334155"/>
+    </marker>
+    <marker id="arrow-muted" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L8,3 z" fill="#64748b"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" width="1180" height="760"/>
+  <text class="title" x="40" y="52">Baton Workflow Overview</text>
+  <text class="small" x="40" y="78">SQLite owns workflow state. Markdown owns CR body. Role agents repeat bounded waits while shift controls allow it.</text>
+
+  <rect class="doc" x="40" y="120" width="230" height="92"/>
+  <text class="label" x="60" y="150">CR Markdown</text>
+  <text class="small" x="60" y="174">Editable request body</text>
+  <text class="small" x="60" y="194">Baton-managed frontmatter</text>
+
+  <rect class="box" x="340" y="120" width="220" height="92"/>
+  <text class="label" x="362" y="150">baton cr create</text>
+  <text class="small" x="362" y="174">Create CR record</text>
+  <text class="small" x="362" y="194">Generate Markdown shell</text>
+
+  <rect class="db" x="650" y="110" width="270" height="122"/>
+  <text class="label" x="672" y="145">SQLite State</text>
+  <text class="small" x="672" y="169">change_requests / cr_events</text>
+  <text class="small" x="672" y="189">handoff_jobs / cr_handoffs</text>
+  <text class="small" x="672" y="209">handoff_controls / permissions</text>
+
+  <rect class="agent" x="990" y="120" width="140" height="92"/>
+  <text class="label" x="1010" y="150">Role Agent</text>
+  <text class="small" x="1010" y="174">Stable profile</text>
+  <text class="small" x="1010" y="194">Bounded waits</text>
+
+  <path class="arrow" d="M270 166 H340"/>
+  <path class="arrow" d="M560 166 H650"/>
+  <path class="dash" d="M650 205 C520 260, 300 245, 225 213"/>
+  <text class="tiny" x="362" y="244">frontmatter sync only</text>
+
+  <rect class="box" x="80" y="300" width="190" height="84"/>
+  <text class="label" x="102" y="332">draft</text>
+  <text class="small" x="102" y="356">author edits body</text>
+
+  <rect class="box" x="340" y="300" width="190" height="84"/>
+  <text class="label" x="362" y="332">submitted</text>
+  <text class="small" x="362" y="356">review queue item</text>
+
+  <rect class="agent" x="650" y="285" width="230" height="114"/>
+  <text class="label" x="672" y="318">Reviewer Wait</text>
+  <text class="small" x="672" y="342">cr wait-review --role</text>
+  <text class="small" x="672" y="362">requires cr.review</text>
+  <text class="small" x="672" y="382">exit 0 / 2 / 3</text>
+
+  <polygon class="decision" points="1000,278 1130,342 1000,406 870,342"/>
+  <text class="label" x="956" y="336">Review</text>
+  <text class="small" x="940" y="358">decision</text>
+
+  <path class="arrow" d="M270 342 H340"/>
+  <path class="arrow" d="M530 342 H650"/>
+  <path class="arrow" d="M880 342 H870"/>
+
+  <rect class="box" x="80" y="500" width="210" height="92"/>
+  <text class="label" x="102" y="530">revision_requested</text>
+  <text class="small" x="102" y="554">Creates revision handoff</text>
+  <text class="small" x="102" y="574">No duplicate revision</text>
+
+  <rect class="agent" x="360" y="500" width="210" height="92"/>
+  <text class="label" x="382" y="530">Author Role</text>
+  <text class="small" x="382" y="554">Claim revision job</text>
+  <text class="small" x="382" y="574">Edit Markdown + resubmit</text>
+
+  <rect class="box" x="650" y="500" width="210" height="92"/>
+  <text class="label" x="672" y="530">approved</text>
+  <text class="small" x="672" y="554">Implementation decision</text>
+  <text class="small" x="672" y="574">Reviewer assigns handoff</text>
+
+  <rect class="agent" x="950" y="500" width="190" height="92"/>
+  <text class="label" x="972" y="530">Implementation</text>
+  <text class="small" x="972" y="554">Target role claims</text>
+  <text class="small" x="972" y="574">Finish before implemented</text>
+
+  <path class="arrow" d="M940 396 C820 455, 470 455, 290 520"/>
+  <text class="tiny" x="715" y="455">request-revision</text>
+  <path class="arrow" d="M570 546 C610 470, 390 455, 435 384"/>
+  <text class="tiny" x="430" y="468">resubmit</text>
+  <path class="arrow" d="M1025 406 C1010 450, 830 455, 755 500"/>
+  <text class="tiny" x="880" y="462">approve</text>
+  <path class="arrow" d="M860 546 H950"/>
+  <text class="tiny" x="875" y="532">create-handoff</text>
+
+  <rect class="ctrl" x="40" y="650" width="310" height="82"/>
+  <text class="label" x="62" y="682">Shift / Stop Controls</text>
+  <text class="small" x="62" y="706">shift start 4h, extend 1h, stop/resume</text>
+
+  <rect class="box" x="430" y="650" width="310" height="82"/>
+  <text class="label" x="452" y="682">Timeout Policy</text>
+  <text class="small" x="452" y="706">Timeout repeats bounded wait if shift is active</text>
+
+  <rect class="box" x="820" y="650" width="310" height="82"/>
+  <text class="label" x="842" y="682">Completion Reports</text>
+  <text class="small" x="842" y="706">finish / CR report allowed after shift expiry</text>
+
+  <path class="dash" d="M195 650 C250 590, 215 460, 340 384"/>
+  <path class="dash" d="M350 690 H430"/>
+  <path class="dash" d="M740 690 H820"/>
+  <path class="dash" d="M975 650 C950 610, 1000 600, 1045 592"/>
+</svg>

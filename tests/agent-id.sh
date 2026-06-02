@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-CLI="$ROOT/baton"
+CLI="$ROOT/bin/baton"
 TMP="$(mktemp /tmp/baton-agent-id.XXXXXX)"
 DB="$TMP.sqlite3"
 AGENT_FILE="$TMP.agent-id"

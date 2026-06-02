@@ -7,35 +7,39 @@ The goal is to validate transaction-safe handoff operations, role configuration,
 ## Quick Start
 
 ```bash
-baton-sqlite/baton init
-baton-sqlite/baton role list
-baton-sqlite/baton status
+bin/baton init
+bin/baton role list
+bin/baton status
 ```
 
 Agent prompt:
 
 ```text
-baton-sqlite/AGENT-PROMPT.md
+docs/agent-prompt.md
 ```
 
 Schema reference:
 
 ```text
-baton-sqlite/SCHEMA.md
-baton-sqlite/SCHEMA-KO.md
+docs/schema.md
+docs/schema-ko.md
 ```
 
 The default database is:
 
 ```text
-baton-sqlite/baton.sqlite3
+.baton/baton.sqlite3
 ```
 
 Use a different database with `--db`:
 
 ```bash
-baton-sqlite/baton --db /tmp/baton.sqlite3 init
+bin/baton --db /tmp/baton.sqlite3 init
 ```
+
+## System Flow
+
+![Baton workflow overview](docs/baton-flow.svg)
 
 ## Role Management
 
@@ -56,22 +60,22 @@ backend-design
 Add a temporary role:
 
 ```bash
-baton-sqlite/baton role add content-design --display-name "Content Design"
+bin/baton role add content-design --display-name "Content Design"
 ```
 
 Add an alias:
 
 ```bash
-baton-sqlite/baton role alias-add fe frontend
-baton-sqlite/baton next --role fe
+bin/baton role alias-add fe frontend
+bin/baton next --role fe
 ```
 
 CR review permissions are stored separately from role membership. `sm` is seeded with all CR review permissions.
 
 ```bash
-baton-sqlite/baton role permission-list sm
-baton-sqlite/baton role permission-add architecture cr.review
-baton-sqlite/baton role permission-add architecture cr.approve
+bin/baton role permission-list sm
+bin/baton role permission-add architecture cr.review
+bin/baton role permission-add architecture cr.approve
 ```
 
 ## Agent Identity
@@ -79,8 +83,8 @@ baton-sqlite/baton role permission-add architecture cr.approve
 Use a stable profile name as the primary agent identity.
 
 ```bash
-baton-sqlite/baton agent init --role frontend --agent-id frontend-main
-baton-sqlite/baton claim HO-YYYY-MM-DD-001 --role frontend
+bin/baton agent init --role frontend --agent-id frontend-main
+bin/baton claim HO-YYYY-MM-DD-001 --role frontend
 ```
 
 Recommended profile names:
@@ -108,14 +112,14 @@ Identity resolution order for `claim`:
 Use `agent init` only as a local convenience for storing the selected profile name:
 
 ```bash
-baton-sqlite/baton agent init --role frontend --agent-id frontend-main
-baton-sqlite/baton agent show
+bin/baton agent init --role frontend --agent-id frontend-main
+bin/baton agent show
 ```
 
 The default identity file is ignored by git:
 
 ```text
-baton-sqlite/.local/agent-id
+.baton/agent-id
 ```
 
 If multiple agents share one workspace, do not let them share the same default identity file unless they intentionally represent the same profile. In that case, use `--claimed-by` or `BATON_AGENT_ID` with the assigned profile name for each agent.
@@ -125,7 +129,7 @@ If multiple agents share one workspace, do not let them share the same default i
 Register a ready handoff:
 
 ```bash
-baton-sqlite/baton register \
+bin/baton register \
   --title "Frontend upload follow-up" \
   --role frontend \
   --source-ref "docs/change-requests/CR-YYYY-MM-DD-example.md" \
@@ -136,7 +140,7 @@ baton-sqlite/baton register \
 Register a dependent handoff:
 
 ```bash
-baton-sqlite/baton register \
+bin/baton register \
   --title "QA regression" \
   --role qa \
   --depends-on HO-YYYY-MM-DD-001 \
@@ -147,21 +151,21 @@ baton-sqlite/baton register \
 Promote ready blocked work:
 
 ```bash
-baton-sqlite/baton promote-ready
+bin/baton promote-ready
 ```
 
 Claim and finish:
 
 ```bash
-baton-sqlite/baton next --role frontend
-baton-sqlite/baton claim HO-YYYY-MM-DD-001 --role frontend
-baton-sqlite/baton finish HO-YYYY-MM-DD-001 --role frontend --evidence "Manual verification passed."
+bin/baton next --role frontend
+bin/baton claim HO-YYYY-MM-DD-001 --role frontend
+bin/baton finish HO-YYYY-MM-DD-001 --role frontend --evidence "Manual verification passed."
 ```
 
 Inspect events:
 
 ```bash
-baton-sqlite/baton events HO-YYYY-MM-DD-001
+bin/baton events HO-YYYY-MM-DD-001
 ```
 
 ## Change Request Flow
@@ -171,24 +175,24 @@ CR Markdown files hold the editable request body. SQLite is the authority for wo
 Create and submit a CR:
 
 ```bash
-baton-sqlite/baton cr create \
+bin/baton cr create \
   --title "Upload policy" \
   --author-role planning \
   --reviewer-role sm
 
-baton-sqlite/baton cr submit CR-YYYY-MM-DD-001 --role planning
+bin/baton cr submit CR-YYYY-MM-DD-001 --role planning
 ```
 
 Reviewer roles can wait for submitted CRs:
 
 ```bash
-baton-sqlite/baton cr wait-review --role sm --timeout 900 --interval 30
+bin/baton cr wait-review --role sm --timeout 900 --interval 30
 ```
 
 If the CR needs more work, request a revision. Baton creates a revision handoff for the author role, and another revision cannot be requested until the CR is resubmitted.
 
 ```bash
-baton-sqlite/baton cr request-revision CR-YYYY-MM-DD-001 \
+bin/baton cr request-revision CR-YYYY-MM-DD-001 \
   --role sm \
   --reason "Acceptance criteria is unclear."
 ```
@@ -196,11 +200,11 @@ baton-sqlite/baton cr request-revision CR-YYYY-MM-DD-001 \
 The author role edits the CR Markdown body, resubmits the CR, then finishes the revision handoff:
 
 ```bash
-baton-sqlite/baton cr resubmit CR-YYYY-MM-DD-001 \
+bin/baton cr resubmit CR-YYYY-MM-DD-001 \
   --role planning \
   --evidence "Acceptance criteria clarified."
 
-baton-sqlite/baton finish HO-YYYY-MM-DD-001 \
+bin/baton finish HO-YYYY-MM-DD-001 \
   --role planning \
   --evidence "CR resubmitted."
 ```
@@ -208,11 +212,11 @@ baton-sqlite/baton finish HO-YYYY-MM-DD-001 \
 Approval and implementation assignment are separate decisions:
 
 ```bash
-baton-sqlite/baton cr approve CR-YYYY-MM-DD-001 \
+bin/baton cr approve CR-YYYY-MM-DD-001 \
   --role sm \
   --evidence "Ready for implementation."
 
-baton-sqlite/baton cr create-handoff CR-YYYY-MM-DD-001 \
+bin/baton cr create-handoff CR-YYYY-MM-DD-001 \
   --by-role sm \
   --role frontend \
   --title "Implement upload policy UI" \
@@ -223,7 +227,7 @@ baton-sqlite/baton cr create-handoff CR-YYYY-MM-DD-001 \
 Mark a CR implemented only after every implementation handoff is finished:
 
 ```bash
-baton-sqlite/baton cr mark-implemented CR-YYYY-MM-DD-001 \
+bin/baton cr mark-implemented CR-YYYY-MM-DD-001 \
   --role sm \
   --evidence "Implementation handoffs finished."
 ```
@@ -272,12 +276,12 @@ Read-only commands do not claim ownership:
 Run smoke tests:
 
 ```bash
-baton-sqlite/tests/smoke.sh
-baton-sqlite/tests/concurrent-claim.sh
-baton-sqlite/tests/wait-stop.sh
-baton-sqlite/tests/agent-id.sh
-baton-sqlite/tests/cr-flow.sh
-baton-sqlite/tests/shift.sh
+tests/smoke.sh
+tests/concurrent-claim.sh
+tests/wait-stop.sh
+tests/agent-id.sh
+tests/cr-flow.sh
+tests/shift.sh
 ```
 
 The concurrent claim test starts two separate CLI processes against the same open job and expects exactly one claim to succeed.
@@ -287,7 +291,7 @@ The concurrent claim test starts two separate CLI processes against the same ope
 `wait` repeatedly promotes ready work and checks the target role queue.
 
 ```bash
-baton-sqlite/baton wait --role frontend --timeout 900 --interval 30
+bin/baton wait --role frontend --timeout 900 --interval 30
 ```
 
 Exit behavior:
@@ -307,20 +311,22 @@ Shift controls define how long a role agent should keep starting new waits or cl
 Start or extend a role shift:
 
 ```bash
-baton-sqlite/baton shift start --role frontend --duration 8h
-baton-sqlite/baton shift extend --role frontend --duration 1h
+bin/baton shift start --role frontend
+bin/baton shift extend --role frontend
 ```
+
+`shift start` defaults to `4h`. `shift extend` defaults to `1h`. Use `--duration` to override either default.
 
 End a shift explicitly:
 
 ```bash
-baton-sqlite/baton shift end --role frontend --reason "End of day"
+bin/baton shift end --role frontend --reason "End of day"
 ```
 
 Inspect shift state:
 
 ```bash
-baton-sqlite/baton shift status --role frontend
+bin/baton shift status --role frontend
 ```
 
 When a shift expires, Baton marks the matching control scope stopped. Future `wait`, `cr wait-review`, and `claim` attempts stop or fail, while `finish` and CR reporting commands remain allowed.
@@ -332,34 +338,40 @@ Stop and resume control is stored in SQLite, not in flag files.
 Stop all waiters:
 
 ```bash
-baton-sqlite/baton stop --all --reason "End of day"
+bin/baton stop --all --reason "End of day"
 ```
 
 Stop one role:
 
 ```bash
-baton-sqlite/baton stop --role frontend --reason "Pause frontend polling"
+bin/baton stop --role frontend --reason "Pause frontend polling"
 ```
 
 Resume:
 
 ```bash
-baton-sqlite/baton resume --all
-baton-sqlite/baton resume --role frontend
+bin/baton resume --all
+bin/baton resume --role frontend
 ```
 
 Inspect control state:
 
 ```bash
-baton-sqlite/baton control status
+bin/baton control status
 ```
 
 Stop/resume commands do not move jobs or change job status. They only affect future `wait` loop behavior.
 
 `resume` clears a manual stop flag. If the shift deadline has already expired, use `shift extend` or `shift start` before re-entering a wait loop.
 
+`stop` writes the stop flag immediately. A running wait loop exits the next time it checks the flag, so response can be delayed by up to the current `--interval`.
+
 ## Limitations
 
 - It does not import or export Markdown handoff files.
 - It does not enforce a full permission model beyond target-role claim/finish checks.
 - It is not the active repository handoff workflow.
+
+## License
+
+Baton is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

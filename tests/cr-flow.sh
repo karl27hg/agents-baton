@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-CLI="$ROOT/baton"
+CLI="$ROOT/bin/baton"
 TMP="$(mktemp -d /tmp/baton-cr-flow.XXXXXX)"
 DB="$TMP/baton.sqlite3"
 CR_DIR="$TMP/change-requests"

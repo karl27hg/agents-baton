@@ -9,8 +9,8 @@ You are a role worker. Your role is provided by the user or the surrounding thre
 Before waiting or claiming work, use the profile name assigned by the user or project policy.
 
 ```bash
-baton-sqlite/baton --db <db> agent init --role <role> --agent-id <profile-name>
-baton-sqlite/baton --db <db> agent show
+bin/baton --db <db> agent init --role <role> --agent-id <profile-name>
+bin/baton --db <db> agent show
 ```
 
 Recommended profile names:
@@ -41,13 +41,13 @@ If several agents share the same workspace, do not let them unintentionally shar
 Recommended command:
 
 ```bash
-baton-sqlite/baton --db <db> wait --role <role> --timeout 900 --interval 30
+bin/baton --db <db> wait --role <role> --timeout 900 --interval 30
 ```
 
 Reviewer roles waiting for CR review work use:
 
 ```bash
-baton-sqlite/baton --db <db> cr wait-review --role <role> --timeout 900 --interval 30
+bin/baton --db <db> cr wait-review --role <role> --timeout 900 --interval 30
 ```
 
 Exit handling:
@@ -69,13 +69,13 @@ Shift handling:
 When `wait` returns `0`, immediately re-check the queue:
 
 ```bash
-baton-sqlite/baton --db <db> next --role <role>
+bin/baton --db <db> next --role <role>
 ```
 
 Then claim:
 
 ```bash
-baton-sqlite/baton --db <db> claim <job-id> --role <role>
+bin/baton --db <db> claim <job-id> --role <role>
 ```
 
 The CLI uses identity in this order:
@@ -104,15 +104,15 @@ Only roles with CR review permissions can review submitted CRs. Do not approve, 
 Review commands:
 
 ```bash
-baton-sqlite/baton --db <db> cr request-revision <cr-id> --role <role> --reason "Reason"
-baton-sqlite/baton --db <db> cr approve <cr-id> --role <role> --evidence "Evidence summary"
-baton-sqlite/baton --db <db> cr reject <cr-id> --role <role> --reason "Reason"
+bin/baton --db <db> cr request-revision <cr-id> --role <role> --reason "Reason"
+bin/baton --db <db> cr approve <cr-id> --role <role> --evidence "Evidence summary"
+bin/baton --db <db> cr reject <cr-id> --role <role> --reason "Reason"
 ```
 
 After approval, create implementation handoffs only when implementation should proceed:
 
 ```bash
-baton-sqlite/baton --db <db> cr create-handoff <cr-id> \
+bin/baton --db <db> cr create-handoff <cr-id> \
   --by-role <role> \
   --role <target-role> \
   --title "Implementation title" \
@@ -125,13 +125,13 @@ baton-sqlite/baton --db <db> cr create-handoff <cr-id> \
 Finish only after completing the task and collecting concrete evidence:
 
 ```bash
-baton-sqlite/baton --db <db> finish <job-id> --role <role> --evidence "Evidence summary"
+bin/baton --db <db> finish <job-id> --role <role> --evidence "Evidence summary"
 ```
 
 If a commit exists for the handoff output, include it:
 
 ```bash
-baton-sqlite/baton --db <db> finish <job-id> --role <role> --evidence "Evidence summary" --commit <commit-sha>
+bin/baton --db <db> finish <job-id> --role <role> --evidence "Evidence summary" --commit <commit-sha>
 ```
 
 ## Reporting Rules
