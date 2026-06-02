@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+
+export GH_CONFIG_DIR="$ROOT/.baton/gh/config"
+export GH_REPO="karl27hg/agents-baton"
+
+mkdir -p "$GH_CONFIG_DIR"
+
+exec gh "$@"

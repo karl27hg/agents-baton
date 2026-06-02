@@ -412,6 +412,31 @@ Stop/resume commands do not move jobs or change job status. They only affect fut
 
 `stop` writes the stop flag immediately. A running wait loop exits the next time it checks the flag, so response can be delayed by up to the current `--interval`.
 
+## GitHub Issue Wrapper
+
+This repository includes a repo-local GitHub CLI wrapper:
+
+```bash
+scripts/gh-repo
+```
+
+The wrapper keeps GitHub CLI authentication separate from the OS-wide `gh` configuration:
+
+```bash
+export GH_CONFIG_DIR="$ROOT/.baton/gh/config"
+export GH_REPO="karl27hg/agents-baton"
+```
+
+Authenticate with a fine-grained token that is limited to this repository:
+
+```bash
+scripts/gh-repo auth login --with-token
+scripts/gh-repo auth status
+scripts/gh-repo issue list
+```
+
+Token and auth files are stored under `.baton/gh/config/`, which is ignored by git. Do not put token values in the wrapper script or committed documents.
+
 ## Limitations
 
 - It does not import or export Markdown handoff files.
