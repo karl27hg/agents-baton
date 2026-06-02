@@ -2,6 +2,8 @@
 
 This is an isolated prototype for testing the SQLite-backed Baton CLI before replacing the repository file-based `tools/handoff` implementation.
 
+It is designed for use in the Codex app, where multiple role-oriented agents may need a shared local workflow state while working in the same repository.
+
 The goal is to validate transaction-safe handoff operations, role configuration, dependency promotion, event logging, and bounded wait behavior without affecting the active project handoff queue.
 
 ## Quick Start
@@ -36,10 +38,6 @@ Use a different database with `--db`:
 ```bash
 bin/baton --db /tmp/baton.sqlite3 init
 ```
-
-## System Flow
-
-![Baton workflow overview](docs/baton-flow.svg)
 
 ## Role Management
 
