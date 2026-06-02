@@ -1,10 +1,10 @@
-# SQLite Baton Prototype
+# Baton
 
-This is an isolated prototype for testing the SQLite-backed Baton CLI before replacing the repository file-based `tools/handoff` implementation.
+Baton is a SQLite-backed CLI for coordinating role handoffs, CR review, bounded waits, and shift controls between Codex app agents working in the same repository.
 
 It is designed for use in the Codex app, where multiple role-oriented agents may need a shared local workflow state while working in the same repository.
 
-The goal is to validate transaction-safe handoff operations, role configuration, dependency promotion, event logging, and bounded wait behavior without affecting the active project handoff queue.
+The goal is to provide transaction-safe handoff operations, role configuration, dependency promotion, event logging, and bounded wait behavior without requiring agents to edit workflow state directly.
 
 ## Requirements
 
@@ -54,6 +54,20 @@ Schema reference:
 ```text
 docs/schema.md
 docs/schema-ko.md
+```
+
+Using Baton in another project:
+
+```text
+docs/using-baton-in-projects.md
+```
+
+That guide includes copyable prompts for asking Codex role agents to receive handoff work, review CRs, and process CR revision handoffs through Baton.
+
+Release notes:
+
+```text
+CHANGELOG.md
 ```
 
 The default database is:
@@ -320,6 +334,11 @@ The concurrent claim test starts two separate CLI processes against the same ope
 ```bash
 bin/baton wait --role frontend --timeout 900 --interval 30
 ```
+
+Default wait settings:
+
+- `--timeout 900`: wait for up to 900 seconds.
+- `--interval 30`: poll every 30 seconds.
 
 Exit behavior:
 
