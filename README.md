@@ -41,6 +41,34 @@ bin/baton role list
 bin/baton status
 ```
 
+## SM Agent Reading Path
+
+An SM/system-manager agent should read these documents in order before configuring Baton for a project:
+
+1. `README.md`: project overview, default roles, CR permissions, wait/shift controls, reports, and GitHub issue wrapper.
+2. `docs/using-baton-in-projects.md`: install Baton into another repository, set project `.gitignore`, add `AGENTS.md` rules, and copy role-agent prompts.
+3. `docs/agent-prompt.md`: prompt content to attach to Codex role agents that wait for handoff or CR review work.
+4. `docs/agent-usage.md`: command examples for role setup, CR review, waits, shifts, and stop/resume operations.
+5. `docs/schema.md` or `docs/schema-ko.md`: database schema and audit table reference when troubleshooting or reviewing workflow state.
+
+SM setup checklist:
+
+```bash
+bin/baton init
+bin/baton role list
+bin/baton role permission-list sm
+bin/baton-report summary
+```
+
+Then:
+
+- Map the project's actual role names to Baton roles. Add missing roles with `role add` or aliases with `role alias-add`.
+- Decide which roles may review CRs. Grant `cr.review` plus action-specific permissions with `role permission-add`.
+- Add `docs/agent-prompt.md` to each Codex role agent's instructions, adjusted for that role and command path.
+- Configure shifts and bounded waits using the rules in the Wait and Shift Controls sections below.
+- If GitHub issues are used, configure `scripts/gh-repo` with a repo-limited token as described in the GitHub Issue Wrapper section.
+- Use `bin/baton-report audit` and `bin/baton-report summary` for read-only operational review.
+
 Agent prompt:
 
 ```text
@@ -312,6 +340,11 @@ Read-only commands do not claim ownership:
 - `cr status`
 - `cr events`
 
+Read-only reporting is handled by `bin/baton-report`:
+
+- `audit`
+- `summary`
+
 ## Tests
 
 Run smoke tests:
@@ -323,9 +356,32 @@ tests/wait-stop.sh
 tests/agent-id.sh
 tests/cr-flow.sh
 tests/shift.sh
+tests/report.sh
 ```
 
 The concurrent claim test starts two separate CLI processes against the same open job and expects exactly one claim to succeed.
+
+## Reports
+
+`bin/baton-report` is a read-only reporting CLI for audit and summary output. It opens the SQLite database in read-only mode and must not change workflow state.
+
+Audit history:
+
+```bash
+bin/baton-report audit
+bin/baton-report audit --job HO-YYYY-MM-DD-001
+bin/baton-report audit --cr CR-YYYY-MM-DD-001
+bin/baton-report audit --role frontend
+bin/baton-report audit --format json
+bin/baton-report audit --format csv
+```
+
+Summary:
+
+```bash
+bin/baton-report summary
+bin/baton-report summary --format json
+```
 
 ## Wait
 
