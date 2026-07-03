@@ -29,6 +29,7 @@ DEFAULT_ROLES = (
 STATUSES = {"blocked", "open", "in_progress", "finished", "cancelled"}
 CR_STATUSES = {"draft", "submitted", "revision_requested", "approved", "rejected", "implemented", "cancelled"}
 REVIEW_PERMISSIONS = {
+    "cr.admin",
     "cr.review",
     "cr.request_revision",
     "cr.approve",
@@ -353,6 +354,11 @@ def require_permission(con: sqlite3.Connection, role: str, permission: str) -> s
     if not row:
         raise SystemExit(f"ERROR: role {role_id} lacks permission {permission}")
     return role_id
+
+
+def require_distinct_cr_roles(author_role: str, reviewer_role: str) -> None:
+    if author_role == reviewer_role:
+        raise SystemExit("ERROR: CR author_role and reviewer_role cannot be the same")
 
 
 def next_job_id(con: sqlite3.Connection) -> str:
@@ -680,6 +686,7 @@ def command_cr_create(args: argparse.Namespace) -> int:
         begin_immediate(con)
         author_role = resolve_role(con, args.author_role)
         reviewer_role = resolve_role(con, args.reviewer_role)
+        require_distinct_cr_roles(author_role, reviewer_role)
         cr_id = next_cr_id(con)
         file_path = args.file_path.strip()
         if not file_path:
@@ -715,6 +722,7 @@ def transition_cr_to_submitted(args: argparse.Namespace, resubmit: bool) -> int:
             raise SystemExit(f"ERROR: CR must be {expected}: {args.cr_id} status={row['status']}")
         if row["author_role"] != actor_role:
             raise SystemExit(f"ERROR: CR author role is {row['author_role']}, not {actor_role}")
+        require_distinct_cr_roles(row["author_role"], row["reviewer_role"])
         now = utc_now()
         con.execute(
             """
@@ -838,6 +846,103 @@ def command_cr_reject(args: argparse.Namespace) -> int:
         sync_cr_file(con, args.cr_id)
         con.commit()
     print(f"{args.cr_id}\trejected")
+    return 0
+
+
+def command_cr_reassign_reviewer(args: argparse.Namespace) -> int:
+    reason = args.reason.strip()
+    if not reason:
+        raise SystemExit("ERROR: --reason cannot be blank")
+    with connect(args.db) as con:
+        init_schema(con)
+        begin_immediate(con)
+        actor_role = require_permission(con, args.role, "cr.admin")
+        new_reviewer_role = resolve_role(con, args.reviewer_role)
+        row = con.execute("select * from change_requests where cr_id = ?", (args.cr_id,)).fetchone()
+        if not row:
+            raise SystemExit(f"ERROR: unknown CR: {args.cr_id}")
+        if row["status"] in {"approved", "rejected", "implemented", "cancelled"}:
+            raise SystemExit(f"ERROR: CR reviewer cannot be reassigned after terminal review: {args.cr_id} status={row['status']}")
+        require_distinct_cr_roles(row["author_role"], new_reviewer_role)
+        old_reviewer_role = row["reviewer_role"]
+        if old_reviewer_role == new_reviewer_role:
+            raise SystemExit(f"ERROR: CR reviewer role is already {new_reviewer_role}")
+        now = utc_now()
+        con.execute(
+            "update change_requests set reviewer_role = ?, updated_at = ? where cr_id = ?",
+            (new_reviewer_role, now, args.cr_id),
+        )
+        cr_event(
+            con,
+            args.cr_id,
+            "reviewer_reassigned",
+            actor_role=actor_role,
+            from_status=row["status"],
+            to_status=row["status"],
+            message=f"{old_reviewer_role}->{new_reviewer_role}: {reason}",
+        )
+        sync_cr_file(con, args.cr_id)
+        con.commit()
+    print(f"{args.cr_id}\treviewer_reassigned\t{old_reviewer_role}\t{new_reviewer_role}")
+    return 0
+
+
+def command_cr_cancel(args: argparse.Namespace) -> int:
+    reason = args.reason.strip()
+    if not reason:
+        raise SystemExit("ERROR: --reason cannot be blank")
+    with connect(args.db) as con:
+        init_schema(con)
+        begin_immediate(con)
+        actor_role = require_permission(con, args.role, "cr.admin")
+        row = con.execute("select * from change_requests where cr_id = ?", (args.cr_id,)).fetchone()
+        if not row:
+            raise SystemExit(f"ERROR: unknown CR: {args.cr_id}")
+        if row["status"] == "cancelled":
+            raise SystemExit(f"ERROR: CR is already cancelled: {args.cr_id}")
+        if row["status"] == "implemented":
+            raise SystemExit(f"ERROR: implemented CR cannot be cancelled: {args.cr_id}")
+        now = utc_now()
+        con.execute(
+            """
+            update change_requests
+            set status = 'cancelled', active_revision_job_id = null, updated_at = ?
+            where cr_id = ?
+            """,
+            (now, args.cr_id),
+        )
+        active_revision_job_id = row["active_revision_job_id"]
+        if active_revision_job_id:
+            job = con.execute(
+                "select status from handoff_jobs where job_id = ?",
+                (active_revision_job_id,),
+            ).fetchone()
+            if job and job["status"] not in {"finished", "cancelled"}:
+                con.execute(
+                    "update handoff_jobs set status = 'cancelled' where job_id = ?",
+                    (active_revision_job_id,),
+                )
+                event(
+                    con,
+                    "cancelled",
+                    job_id=active_revision_job_id,
+                    actor_role=actor_role,
+                    from_status=job["status"],
+                    to_status="cancelled",
+                    message=f"CR {args.cr_id} cancelled: {reason}",
+                )
+        cr_event(
+            con,
+            args.cr_id,
+            "cancelled",
+            actor_role=actor_role,
+            from_status=row["status"],
+            to_status="cancelled",
+            message=reason,
+        )
+        sync_cr_file(con, args.cr_id)
+        con.commit()
+    print(f"{args.cr_id}\tcancelled")
     return 0
 
 
@@ -1397,6 +1502,19 @@ def build_parser() -> argparse.ArgumentParser:
     cr_reject.add_argument("--role", required=True)
     cr_reject.add_argument("--reason", required=True)
     cr_reject.set_defaults(func=command_cr_reject)
+
+    cr_reassign_reviewer = cr_sub.add_parser("reassign-reviewer")
+    cr_reassign_reviewer.add_argument("cr_id")
+    cr_reassign_reviewer.add_argument("--role", required=True)
+    cr_reassign_reviewer.add_argument("--reviewer-role", required=True)
+    cr_reassign_reviewer.add_argument("--reason", required=True)
+    cr_reassign_reviewer.set_defaults(func=command_cr_reassign_reviewer)
+
+    cr_cancel = cr_sub.add_parser("cancel")
+    cr_cancel.add_argument("cr_id")
+    cr_cancel.add_argument("--role", required=True)
+    cr_cancel.add_argument("--reason", required=True)
+    cr_cancel.set_defaults(func=command_cr_cancel)
 
     cr_create_handoff = cr_sub.add_parser("create-handoff")
     cr_create_handoff.add_argument("cr_id")

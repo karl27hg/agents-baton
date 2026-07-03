@@ -102,6 +102,7 @@ Seed permissions:
 Known CR permissions:
 
 ```text
+cr.admin
 cr.review
 cr.request_revision
 cr.approve
@@ -336,6 +337,8 @@ State rules:
 - `submitted -> revision_requested`, `approved`, or `rejected` is performed by the reviewer role.
 - `revision_requested -> submitted` is performed by the author role after editing the Markdown body.
 - `approved -> implemented` requires at least one linked implementation handoff and all linked implementation handoffs must be `finished`.
+- `cancelled` is performed by a role with `cr.admin` and records an audit event.
+- `reviewer_role` can be reassigned before terminal review by a role with `cr.admin`.
 
 ## `cr_events`
 
@@ -366,6 +369,8 @@ resubmitted
 revision_requested
 approved
 rejected
+reviewer_reassigned
+cancelled
 implementation_handoff_created
 implemented
 ```

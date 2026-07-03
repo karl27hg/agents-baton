@@ -102,6 +102,7 @@ Seed 권한:
 알려진 CR 권한:
 
 ```text
+cr.admin
 cr.review
 cr.request_revision
 cr.approve
@@ -336,6 +337,8 @@ cancelled
 - `submitted -> revision_requested`, `approved`, `rejected`는 reviewer role이 수행합니다.
 - `revision_requested -> submitted`는 Markdown 본문 보강 후 author role이 수행합니다.
 - `approved -> implemented`는 연결된 implementation handoff가 최소 1개 있어야 하고, 모든 implementation handoff가 `finished`여야 합니다.
+- `cancelled`는 `cr.admin` 권한을 가진 role이 수행하며 audit event를 남깁니다.
+- `reviewer_role`은 terminal review 전까지 `cr.admin` 권한을 가진 role이 재지정할 수 있습니다.
 
 ## `cr_events`
 
@@ -366,6 +369,8 @@ resubmitted
 revision_requested
 approved
 rejected
+reviewer_reassigned
+cancelled
 implementation_handoff_created
 implemented
 ```

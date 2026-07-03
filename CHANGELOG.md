@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.1.5
+
+- Prevented self-review CRs where `author_role` and `reviewer_role` are the same.
+- Added `cr.admin` permission for administrative CR remediation.
+- Added `cr reassign-reviewer` and `cr cancel` with audit events and Markdown frontmatter sync.
+- Documented the self-review prevention and remediation flow.
+
+## v0.1.4
+
+- Added the read-only `baton-report` CLI for audit and summary output.
+- Added an SM agent reading path and setup checklist to the README.
+
 ## v0.1.3
 
 - Changed default wait polling interval from 30 seconds to 3 seconds for faster handoff and CR review response.

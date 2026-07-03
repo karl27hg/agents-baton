@@ -139,13 +139,16 @@ bin/baton role alias-add fe frontend
 bin/baton next --role fe
 ```
 
-CR review permissions are stored separately from role membership. `sm` is seeded with all CR review permissions.
+CR review and CR administration permissions are stored separately from role membership. `sm` is seeded with all CR permissions.
 
 ```bash
 bin/baton role permission-list sm
 bin/baton role permission-add architecture cr.review
 bin/baton role permission-add architecture cr.approve
+bin/baton role permission-add architecture cr.admin
 ```
+
+After upgrading an existing Baton database, run `bin/baton init` again or explicitly add `cr.admin` to `sm` so administrative CR remediation commands are available.
 
 ## Agent Identity
 
@@ -252,6 +255,8 @@ bin/baton cr create \
 bin/baton cr submit CR-YYYY-MM-DD-001 --role planning
 ```
 
+The author role and reviewer role must be different. Baton rejects self-review CRs before submission so they cannot become stuck in the review queue.
+
 Reviewer roles can wait for submitted CRs:
 
 ```bash
@@ -301,6 +306,19 @@ bin/baton cr mark-implemented CR-YYYY-MM-DD-001 \
   --evidence "Implementation handoffs finished."
 ```
 
+Administrative CR remediation requires `cr.admin`:
+
+```bash
+bin/baton cr reassign-reviewer CR-YYYY-MM-DD-001 \
+  --role sm \
+  --reviewer-role architecture \
+  --reason "Fix incorrect reviewer assignment."
+
+bin/baton cr cancel CR-YYYY-MM-DD-001 \
+  --role sm \
+  --reason "Superseded by replacement CR."
+```
+
 ## Transaction Model
 
 State-changing commands run inside `BEGIN IMMEDIATE` transactions:
@@ -323,6 +341,8 @@ State-changing commands run inside `BEGIN IMMEDIATE` transactions:
 - `cr request-revision`
 - `cr approve`
 - `cr reject`
+- `cr reassign-reviewer`
+- `cr cancel`
 - `cr create-handoff`
 - `cr mark-implemented`
 

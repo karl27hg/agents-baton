@@ -102,6 +102,8 @@ If claim fails, do not work on the job. Re-check with `next` or exit.
 
 Only roles with CR review permissions can review submitted CRs. Do not approve, reject, or request revision for a CR assigned to another reviewer role.
 
+The CR author role and reviewer role must be different. If you encounter a CR that is stuck because the same role is both author and reviewer, report it to the SM/admin role; do not edit SQLite directly.
+
 Review commands:
 
 ```bash

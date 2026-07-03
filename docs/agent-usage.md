@@ -99,6 +99,8 @@ bin/baton --db /tmp/baton.sqlite3 finish HO-YYYY-MM-DD-001 \
 
 Reviewer roles need `cr.review` plus the action-specific permission such as `cr.approve` or `cr.request_revision`.
 
+The CR author role and reviewer role must be different. If an old CR is stuck because it has the same author and reviewer role, an SM/admin role with `cr.admin` must reassign or cancel it instead of editing SQLite directly.
+
 ```bash
 bin/baton --db /tmp/baton.sqlite3 cr wait-review --role sm --timeout 900 --interval 3
 ```
@@ -117,6 +119,19 @@ bin/baton --db /tmp/baton.sqlite3 cr approve CR-YYYY-MM-DD-001 \
 bin/baton --db /tmp/baton.sqlite3 cr reject CR-YYYY-MM-DD-001 \
   --role sm \
   --reason "Out of scope."
+```
+
+Administrative remediation:
+
+```bash
+bin/baton --db /tmp/baton.sqlite3 cr reassign-reviewer CR-YYYY-MM-DD-001 \
+  --role sm \
+  --reviewer-role architecture \
+  --reason "Fix incorrect reviewer assignment."
+
+bin/baton --db /tmp/baton.sqlite3 cr cancel CR-YYYY-MM-DD-001 \
+  --role sm \
+  --reason "Superseded by replacement CR."
 ```
 
 Approval does not automatically assign implementation. Use a separate implementation handoff when the reviewer decides work should proceed.

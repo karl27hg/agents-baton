@@ -144,6 +144,8 @@ Use `tools/baton/bin/baton` for role handoff and CR workflow state.
 - Use bounded waits; do not use `--timeout 0` unless explicitly requested.
 - Start a shift before long-running waits.
 - Finish already-claimed work even if the shift expires.
+- Do not create CRs with the same author and reviewer role.
+- Ask an SM/admin role to use `cr reassign-reviewer` or `cr cancel` for stuck legacy CRs.
 - Keep CR Markdown files under `docs/change-requests/` unless the user specifies another path.
 ```
 
