@@ -29,7 +29,7 @@ Recommended options:
 - Git clone plus tag checkout: acceptable for local-only use, but the consuming project will not record the expected Baton revision unless you document it separately.
 - Release archive download: useful for one-off installation, but harder to update consistently than a submodule.
 
-Plain `git clone` is fine for experimentation. For stable use across projects, use a tag such as `v0.1.3` and update intentionally when a new Baton release is chosen.
+Plain `git clone` is fine for experimentation. For stable use across projects, use a tag such as `v0.1.6` and update intentionally when a new Baton release is chosen.
 
 ## Add Baton As A Submodule
 
@@ -44,7 +44,7 @@ Pin to a release tag:
 
 ```bash
 cd tools/baton
-git checkout v0.1.3
+git checkout v0.1.6
 cd ../..
 git add tools/baton
 git commit -m "Add Baton workflow tool"
@@ -82,7 +82,7 @@ For stable use, check out a release tag after cloning:
 ```bash
 cd tools/baton
 git fetch --tags
-git checkout v0.1.3
+git checkout v0.1.6
 ```
 
 Record the selected version in the consuming project's documentation or onboarding notes.
@@ -239,10 +239,10 @@ When using a submodule:
 ```bash
 cd tools/baton
 git fetch --tags
-git checkout v0.1.3
+git checkout v0.1.6
 cd ../..
 git add tools/baton
-git commit -m "Update Baton to v0.1.3"
+git commit -m "Update Baton to v0.1.6"
 ```
 
 When using a plain clone:
@@ -250,8 +250,17 @@ When using a plain clone:
 ```bash
 cd tools/baton
 git fetch --tags
-git checkout v0.1.3
+git checkout v0.1.6
 ```
+
+After changing Baton versions, run the idempotent database update command from the consuming project root:
+
+```bash
+tools/baton/bin/baton update
+tools/baton/bin/baton role permission-list sm
+```
+
+`update` applies schema compatibility updates and seeds any newly introduced default roles or permissions without editing handoff or CR content.
 
 ## When To Avoid Sharing One Database
 

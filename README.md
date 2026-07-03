@@ -55,6 +55,7 @@ SM setup checklist:
 
 ```bash
 bin/baton init
+bin/baton update
 bin/baton role list
 bin/baton role permission-list sm
 bin/baton-report summary
@@ -148,7 +149,12 @@ bin/baton role permission-add architecture cr.approve
 bin/baton role permission-add architecture cr.admin
 ```
 
-After upgrading an existing Baton database, run `bin/baton init` again or explicitly add `cr.admin` to `sm` so administrative CR remediation commands are available.
+After upgrading an existing Baton database, run `bin/baton update` to apply idempotent schema updates and seed any newly introduced default roles or permissions such as `cr.admin`.
+
+```bash
+bin/baton update
+bin/baton role permission-list sm
+```
 
 ## Agent Identity
 
@@ -326,6 +332,7 @@ State-changing commands run inside `BEGIN IMMEDIATE` transactions:
 - `role add`
 - `role alias-add`
 - `role permission-add`
+- `update`
 - `register`
 - `claim`
 - `finish`
@@ -377,6 +384,7 @@ tests/agent-id.sh
 tests/cr-flow.sh
 tests/shift.sh
 tests/report.sh
+tests/update.sh
 ```
 
 The concurrent claim test starts two separate CLI processes against the same open job and expects exactly one claim to succeed.

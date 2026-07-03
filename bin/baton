@@ -506,13 +506,26 @@ def set_shift_until(con: sqlite3.Connection, scope: str, work_until: str, reason
     )
 
 
+def apply_schema_updates(con: sqlite3.Connection) -> None:
+    init_schema(con)
+    begin_immediate(con)
+    seed_roles(con)
+    seed_role_permissions(con)
+
+
 def command_init(args: argparse.Namespace) -> int:
     with connect(args.db) as con:
-        init_schema(con)
-        seed_roles(con)
-        seed_role_permissions(con)
+        apply_schema_updates(con)
         con.commit()
     print(f"Initialized {args.db}")
+    return 0
+
+
+def command_update(args: argparse.Namespace) -> int:
+    with connect(args.db) as con:
+        apply_schema_updates(con)
+        con.commit()
+    print(f"Updated {args.db}")
     return 0
 
 
@@ -1419,6 +1432,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("init").set_defaults(func=command_init)
+    sub.add_parser("update").set_defaults(func=command_update)
     sub.add_parser("status").set_defaults(func=command_status)
     sub.add_parser("promote-ready").set_defaults(func=command_promote_ready, actor_role="sm")
 

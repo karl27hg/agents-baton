@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.6
+
+- Added `baton update` as an explicit idempotent database upgrade command.
+- Documented the post-upgrade `baton update` flow for consuming projects.
+- Added an update regression test for newly seeded default permissions.
+
 ## v0.1.5
 
 - Prevented self-review CRs where `author_role` and `reviewer_role` are the same.
