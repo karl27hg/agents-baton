@@ -8,6 +8,7 @@ The SQLite database is the runtime authority for handoff state in this Baton wor
 
 Tables:
 
+- `schema_migrations`: ordered database migration history
 - `roles`: canonical role definitions
 - `role_aliases`: alternate role names that resolve to canonical roles
 - `role_permissions`: workflow permissions granted to roles
@@ -20,6 +21,26 @@ Tables:
 - `cr_handoffs`: links CRs to revision or implementation handoffs
 
 State-changing CLI commands use `BEGIN IMMEDIATE` transactions to serialize writes.
+
+## `schema_migrations`
+
+Purpose:
+
+- Records every database migration exactly once.
+- Allows existing unversioned Baton databases to adopt the current schema without deleting workflow rows.
+- Prevents an older Baton binary from modifying a database created by a newer schema version.
+
+Columns:
+
+| Column | Type | Required | Purpose |
+| --- | --- | --- | --- |
+| `version` | `integer primary key` | yes | Monotonically increasing migration version. |
+| `name` | `text` | yes | Stable migration name. |
+| `applied_at` | `text` | yes | UTC timestamp when the migration committed. |
+
+`baton migrate` runs pending migrations, default seed updates, `PRAGMA quick_check`, and `PRAGMA foreign_key_check` in one transaction. Any failure rolls back schema changes, seed changes, and migration records together.
+
+Future schema changes must append a new migration and increment `LATEST_SCHEMA_VERSION`. Never change an already-released migration in place.
 
 ## `roles`
 
@@ -149,7 +170,7 @@ cancelled
 
 Status meaning:
 
-- `blocked`: Not ready because dependencies or manual blockers remain.
+- `blocked`: Waiting for required upstream jobs to finish.
 - `open`: Ready to be claimed by `target_role`.
 - `in_progress`: Claimed by an agent profile.
 - `finished`: Completed with closure evidence.
@@ -198,6 +219,10 @@ depends_on_job_id=HO-2026-06-02-001
 Promotion rule:
 
 - A `blocked` job is promoted only when every `depends_on_job_id` is `finished`.
+- If any required upstream job is `cancelled`, Baton recursively changes its blocked dependents to `cancelled`.
+- Each propagated transition records one `dependency_cancelled` handoff event with the immediate upstream job as its cause.
+- A new handoff registered with an already-cancelled dependency starts as `cancelled`, not `blocked`.
+- `promote-ready` also reconciles older database records that still contain a blocked job behind a cancelled dependency.
 
 ## `handoff_events`
 

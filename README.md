@@ -55,7 +55,7 @@ SM setup checklist:
 
 ```bash
 bin/baton init
-bin/baton update
+bin/baton migrate
 bin/baton role list
 bin/baton role permission-list sm
 bin/baton-report summary
@@ -149,12 +149,16 @@ bin/baton role permission-add architecture cr.approve
 bin/baton role permission-add architecture cr.admin
 ```
 
-After upgrading an existing Baton database, run `bin/baton update` to apply idempotent schema updates and seed any newly introduced default roles or permissions such as `cr.admin`.
+After changing the Baton binary or release tag, run `bin/baton migrate` before starting role agents. Migrations are versioned, transactional, and idempotent: existing handoff, CR, event, control, role, and permission rows are preserved. A failed migration is rolled back.
 
 ```bash
-bin/baton update
+bin/baton migrate
 bin/baton role permission-list sm
 ```
+
+Every database-backed `baton` command also applies pending migrations before its own operation. The explicit command is still recommended so migration failure is detected before agents start. `baton-report` is read-only and does not migrate the database.
+
+`baton update` remains a deprecated alias for database migration for compatibility with v0.1.6. Use `migrate`; the `update` name is reserved for a future Baton binary update workflow.
 
 ## Agent Identity
 
@@ -414,6 +418,7 @@ bin/baton-report summary --format json
 ## Wait
 
 `wait` repeatedly promotes ready work and checks the target role queue.
+`next` is a single non-blocking queue check; it is not a wait command. Agents must not stop working merely because `next` reports no ready jobs.
 
 ```bash
 bin/baton wait --role frontend --timeout 900 --interval 3
@@ -430,7 +435,18 @@ Exit behavior:
 - `2`: timeout
 - `3`: stopped by control flag
 
-`--timeout 0` means wait forever, but that should be used only in explicit experiments. Normal workers should repeat bounded waits until their shift expires or a stop control is set.
+Required agent loop:
+
+1. Start or extend the role shift.
+2. Run a bounded `wait`.
+3. On exit `0`, run `next`, claim the returned job, complete it, and report it with `finish`.
+4. On exit `2`, check the shift and immediately start another bounded wait while the shift remains active.
+5. On exit `3`, stop waiting until the role is resumed.
+6. After `finish`, return to step 2 while the shift remains active.
+
+A blocked handoff is not returned by `next`. `wait` keeps checking its required upstream jobs and returns after the handoff is promoted to `open`. If a required upstream handoff is cancelled, Baton recursively marks its blocked dependents as `cancelled`; they will never be promoted.
+
+`--timeout 0` means wait forever, but that should be used only in explicit experiments. Normal workers must repeat bounded waits until their shift expires or a stop control is set.
 
 `cr wait-review` uses the same stop/resume controls and exit codes, but checks submitted CRs assigned to the reviewer role instead of handoff jobs.
 

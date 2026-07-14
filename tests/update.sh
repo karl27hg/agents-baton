@@ -23,10 +23,11 @@ if "$CLI" --db "$DB" role permission-list sm | grep "cr.admin" >/dev/null; then
   exit 1
 fi
 
-"$CLI" --db "$DB" update | grep "Updated" >/dev/null
+"$CLI" --db "$DB" update 2>"$TMP.warning" | grep "Updated" >/dev/null
+grep "deprecated database migration alias" "$TMP.warning" >/dev/null
 "$CLI" --db "$DB" role permission-list sm | grep "cr.admin" >/dev/null
 
-"$CLI" --db "$DB" update | grep "Updated" >/dev/null
+"$CLI" --db "$DB" update 2>/dev/null | grep "Updated" >/dev/null
 "$CLI" --db "$DB" role permission-list sm | grep "cr.admin" >/dev/null
 
 echo "OK update db=$DB"

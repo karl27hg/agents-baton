@@ -37,6 +37,11 @@ REVIEW_PERMISSIONS = {
     "cr.assign_implementation",
     "cr.mark_implemented",
 }
+LATEST_SCHEMA_VERSION = 1
+
+
+class MigrationError(RuntimeError):
+    pass
 
 
 def utc_now() -> str:
@@ -144,11 +149,7 @@ def claimed_by_value(args: argparse.Namespace, role: str) -> str:
     return stored or role
 
 
-def init_schema(con: sqlite3.Connection) -> None:
-    con.executescript(
-        """
-        PRAGMA journal_mode = WAL;
-
+SCHEMA_V1_SQL = """
         create table if not exists roles (
           role_id text primary key,
           display_name text not null,
@@ -254,10 +255,134 @@ def init_schema(con: sqlite3.Connection) -> None:
         create index if not exists idx_cr_status_reviewer on change_requests(status, reviewer_role);
         create index if not exists idx_cr_handoffs_cr on cr_handoffs(cr_id);
         """
-    )
+
+
+def execute_sql_script(con: sqlite3.Connection, script: str) -> None:
+    statement_lines: list[str] = []
+    for line in script.splitlines():
+        statement_lines.append(line)
+        statement = "\n".join(statement_lines).strip()
+        if statement and sqlite3.complete_statement(statement):
+            con.execute(statement)
+            statement_lines = []
+    if "\n".join(statement_lines).strip():
+        raise MigrationError("incomplete schema migration SQL")
+
+
+def migration_v1_initial_schema(con: sqlite3.Connection) -> None:
+    execute_sql_script(con, SCHEMA_V1_SQL)
     columns = {row["name"] for row in con.execute("PRAGMA table_info(handoff_controls)").fetchall()}
     if "work_until" not in columns:
         con.execute("alter table handoff_controls add column work_until text")
+
+
+MIGRATIONS = (
+    (1, "initial_schema", migration_v1_initial_schema),
+)
+
+
+def migration_table_exists(con: sqlite3.Connection) -> bool:
+    return bool(
+        con.execute(
+            "select 1 from sqlite_master where type = 'table' and name = 'schema_migrations'"
+        ).fetchone()
+    )
+
+
+def current_schema_version(con: sqlite3.Connection) -> int:
+    if not migration_table_exists(con):
+        return 0
+    row = con.execute("select coalesce(max(version), 0) as version from schema_migrations").fetchone()
+    return int(row["version"])
+
+
+def validate_database(con: sqlite3.Connection) -> None:
+    quick_check = con.execute("PRAGMA quick_check").fetchone()
+    if not quick_check or quick_check[0] != "ok":
+        detail = quick_check[0] if quick_check else "no result"
+        raise MigrationError(f"database integrity check failed: {detail}")
+    foreign_key_error = con.execute("PRAGMA foreign_key_check").fetchone()
+    if foreign_key_error:
+        raise MigrationError(
+            "database foreign key check failed: "
+            f"table={foreign_key_error[0]} rowid={foreign_key_error[1]}"
+        )
+
+
+def migrate_schema(con: sqlite3.Connection) -> tuple[int, int, list[str]]:
+    previous_version = current_schema_version(con)
+    defined_versions = [version for version, _, _ in MIGRATIONS]
+    if defined_versions != list(range(1, LATEST_SCHEMA_VERSION + 1)):
+        raise MigrationError(
+            "invalid Baton migration definitions: "
+            f"expected 1..{LATEST_SCHEMA_VERSION}, got {defined_versions}"
+        )
+    if previous_version > LATEST_SCHEMA_VERSION:
+        raise MigrationError(
+            "database schema is newer than this Baton version: "
+            f"schema={previous_version} latest={LATEST_SCHEMA_VERSION}"
+        )
+    con.execute("PRAGMA journal_mode = WAL")
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        con.execute(
+            """
+            create table if not exists schema_migrations (
+              version integer primary key,
+              name text not null,
+              applied_at text not null
+            )
+            """
+        )
+        applied_rows = con.execute(
+            "select version, name from schema_migrations order by version"
+        ).fetchall()
+        applied_versions = {int(row["version"]) for row in applied_rows}
+        known_migrations = {version: name for version, name, _ in MIGRATIONS}
+        known_versions = set(known_migrations)
+        unknown_versions = sorted(applied_versions - known_versions)
+        if unknown_versions:
+            raise MigrationError(
+                "database schema is newer than this Baton version: "
+                f"unknown migration versions {unknown_versions}"
+            )
+        mismatched_names = [
+            f"{row['version']}:{row['name']}"
+            for row in applied_rows
+            if row["name"] != known_migrations[int(row["version"])]
+        ]
+        if mismatched_names:
+            raise MigrationError(
+                "database migration history does not match this Baton version: "
+                f"{mismatched_names}"
+            )
+
+        applied_names: list[str] = []
+        for version, name, migration in MIGRATIONS:
+            if version in applied_versions:
+                continue
+            migration(con)
+            con.execute(
+                "insert into schema_migrations(version, name, applied_at) values (?, ?, ?)",
+                (version, name, utc_now()),
+            )
+            applied_names.append(f"{version}:{name}")
+
+        seed_roles(con)
+        seed_role_permissions(con)
+        validate_database(con)
+        con.commit()
+    except BaseException as exc:
+        con.rollback()
+        if isinstance(exc, sqlite3.DatabaseError):
+            raise MigrationError(f"database migration failed: {exc}") from exc
+        raise
+    return previous_version, LATEST_SCHEMA_VERSION, applied_names
+
+
+def init_schema(con: sqlite3.Connection) -> None:
+    if current_schema_version(con) != LATEST_SCHEMA_VERSION:
+        migrate_schema(con)
 
 
 def seed_roles(con: sqlite3.Connection) -> None:
@@ -306,6 +431,79 @@ def event(
         """,
         (job_id, event_type, actor_role, actor_id, from_status, to_status, message, utc_now()),
     )
+
+
+def cancel_blocked_dependents(
+    con: sqlite3.Connection,
+    upstream_job_id: str,
+    actor_role: str,
+) -> list[str]:
+    pending = [upstream_job_id]
+    cancelled: list[str] = []
+    while pending:
+        current_upstream_id = pending.pop(0)
+        dependents = con.execute(
+            """
+            select j.job_id
+            from handoff_dependencies d
+            join handoff_jobs j on j.job_id = d.job_id
+            where d.depends_on_job_id = ? and j.status = 'blocked'
+            order by j.created_at, j.job_id
+            """,
+            (current_upstream_id,),
+        ).fetchall()
+        for dependent in dependents:
+            dependent_job_id = dependent["job_id"]
+            changed = con.execute(
+                """
+                update handoff_jobs
+                set status = 'cancelled'
+                where job_id = ? and status = 'blocked'
+                """,
+                (dependent_job_id,),
+            ).rowcount
+            if changed != 1:
+                continue
+            event(
+                con,
+                "dependency_cancelled",
+                job_id=dependent_job_id,
+                actor_role=actor_role,
+                from_status="blocked",
+                to_status="cancelled",
+                message=f"Dependency {current_upstream_id} was cancelled.",
+            )
+            cancelled.append(dependent_job_id)
+            pending.append(dependent_job_id)
+    return cancelled
+
+
+def cancel_handoff_with_dependents(
+    con: sqlite3.Connection,
+    job_id: str,
+    actor_role: str,
+    message: str,
+) -> list[str]:
+    row = con.execute(
+        "select status from handoff_jobs where job_id = ?",
+        (job_id,),
+    ).fetchone()
+    if not row or row["status"] in {"finished", "cancelled"}:
+        return []
+    con.execute(
+        "update handoff_jobs set status = 'cancelled' where job_id = ?",
+        (job_id,),
+    )
+    event(
+        con,
+        "cancelled",
+        job_id=job_id,
+        actor_role=actor_role,
+        from_status=row["status"],
+        to_status="cancelled",
+        message=message,
+    )
+    return [job_id, *cancel_blocked_dependents(con, job_id, actor_role)]
 
 
 def cr_event(
@@ -506,26 +704,30 @@ def set_shift_until(con: sqlite3.Connection, scope: str, work_until: str, reason
     )
 
 
-def apply_schema_updates(con: sqlite3.Connection) -> None:
-    init_schema(con)
-    begin_immediate(con)
-    seed_roles(con)
-    seed_role_permissions(con)
-
-
 def command_init(args: argparse.Namespace) -> int:
     with connect(args.db) as con:
-        apply_schema_updates(con)
-        con.commit()
+        migrate_schema(con)
     print(f"Initialized {args.db}")
     return 0
 
 
-def command_update(args: argparse.Namespace) -> int:
+def command_migrate(args: argparse.Namespace) -> int:
     with connect(args.db) as con:
-        apply_schema_updates(con)
-        con.commit()
-    print(f"Updated {args.db}")
+        previous, current, applied = migrate_schema(con)
+    applied_text = ",".join(applied) if applied else "none"
+    print(f"Migrated {args.db} schema={previous}->{current} applied={applied_text}")
+    return 0
+
+
+def command_update(args: argparse.Namespace) -> int:
+    print(
+        "WARNING: 'baton update' is a deprecated database migration alias; use 'baton migrate'.",
+        file=sys.stderr,
+    )
+    with connect(args.db) as con:
+        previous, current, applied = migrate_schema(con)
+    applied_text = ",".join(applied) if applied else "none"
+    print(f"Updated {args.db} schema={previous}->{current} applied={applied_text}")
     return 0
 
 
@@ -652,11 +854,20 @@ def create_handoff_job(
     actor_role: str,
 ) -> tuple[str, str, str]:
     target_role = resolve_role(con, role)
+    dependency_statuses: dict[str, str] = {}
     for dep in depends_on:
-        if not con.execute("select 1 from handoff_jobs where job_id = ?", (dep,)).fetchone():
+        dependency = con.execute(
+            "select status from handoff_jobs where job_id = ?",
+            (dep,),
+        ).fetchone()
+        if not dependency:
             raise SystemExit(f"ERROR: dependency does not exist: {dep}")
+        dependency_statuses[dep] = dependency["status"]
     job_id = next_job_id(con)
-    status = "blocked" if depends_on else "open"
+    cancelled_dependencies = [
+        dep for dep, dependency_status in dependency_statuses.items() if dependency_status == "cancelled"
+    ]
+    status = "cancelled" if cancelled_dependencies else ("blocked" if depends_on else "open")
     con.execute(
         """
         insert into handoff_jobs(job_id, title, status, target_role, source_ref, objective, exit_criteria, created_at)
@@ -669,7 +880,10 @@ def create_handoff_job(
             "insert into handoff_dependencies(job_id, depends_on_job_id) values (?, ?)",
             (job_id, dep),
         )
-    event(con, "registered", job_id=job_id, actor_role=actor_role, to_status=status)
+    message = ""
+    if cancelled_dependencies:
+        message = f"Cancelled dependencies: {', '.join(cancelled_dependencies)}"
+    event(con, "registered", job_id=job_id, actor_role=actor_role, to_status=status, message=message)
     return job_id, status, target_role
 
 
@@ -931,18 +1145,11 @@ def command_cr_cancel(args: argparse.Namespace) -> int:
                 (active_revision_job_id,),
             ).fetchone()
             if job and job["status"] not in {"finished", "cancelled"}:
-                con.execute(
-                    "update handoff_jobs set status = 'cancelled' where job_id = ?",
-                    (active_revision_job_id,),
-                )
-                event(
+                cancel_handoff_with_dependents(
                     con,
-                    "cancelled",
-                    job_id=active_revision_job_id,
-                    actor_role=actor_role,
-                    from_status=job["status"],
-                    to_status="cancelled",
-                    message=f"CR {args.cr_id} cancelled: {reason}",
+                    active_revision_job_id,
+                    actor_role,
+                    f"CR {args.cr_id} cancelled: {reason}",
                 )
         cr_event(
             con,
@@ -1196,6 +1403,19 @@ def command_promote_ready(args: argparse.Namespace) -> int:
     with connect(args.db) as con:
         init_schema(con)
         begin_immediate(con)
+        cancelled_upstreams = con.execute(
+            """
+            select distinct dep.job_id
+            from handoff_jobs dep
+            join handoff_dependencies d on d.depends_on_job_id = dep.job_id
+            join handoff_jobs child on child.job_id = d.job_id
+            where dep.status = 'cancelled' and child.status = 'blocked'
+            order by dep.created_at, dep.job_id
+            """
+        ).fetchall()
+        cancelled: list[str] = []
+        for upstream in cancelled_upstreams:
+            cancelled.extend(cancel_blocked_dependents(con, upstream["job_id"], args.actor_role))
         rows = con.execute(
             """
             select j.job_id
@@ -1218,9 +1438,11 @@ def command_promote_ready(args: argparse.Namespace) -> int:
             con.execute("update handoff_jobs set status = 'open' where job_id = ?", (row["job_id"],))
             event(con, "promoted", job_id=row["job_id"], actor_role=args.actor_role, from_status="blocked", to_status="open")
         con.commit()
+    for job_id in cancelled:
+        print(f"CANCELLED {job_id}")
     for row in rows:
         print(f"PROMOTED {row['job_id']}")
-    print(f"Summary: promoted={len(rows)}")
+    print(f"Summary: cancelled={len(cancelled)} promoted={len(rows)}")
     return 0
 
 
@@ -1432,6 +1654,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("init").set_defaults(func=command_init)
+    sub.add_parser("migrate").set_defaults(func=command_migrate)
     sub.add_parser("update").set_defaults(func=command_update)
     sub.add_parser("status").set_defaults(func=command_status)
     sub.add_parser("promote-ready").set_defaults(func=command_promote_ready, actor_role="sm")
@@ -1633,7 +1856,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-    return args.func(args)
+    try:
+        return args.func(args)
+    except MigrationError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.2.0
+
+- Added versioned, transactional database migrations through `baton migrate`.
+- Preserved `baton update` as a deprecated migration alias for v0.1.6 compatibility.
+- Added data-preservation, idempotency, newer-schema rejection, and rollback regression coverage.
+- Cancelled blocked handoffs recursively when a required upstream handoff is cancelled.
+- Added dependency wait, promotion, and cancellation cascade regression coverage.
+- Clarified the required bounded-wait loop for role agents.
+
 ## v0.1.6
 
 - Added `baton update` as an explicit idempotent database upgrade command.

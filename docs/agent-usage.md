@@ -191,7 +191,11 @@ bin/baton --db /tmp/baton.sqlite3 wait --role frontend --timeout 900 --interval 
 bin/baton --db /tmp/baton.sqlite3 cr wait-review --role sm --timeout 900 --interval 3
 ```
 
-Avoid `--timeout 0` unless the user explicitly asks for a forever-wait experiment. For normal worker operation, repeat bounded waits while the role shift is active.
+`next` checks the queue once and exits immediately; it does not wait. If no ready handoff exists, run `wait`. A blocked handoff becomes visible after all required upstream handoffs finish and `wait` promotes it to `open`.
+
+Avoid `--timeout 0` unless the user explicitly asks for a forever-wait experiment. For normal worker operation, repeat bounded waits while the role shift is active. Exit code `2` is only a timeout: check the shift and enter another bounded wait. After finishing a claimed job, re-enter the same wait loop while the shift remains active.
+
+If a required upstream handoff is cancelled, Baton recursively cancels blocked dependent handoffs. Cancelled handoffs do not become ready and must not be reopened by agents.
 
 `--interval` controls the polling sleep between checks. It defaults to 3 seconds and must be at least 1 second.
 

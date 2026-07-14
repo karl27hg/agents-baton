@@ -8,6 +8,7 @@
 
 테이블:
 
+- `schema_migrations`: 순서가 보장되는 DB migration 이력
 - `roles`: 표준 role 정의
 - `role_aliases`: 표준 role로 변환되는 별칭
 - `role_permissions`: role에 부여된 workflow 권한
@@ -20,6 +21,26 @@
 - `cr_handoffs`: CR과 revision/implementation handoff 연결
 
 상태를 변경하는 CLI 명령은 `BEGIN IMMEDIATE` transaction을 사용해 write 작업을 직렬화합니다.
+
+## `schema_migrations`
+
+용도:
+
+- 적용된 DB migration을 정확히 한 번씩 기록합니다.
+- 버전 정보가 없는 기존 Baton DB의 workflow record를 삭제하지 않고 현재 schema로 전환합니다.
+- 구버전 Baton binary가 더 새로운 schema의 DB를 변경하지 못하게 합니다.
+
+컬럼:
+
+| 컬럼 | 타입 | 필수 | 용도 |
+| --- | --- | --- | --- |
+| `version` | `integer primary key` | 예 | 순서대로 증가하는 migration version입니다. |
+| `name` | `text` | 예 | 변경되지 않는 migration 이름입니다. |
+| `applied_at` | `text` | 예 | migration이 commit된 UTC 시각입니다. |
+
+`baton migrate`는 pending migration, 기본 seed 보강, `PRAGMA quick_check`, `PRAGMA foreign_key_check`를 하나의 transaction에서 실행합니다. 실패하면 schema 변경, seed 변경, migration record가 함께 rollback됩니다.
+
+앞으로 schema를 변경할 때는 새 migration을 추가하고 `LATEST_SCHEMA_VERSION`을 증가시켜야 합니다. 이미 release된 migration을 직접 수정하면 안 됩니다.
 
 ## `roles`
 
@@ -149,7 +170,7 @@ cancelled
 
 상태 의미:
 
-- `blocked`: 의존성 또는 수동 blocker 때문에 아직 실행할 수 없습니다.
+- `blocked`: 필수 upstream job이 완료되기를 기다리는 상태입니다.
 - `open`: `target_role`이 claim할 수 있는 ready 상태입니다.
 - `in_progress`: agent profile이 claim한 상태입니다.
 - `finished`: closure evidence와 함께 완료된 상태입니다.
@@ -198,6 +219,10 @@ depends_on_job_id=HO-2026-06-02-001
 승격 규칙:
 
 - `blocked` job은 모든 `depends_on_job_id`가 `finished` 상태일 때만 `open`으로 승격됩니다.
+- 필수 upstream job 중 하나라도 `cancelled`가 되면 Baton은 이를 기다리는 blocked job을 재귀적으로 `cancelled`로 변경합니다.
+- 전파된 각 상태 변경에는 직접적인 upstream job을 원인으로 기록한 `dependency_cancelled` handoff event가 한 번 남습니다.
+- 이미 취소된 dependency를 지정해 새 handoff를 등록하면 `blocked`가 아니라 즉시 `cancelled` 상태로 생성됩니다.
+- `promote-ready`는 취소된 dependency 뒤에 blocked job이 남아 있는 이전 DB record도 함께 정리합니다.
 
 ## `handoff_events`
 

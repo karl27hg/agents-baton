@@ -33,11 +33,14 @@ If several agents share the same workspace, do not let them unintentionally shar
 ## Waiting Rules
 
 - Use bounded waits by default.
+- `next` is a one-time non-blocking inspection command. It is not a substitute for `wait`.
+- If `next` reports no ready job, enter `wait` instead of ending the agent task.
+- A blocked handoff remains inside Baton until its dependencies finish; `wait` will detect its promotion to `open`.
 - Do not send periodic waiting updates while `baton wait` is running.
 - Report only when `wait` returns, times out, or is stopped.
 - Avoid `--timeout 0` unless the user explicitly asks for a forever-wait experiment.
 - Keep `--interval` at 1 second or higher; the default is 3 seconds.
-- Keep repeating bounded waits while the shift is active.
+- Keep repeating bounded waits while the shift is active. A timeout is not completion.
 
 Recommended command:
 
@@ -54,7 +57,7 @@ bin/baton --db <db> cr wait-review --role <role> --timeout 900 --interval 3
 Exit handling:
 
 - `0`: A ready job exists. Re-check with `next` before claiming.
-- `2`: Timeout. Briefly report the timeout, check shift status, and start another bounded wait if the shift is still active.
+- `2`: Timeout. Check shift status and immediately start another bounded wait if the shift is still active.
 - `3`: Stopped. Report stopped once and do not retry until resumed.
 
 Shift handling:
@@ -88,7 +91,7 @@ The CLI uses identity in this order:
 
 The resolved identity should be a stable profile name whenever possible.
 
-If claim fails, do not work on the job. Re-check with `next` or exit.
+If claim fails, do not work on the job. Re-check with `next`, then return to bounded `wait` while the shift remains active.
 
 ## Work Rules
 
@@ -96,6 +99,7 @@ If claim fails, do not work on the job. Re-check with `next` or exit.
 - Work only on the claimed handoff.
 - Do not claim work for another role unless the user explicitly authorizes it.
 - Do not treat stop/resume as job cancellation.
+- If a required upstream handoff is cancelled, Baton recursively cancels blocked dependent handoffs. Do not attempt to claim or reopen them.
 - If a revision handoff asks you to improve a CR, edit the CR Markdown body and use `cr resubmit`; `finish` alone does not change CR state.
 
 ## CR Review Rules
