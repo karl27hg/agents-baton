@@ -38,7 +38,16 @@
 | `name` | `text` | 예 | 변경되지 않는 migration 이름입니다. |
 | `applied_at` | `text` | 예 | migration이 commit된 UTC 시각입니다. |
 
-`baton migrate`는 pending migration, 기본 seed 보강, `PRAGMA quick_check`, `PRAGMA foreign_key_check`를 하나의 transaction에서 실행합니다. 실패하면 schema 변경, seed 변경, migration record가 함께 rollback됩니다.
+`baton migrate`는 pending migration, 해당되는 seed 보강, `PRAGMA quick_check`, `PRAGMA foreign_key_check`를 하나의 transaction에서 실행합니다. 실패하면 schema 변경, seed 변경, migration record가 함께 rollback됩니다. 전체 기본 권한은 신규 또는 무버전 DB에만 seed하며, 이후 migration은 그 migration에서 새로 도입한 권한만 추가하므로 프로젝트별 권한 철회가 보존됩니다.
+
+Release된 migration:
+
+```text
+1 initial_schema
+2 handoff_cancel_permission
+```
+
+`baton migrate --check`는 DB가 현재 binary가 아는 최신 schema version인지 읽기 전용으로 확인합니다.
 
 앞으로 schema를 변경할 때는 새 migration을 추가하고 `LATEST_SCHEMA_VERSION`을 증가시켜야 합니다. 이미 release된 migration을 직접 수정하면 안 됩니다.
 
@@ -101,7 +110,7 @@ alias=fe, role_id=frontend
 
 - role identity와 workflow action 권한을 분리해서 저장합니다.
 - handoff 소유권 규칙을 바꾸지 않고 reviewer role을 설정할 수 있게 합니다.
-- CR 심사 권한과 구현 handoff를 claim할 수 있는 능력을 분리합니다.
+- 심사 및 관리 권한과 구현 handoff를 claim할 수 있는 능력을 분리합니다.
 
 컬럼:
 
@@ -118,9 +127,9 @@ Primary key:
 
 Seed 권한:
 
-- `init` 시 `sm`은 모든 CR 권한을 받습니다.
+- `init` 또는 migration 시 `sm`은 모든 CR 권한과 `handoff.cancel`을 받습니다.
 
-알려진 CR 권한:
+알려진 권한:
 
 ```text
 cr.admin
@@ -130,7 +139,10 @@ cr.approve
 cr.reject
 cr.assign_implementation
 cr.mark_implemented
+handoff.cancel
 ```
+
+권한 부여와 철회는 `role permission-add`, `role permission-remove`를 사용합니다. 권한 철회는 프로젝트 정책 결정으로 취급하며, 반복 migration은 전체 기본 권한 집합을 다시 복원하지 않습니다.
 
 ## `handoff_jobs`
 
@@ -175,6 +187,8 @@ cancelled
 - `in_progress`: agent profile이 claim한 상태입니다.
 - `finished`: closure evidence와 함께 완료된 상태입니다.
 - `cancelled`: 단순 pause가 아니라 job 자체가 의도적으로 취소된 상태입니다.
+
+권한이 있는 `cancel` 명령은 선택한 `blocked`, `open`, `in_progress` job을 `cancelled`로 바꾸고, 그 job에 의존하는 `blocked` 하위 job만 재귀적으로 취소합니다. 관련 없는 queue branch는 변경하지 않습니다. `finished`와 이미 `cancelled`인 job에는 적용할 수 없습니다.
 
 최소 ready job 예:
 
@@ -223,6 +237,7 @@ depends_on_job_id=HO-2026-06-02-001
 - 전파된 각 상태 변경에는 직접적인 upstream job을 원인으로 기록한 `dependency_cancelled` handoff event가 한 번 남습니다.
 - 이미 취소된 dependency를 지정해 새 handoff를 등록하면 `blocked`가 아니라 즉시 `cancelled` 상태로 생성됩니다.
 - `promote-ready`는 취소된 dependency 뒤에 blocked job이 남아 있는 이전 DB record도 함께 정리합니다.
+- 독립 job과 관련 없는 dependency branch는 이 전파로 취소되지 않습니다.
 
 ## `handoff_events`
 
@@ -252,10 +267,13 @@ depends_on_job_id=HO-2026-06-02-001
 role_added
 role_alias_added
 role_permission_added
+role_permission_removed
 registered
 claimed
 finished
 promoted
+cancelled
+dependency_cancelled
 control_stopped
 control_resumed
 shift_started

@@ -38,7 +38,16 @@ Columns:
 | `name` | `text` | yes | Stable migration name. |
 | `applied_at` | `text` | yes | UTC timestamp when the migration committed. |
 
-`baton migrate` runs pending migrations, default seed updates, `PRAGMA quick_check`, and `PRAGMA foreign_key_check` in one transaction. Any failure rolls back schema changes, seed changes, and migration records together.
+`baton migrate` runs pending migrations, applicable seed updates, `PRAGMA quick_check`, and `PRAGMA foreign_key_check` in one transaction. Any failure rolls back schema changes, seed changes, and migration records together. Full default permissions are seeded only for a new or unversioned database; later migrations add only permissions introduced by that migration, preserving project-specific revocations.
+
+Released migrations:
+
+```text
+1 initial_schema
+2 handoff_cancel_permission
+```
+
+`baton migrate --check` performs a read-only check that the database is at the latest known schema version.
 
 Future schema changes must append a new migration and increment `LATEST_SCHEMA_VERSION`. Never change an already-released migration in place.
 
@@ -101,7 +110,7 @@ Purpose:
 
 - Stores workflow action permissions separately from role identity.
 - Allows reviewer roles to be configured without changing handoff ownership rules.
-- Keeps CR review authority distinct from the ability to claim implementation handoffs.
+- Keeps review and administrative authority distinct from the ability to claim implementation handoffs.
 
 Columns:
 
@@ -118,9 +127,9 @@ Primary key:
 
 Seed permissions:
 
-- `sm` receives all CR permissions on `init`.
+- `sm` receives all CR permissions and `handoff.cancel` on `init` or migration.
 
-Known CR permissions:
+Known permissions:
 
 ```text
 cr.admin
@@ -130,7 +139,10 @@ cr.approve
 cr.reject
 cr.assign_implementation
 cr.mark_implemented
+handoff.cancel
 ```
+
+Use `role permission-add` and `role permission-remove` to manage grants. Removing a permission is an explicit project policy decision and repeated migrations do not restore the full default permission set.
 
 ## `handoff_jobs`
 
@@ -175,6 +187,8 @@ Status meaning:
 - `in_progress`: Claimed by an agent profile.
 - `finished`: Completed with closure evidence.
 - `cancelled`: Intentionally stopped as a job, not merely paused.
+
+An authorized `cancel` operation changes a selected `blocked`, `open`, or `in_progress` job to `cancelled`. It then recursively cancels only blocked dependency descendants. Unrelated queue branches are unchanged. `finished` and already-`cancelled` jobs are terminal for this operation.
 
 Minimal ready job example:
 
@@ -223,6 +237,7 @@ Promotion rule:
 - Each propagated transition records one `dependency_cancelled` handoff event with the immediate upstream job as its cause.
 - A new handoff registered with an already-cancelled dependency starts as `cancelled`, not `blocked`.
 - `promote-ready` also reconciles older database records that still contain a blocked job behind a cancelled dependency.
+- Independent jobs and dependency branches are never cancelled by this propagation.
 
 ## `handoff_events`
 
@@ -252,10 +267,13 @@ Current event types:
 role_added
 role_alias_added
 role_permission_added
+role_permission_removed
 registered
 claimed
 finished
 promoted
+cancelled
+dependency_cancelled
 control_stopped
 control_resumed
 shift_started

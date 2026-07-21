@@ -29,7 +29,7 @@ Recommended options:
 - Git clone plus tag checkout: acceptable for local-only use, but the consuming project will not record the expected Baton revision unless you document it separately.
 - Release archive download: useful for one-off installation, but harder to update consistently than a submodule.
 
-Plain `git clone` is fine for experimentation. For stable use across projects, use a tag such as `v0.2.0` and update intentionally when a new Baton release is chosen.
+Plain `git clone` is fine for experimentation. For stable use across projects, use a tag such as `v0.3.0` and update intentionally when a new Baton release is chosen.
 
 ## Add Baton As A Submodule
 
@@ -44,7 +44,7 @@ Pin to a release tag:
 
 ```bash
 cd tools/baton
-git checkout v0.2.0
+git checkout v0.3.0
 cd ../..
 git add tools/baton
 git commit -m "Add Baton workflow tool"
@@ -54,6 +54,8 @@ Run Baton from the consuming project root:
 
 ```bash
 tools/baton/bin/baton init
+tools/baton/bin/baton migrate --check
+tools/baton/bin/baton --version
 tools/baton/bin/baton role list
 tools/baton/bin/baton shift start --role frontend
 tools/baton/bin/baton wait --role frontend
@@ -82,7 +84,7 @@ For stable use, check out a release tag after cloning:
 ```bash
 cd tools/baton
 git fetch --tags
-git checkout v0.2.0
+git checkout v0.3.0
 ```
 
 Record the selected version in the consuming project's documentation or onboarding notes.
@@ -148,6 +150,9 @@ Use `tools/baton/bin/baton` for role handoff and CR workflow state.
 - Finish already-claimed work even if the shift expires.
 - Do not create CRs with the same author and reviewer role.
 - Ask an SM/admin role to use `cr reassign-reviewer` or `cr cancel` for stuck legacy CRs.
+- Configure least privilege with `role permission-add` and `role permission-remove`; do not edit permission rows directly.
+- Use handoff `cancel` only with explicit user/SM intent and a role granted `handoff.cancel`.
+- Handoff cancellation affects only the selected job and its blocked dependency descendants; unrelated queues remain active.
 - Keep CR Markdown files under `docs/change-requests/` unless the user specifies another path.
 ```
 
@@ -173,7 +178,7 @@ Do not use repeated next commands as a substitute for wait, and do not stop when
 Exit 2 means only that the bounded wait timed out: check the shift and run wait again while it remains active.
 When work appears, re-check with next, claim it, complete only the claimed task, then finish it with concrete evidence.
 After finish, return to bounded wait while the shift remains active.
-Blocked handoffs are promoted automatically after their dependencies finish. Cancelled dependency chains will not become ready.
+Blocked handoffs are promoted automatically after their dependencies finish. Cancelled dependency branches will not become ready, while unrelated queue branches remain active.
 Do not edit Baton SQLite records directly.
 ```
 
@@ -245,10 +250,10 @@ When using a submodule:
 ```bash
 cd tools/baton
 git fetch --tags
-git checkout v0.2.0
+git checkout <new-version>
 cd ../..
 git add tools/baton
-git commit -m "Update Baton to v0.2.0"
+git commit -m "Update Baton to <new-version>"
 ```
 
 When using a plain clone:
@@ -256,21 +261,23 @@ When using a plain clone:
 ```bash
 cd tools/baton
 git fetch --tags
-git checkout v0.2.0
+git checkout <new-version>
 ```
 
 After changing Baton versions, run the database migration command from the consuming project root before starting agents:
 
 ```bash
 tools/baton/bin/baton migrate
+tools/baton/bin/baton migrate --check
+tools/baton/bin/baton --version
 tools/baton/bin/baton role permission-list sm
 ```
 
-`migrate` applies pending migrations in one transaction, records them in `schema_migrations`, validates database and foreign-key integrity, and seeds newly introduced default roles or permissions. It does not rewrite existing handoff, CR, event, control, role, or permission content. Re-running it is safe.
+`migrate` applies pending migrations in one transaction, records them in `schema_migrations`, validates database and foreign-key integrity, and seeds newly introduced default roles or permissions. It does not rewrite existing handoff, CR, event, control, role, or permission content. Permissions removed with `role permission-remove` remain revoked across later migrations unless a migration explicitly introduces that same permission as a new default. Re-running `migrate` is safe.
 
 If migration fails, Baton rolls back the transaction and leaves the previous database records in place. A Baton binary also refuses to open a database containing migration versions it does not recognize, which prevents an older checkout from modifying a newer database.
 
-Database-backed `baton` commands apply pending migrations automatically, but run `migrate` explicitly during an upgrade so failures are found before role agents start. `baton-report` is read-only and requires the migration to be completed first.
+Database-backed `baton` commands apply pending migrations automatically, but run `migrate` explicitly during an upgrade so failures are found before role agents start. `migrate --check` is read-only and verifies that no migrations remain pending. `baton-report` is read-only and requires the migration to be completed first.
 
 The old `update` command remains a deprecated migration alias for v0.1.6 compatibility. New scripts must use `migrate`.
 

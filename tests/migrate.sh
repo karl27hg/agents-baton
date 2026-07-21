@@ -80,13 +80,14 @@ with sqlite3.connect(sys.argv[1]) as con:
 PY
 
 BEFORE="$(snapshot_workflow_data "$DB")"
-"$CLI" --db "$DB" migrate | grep 'schema=0->1 applied=1:initial_schema' >/dev/null
+"$CLI" --db "$DB" migrate | grep 'schema=0->2 applied=1:initial_schema,2:handoff_cancel_permission' >/dev/null
 AFTER="$(snapshot_workflow_data "$DB")"
 if [[ "$BEFORE" != "$AFTER" ]]; then
   echo "ERROR: workflow data changed during migration" >&2
   exit 1
 fi
 "$CLI" --db "$DB" role permission-list sm | grep 'cr.admin' >/dev/null
+"$CLI" --db "$DB" role permission-list sm | grep 'handoff.cancel' >/dev/null
 python3 - "$DB" <<'PY'
 import sqlite3
 import sys
@@ -95,11 +96,15 @@ with sqlite3.connect(sys.argv[1]) as con:
     row = con.execute(
         "select version, name from schema_migrations order by version"
     ).fetchall()
-if row != [(1, "initial_schema")]:
+if row != [(1, "initial_schema"), (2, "handoff_cancel_permission")]:
     raise SystemExit(f"unexpected migration records: {row}")
 PY
 
-"$CLI" --db "$DB" migrate | grep 'schema=1->1 applied=none' >/dev/null
+"$CLI" --db "$DB" migrate | grep 'schema=2->2 applied=none' >/dev/null
+"$CLI" --db "$DB" migrate --check | grep 'schema=2' >/dev/null
+chmod 444 "$DB"
+"$CLI" --db "$DB" migrate --check | grep 'schema=2' >/dev/null
+chmod 644 "$DB"
 if [[ "$(snapshot_workflow_data "$DB")" != "$AFTER" ]]; then
   echo "ERROR: repeated migration changed workflow data" >&2
   exit 1
@@ -139,9 +144,36 @@ import sys
 
 with sqlite3.connect(sys.argv[1]) as con:
     version = con.execute("select max(version) from schema_migrations").fetchone()[0]
-if version != 1:
+if version != 2:
     raise SystemExit(f"automatic migration did not apply: {version}")
 PY
+
+UPGRADE_DB="$TMP/upgrade-v020.sqlite3"
+"$CLI" --db "$UPGRADE_DB" init >/dev/null
+python3 - "$UPGRADE_DB" <<'PY'
+import sqlite3
+import sys
+
+with sqlite3.connect(sys.argv[1]) as con:
+    con.execute("delete from schema_migrations where version = 2")
+    con.execute(
+        "delete from role_permissions where role_id = 'sm' and permission = 'handoff.cancel'"
+    )
+    con.execute(
+        "delete from role_permissions where role_id = 'sm' and permission = 'cr.approve'"
+    )
+PY
+if "$CLI" --db "$UPGRADE_DB" migrate --check >/dev/null 2>&1; then
+  echo "ERROR: migrate --check accepted a pending v0.2.0 database" >&2
+  exit 1
+fi
+"$CLI" --db "$UPGRADE_DB" migrate | grep 'schema=1->2 applied=2:handoff_cancel_permission' >/dev/null
+"$CLI" --db "$UPGRADE_DB" role permission-list sm | grep 'handoff.cancel' >/dev/null
+if "$CLI" --db "$UPGRADE_DB" role permission-list sm | grep 'cr.approve' >/dev/null; then
+  echo "ERROR: migration restored a project-revoked permission" >&2
+  exit 1
+fi
+"$CLI" --db "$UPGRADE_DB" migrate --check | grep 'schema=2' >/dev/null
 
 ROLLBACK_DB="$TMP/rollback.sqlite3"
 python3 - "$ROLLBACK_DB" <<'PY'

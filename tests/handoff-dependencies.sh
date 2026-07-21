@@ -6,6 +6,7 @@ CLI="$ROOT/bin/baton"
 TMP="$(mktemp -d /tmp/baton-handoff-dependencies.XXXXXX)"
 DB="$TMP/wait.sqlite3"
 WAIT_OUT="$TMP/wait.out"
+BLOCKED_OUT="$TMP/blocked-wait.out"
 
 "$CLI" --db "$DB" init >/dev/null
 UPSTREAM="$("$CLI" --db "$DB" register \
@@ -26,11 +27,17 @@ if "$CLI" --db "$DB" next --role frontend >/dev/null 2>&1; then
 fi
 
 set +e
-"$CLI" --db "$DB" wait --role frontend --timeout 1 --interval 1 >/dev/null 2>&1
+"$CLI" --db "$DB" wait --role frontend --timeout 1 --interval 1 >"$BLOCKED_OUT" 2>&1
 WAIT_STATUS="$?"
 set -e
 if [[ "$WAIT_STATUS" -ne 2 ]]; then
   echo "ERROR: expected blocked wait to time out with status 2, got $WAIT_STATUS" >&2
+  exit 1
+fi
+grep "Timed out waiting for role frontend" "$BLOCKED_OUT" >/dev/null
+if grep -E "Summary:|No ready jobs" "$BLOCKED_OUT" >/dev/null; then
+  echo "ERROR: blocked wait emitted periodic polling output" >&2
+  cat "$BLOCKED_OUT" >&2
   exit 1
 fi
 

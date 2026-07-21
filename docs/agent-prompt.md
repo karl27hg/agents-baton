@@ -38,6 +38,7 @@ If several agents share the same workspace, do not let them unintentionally shar
 - A blocked handoff remains inside Baton until its dependencies finish; `wait` will detect its promotion to `open`.
 - Do not send periodic waiting updates while `baton wait` is running.
 - Report only when `wait` returns, times out, or is stopped.
+- No-op polling is silent; normal lack of output does not mean the process is disconnected.
 - Avoid `--timeout 0` unless the user explicitly asks for a forever-wait experiment.
 - Keep `--interval` at 1 second or higher; the default is 3 seconds.
 - Keep repeating bounded waits while the shift is active. A timeout is not completion.
@@ -99,7 +100,8 @@ If claim fails, do not work on the job. Re-check with `next`, then return to bou
 - Work only on the claimed handoff.
 - Do not claim work for another role unless the user explicitly authorizes it.
 - Do not treat stop/resume as job cancellation.
-- If a required upstream handoff is cancelled, Baton recursively cancels blocked dependent handoffs. Do not attempt to claim or reopen them.
+- If a required upstream handoff is cancelled, Baton recursively cancels only blocked handoffs in that dependency branch. Unrelated queue branches remain active. Do not attempt to claim or reopen cancelled jobs.
+- Use `baton cancel` only when the user or SM explicitly decides to cancel work and your role has `handoff.cancel`. Worker agents must not infer cancellation from timeout, stop, or missing work.
 - If a revision handoff asks you to improve a CR, edit the CR Markdown body and use `cr resubmit`; `finish` alone does not change CR state.
 
 ## CR Review Rules

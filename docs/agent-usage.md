@@ -19,10 +19,16 @@ Do not use a test Baton database to operate a live repository handoff queue unle
 
 ```bash
 bin/baton --db /tmp/baton.sqlite3 init
+bin/baton --db /tmp/baton.sqlite3 shift start --role frontend
+bin/baton --db /tmp/baton.sqlite3 wait --role frontend --timeout 900 --interval 3
 bin/baton --db /tmp/baton.sqlite3 next --role frontend
 bin/baton --db /tmp/baton.sqlite3 claim HO-YYYY-MM-DD-001 --role frontend
 bin/baton --db /tmp/baton.sqlite3 finish HO-YYYY-MM-DD-001 --role frontend --evidence "Evidence summary"
+bin/baton --db /tmp/baton.sqlite3 shift status --role frontend
+bin/baton --db /tmp/baton.sqlite3 wait --role frontend --timeout 900 --interval 3
 ```
+
+The final `wait` starts the next work cycle. A timeout is not completion; repeat bounded waits while the shift remains active.
 
 ## Creating Downstream Work
 
@@ -58,15 +64,31 @@ bin/baton --db /tmp/baton.sqlite3 role alias-add cd content-design
 bin/baton --db /tmp/baton.sqlite3 next --role cd
 ```
 
-CR review authority is configured with role permissions. `sm` is seeded with all CR permissions.
+Workflow authority is configured with role permissions. `sm` is seeded with all CR permissions and `handoff.cancel`.
 
 ```bash
 bin/baton --db /tmp/baton.sqlite3 role permission-list sm
 bin/baton --db /tmp/baton.sqlite3 role permission-add architecture cr.review
 bin/baton --db /tmp/baton.sqlite3 role permission-add architecture cr.approve
+bin/baton --db /tmp/baton.sqlite3 role permission-add architecture handoff.cancel
+bin/baton --db /tmp/baton.sqlite3 role permission-remove sm cr.approve
 ```
 
+Use `permission-remove` rather than editing SQLite when project policy revokes a seeded permission. Baton preserves that revocation across later migrations unless a migration explicitly introduces that same permission as a new default.
+
 Do not change active project roles based on Baton results without SM/user approval.
+
+## Handoff Cancellation
+
+Only an administrative role with `handoff.cancel` may cancel a handoff:
+
+```bash
+bin/baton --db /tmp/baton.sqlite3 cancel HO-YYYY-MM-DD-001 \
+  --role sm \
+  --reason "Work is no longer required."
+```
+
+This cancels the selected handoff and recursively cancels only `blocked` descendants that depend on it. Unrelated queue branches remain unchanged. It does not stop wait loops or clear a role queue; that is the purpose of `stop`. Baton rejects cancellation of finished or already-cancelled jobs. Worker agents must not infer cancellation from a wait timeout or stop control.
 
 ## CR Author Flow
 
@@ -193,9 +215,11 @@ bin/baton --db /tmp/baton.sqlite3 cr wait-review --role sm --timeout 900 --inter
 
 `next` checks the queue once and exits immediately; it does not wait. If no ready handoff exists, run `wait`. A blocked handoff becomes visible after all required upstream handoffs finish and `wait` promotes it to `open`.
 
+No-op polling is silent. Output is produced for a ready job, an actual promotion or cancellation, timeout, or stop result.
+
 Avoid `--timeout 0` unless the user explicitly asks for a forever-wait experiment. For normal worker operation, repeat bounded waits while the role shift is active. Exit code `2` is only a timeout: check the shift and enter another bounded wait. After finishing a claimed job, re-enter the same wait loop while the shift remains active.
 
-If a required upstream handoff is cancelled, Baton recursively cancels blocked dependent handoffs. Cancelled handoffs do not become ready and must not be reopened by agents.
+If a required upstream handoff is cancelled, Baton recursively cancels blocked dependent handoffs in that dependency branch. Independent queue branches remain available. Cancelled handoffs do not become ready and must not be reopened by agents.
 
 `--interval` controls the polling sleep between checks. It defaults to 3 seconds and must be at least 1 second.
 

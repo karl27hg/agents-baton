@@ -28,6 +28,7 @@ DEFAULT_ROLES = (
 
 STATUSES = {"blocked", "open", "in_progress", "finished", "cancelled"}
 CR_STATUSES = {"draft", "submitted", "revision_requested", "approved", "rejected", "implemented", "cancelled"}
+BATON_VERSION = "0.3.0"
 REVIEW_PERMISSIONS = {
     "cr.admin",
     "cr.review",
@@ -37,7 +38,11 @@ REVIEW_PERMISSIONS = {
     "cr.assign_implementation",
     "cr.mark_implemented",
 }
-LATEST_SCHEMA_VERSION = 1
+HANDOFF_PERMISSIONS = {
+    "handoff.cancel",
+}
+KNOWN_PERMISSIONS = REVIEW_PERMISSIONS | HANDOFF_PERMISSIONS
+LATEST_SCHEMA_VERSION = 2
 
 
 class MigrationError(RuntimeError):
@@ -104,6 +109,17 @@ def connect(db_path: str) -> sqlite3.Connection:
     if path.parent != Path("."):
         path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(path, timeout=30)
+    con.row_factory = sqlite3.Row
+    con.execute("PRAGMA foreign_keys = ON")
+    con.execute("PRAGMA busy_timeout = 30000")
+    return con
+
+
+def connect_readonly(db_path: str) -> sqlite3.Connection:
+    path = Path(db_path)
+    if not path.exists():
+        raise MigrationError(f"database does not exist: {db_path}")
+    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys = ON")
     con.execute("PRAGMA busy_timeout = 30000")
@@ -276,8 +292,27 @@ def migration_v1_initial_schema(con: sqlite3.Connection) -> None:
         con.execute("alter table handoff_controls add column work_until text")
 
 
+def migration_v2_handoff_cancel_permission(con: sqlite3.Connection) -> None:
+    con.execute(
+        """
+        insert into roles(role_id, display_name, created_at, updated_at)
+        values ('sm', 'System Manager', ?, ?)
+        on conflict(role_id) do nothing
+        """,
+        (utc_now(), utc_now()),
+    )
+    con.execute(
+        """
+        insert into role_permissions(role_id, permission)
+        values ('sm', 'handoff.cancel')
+        on conflict(role_id, permission) do nothing
+        """
+    )
+
+
 MIGRATIONS = (
     (1, "initial_schema", migration_v1_initial_schema),
+    (2, "handoff_cancel_permission", migration_v2_handoff_cancel_permission),
 )
 
 
@@ -309,14 +344,55 @@ def validate_database(con: sqlite3.Connection) -> None:
         )
 
 
-def migrate_schema(con: sqlite3.Connection) -> tuple[int, int, list[str]]:
-    previous_version = current_schema_version(con)
+def validate_migration_definitions() -> None:
     defined_versions = [version for version, _, _ in MIGRATIONS]
     if defined_versions != list(range(1, LATEST_SCHEMA_VERSION + 1)):
         raise MigrationError(
             "invalid Baton migration definitions: "
             f"expected 1..{LATEST_SCHEMA_VERSION}, got {defined_versions}"
         )
+
+
+def applied_migration_versions(con: sqlite3.Connection) -> set[int]:
+    applied_rows = con.execute(
+        "select version, name from schema_migrations order by version"
+    ).fetchall()
+    applied_versions = {int(row["version"]) for row in applied_rows}
+    known_migrations = {version: name for version, name, _ in MIGRATIONS}
+    unknown_versions = sorted(applied_versions - set(known_migrations))
+    if unknown_versions:
+        raise MigrationError(
+            "database schema is newer than this Baton version: "
+            f"unknown migration versions {unknown_versions}"
+        )
+    mismatched_names = [
+        f"{row['version']}:{row['name']}"
+        for row in applied_rows
+        if row["name"] != known_migrations[int(row["version"])]
+    ]
+    if mismatched_names:
+        raise MigrationError(
+            "database migration history does not match this Baton version: "
+            f"{mismatched_names}"
+        )
+    return applied_versions
+
+
+def check_schema(con: sqlite3.Connection) -> int:
+    validate_migration_definitions()
+    current = current_schema_version(con)
+    if current != LATEST_SCHEMA_VERSION:
+        raise MigrationError(
+            f"database migration required: schema={current} latest={LATEST_SCHEMA_VERSION}"
+        )
+    applied_migration_versions(con)
+    validate_database(con)
+    return current
+
+
+def migrate_schema(con: sqlite3.Connection) -> tuple[int, int, list[str]]:
+    previous_version = current_schema_version(con)
+    validate_migration_definitions()
     if previous_version > LATEST_SCHEMA_VERSION:
         raise MigrationError(
             "database schema is newer than this Baton version: "
@@ -334,28 +410,7 @@ def migrate_schema(con: sqlite3.Connection) -> tuple[int, int, list[str]]:
             )
             """
         )
-        applied_rows = con.execute(
-            "select version, name from schema_migrations order by version"
-        ).fetchall()
-        applied_versions = {int(row["version"]) for row in applied_rows}
-        known_migrations = {version: name for version, name, _ in MIGRATIONS}
-        known_versions = set(known_migrations)
-        unknown_versions = sorted(applied_versions - known_versions)
-        if unknown_versions:
-            raise MigrationError(
-                "database schema is newer than this Baton version: "
-                f"unknown migration versions {unknown_versions}"
-            )
-        mismatched_names = [
-            f"{row['version']}:{row['name']}"
-            for row in applied_rows
-            if row["name"] != known_migrations[int(row["version"])]
-        ]
-        if mismatched_names:
-            raise MigrationError(
-                "database migration history does not match this Baton version: "
-                f"{mismatched_names}"
-            )
+        applied_versions = applied_migration_versions(con)
 
         applied_names: list[str] = []
         for version, name, migration in MIGRATIONS:
@@ -369,7 +424,8 @@ def migrate_schema(con: sqlite3.Connection) -> tuple[int, int, list[str]]:
             applied_names.append(f"{version}:{name}")
 
         seed_roles(con)
-        seed_role_permissions(con)
+        if previous_version == 0:
+            seed_role_permissions(con)
         validate_database(con)
         con.commit()
     except BaseException as exc:
@@ -399,7 +455,7 @@ def seed_roles(con: sqlite3.Connection) -> None:
 
 
 def seed_role_permissions(con: sqlite3.Connection) -> None:
-    for permission in REVIEW_PERMISSIONS:
+    for permission in KNOWN_PERMISSIONS:
         con.execute(
             """
             insert into role_permissions(role_id, permission)
@@ -712,6 +768,11 @@ def command_init(args: argparse.Namespace) -> int:
 
 
 def command_migrate(args: argparse.Namespace) -> int:
+    if args.check:
+        with connect_readonly(args.db) as con:
+            current = check_schema(con)
+        print(f"Schema current {args.db} schema={current}")
+        return 0
     with connect(args.db) as con:
         previous, current, applied = migrate_schema(con)
     applied_text = ",".join(applied) if applied else "none"
@@ -801,8 +862,8 @@ def command_role_permission_list(args: argparse.Namespace) -> int:
 
 
 def command_role_permission_add(args: argparse.Namespace) -> int:
-    if args.permission not in REVIEW_PERMISSIONS:
-        known = ", ".join(sorted(REVIEW_PERMISSIONS))
+    if args.permission not in KNOWN_PERMISSIONS:
+        known = ", ".join(sorted(KNOWN_PERMISSIONS))
         raise SystemExit(f"ERROR: unknown permission: {args.permission} (known: {known})")
     with connect(args.db) as con:
         init_schema(con)
@@ -819,6 +880,26 @@ def command_role_permission_add(args: argparse.Namespace) -> int:
         event(con, "role_permission_added", actor_role="sm", message=f"{role_id}:{args.permission}")
         con.commit()
     print(f"Added permission {args.permission} -> {role_id}")
+    return 0
+
+
+def command_role_permission_remove(args: argparse.Namespace) -> int:
+    if args.permission not in KNOWN_PERMISSIONS:
+        known = ", ".join(sorted(KNOWN_PERMISSIONS))
+        raise SystemExit(f"ERROR: unknown permission: {args.permission} (known: {known})")
+    with connect(args.db) as con:
+        init_schema(con)
+        begin_immediate(con)
+        role_id = resolve_role(con, args.role_id)
+        removed = con.execute(
+            "delete from role_permissions where role_id = ? and permission = ?",
+            (role_id, args.permission),
+        ).rowcount
+        if removed != 1:
+            raise SystemExit(f"ERROR: permission is not granted: {role_id}:{args.permission}")
+        event(con, "role_permission_removed", actor_role="sm", message=f"{role_id}:{args.permission}")
+        con.commit()
+    print(f"Removed permission {args.permission} -> {role_id}")
     return 0
 
 
@@ -1331,7 +1412,8 @@ def command_next(args: argparse.Namespace) -> int:
             (role,),
         ).fetchone()
     if not row:
-        print(f"No ready jobs for role {normalize_role(args.role)}.")
+        if not getattr(args, "quiet", False):
+            print(f"No ready jobs for role {normalize_role(args.role)}.")
         return 1
     print(f"{row['job_id']}\t{row['title']}")
     return 0
@@ -1399,6 +1481,35 @@ def command_finish(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_cancel(args: argparse.Namespace) -> int:
+    reason = args.reason.strip()
+    if not reason:
+        raise SystemExit("ERROR: --reason cannot be blank")
+    with connect(args.db) as con:
+        init_schema(con)
+        begin_immediate(con)
+        actor_role = require_permission(con, args.role, "handoff.cancel")
+        row = con.execute(
+            "select status from handoff_jobs where job_id = ?",
+            (args.job_id,),
+        ).fetchone()
+        if not row:
+            raise SystemExit(f"ERROR: unknown job: {args.job_id}")
+        if row["status"] == "finished":
+            raise SystemExit(f"ERROR: finished job cannot be cancelled: {args.job_id}")
+        if row["status"] == "cancelled":
+            raise SystemExit(f"ERROR: job is already cancelled: {args.job_id}")
+        cancelled = cancel_handoff_with_dependents(
+            con,
+            args.job_id,
+            actor_role,
+            reason,
+        )
+        con.commit()
+    print(f"Cancelled {args.job_id} dependents={len(cancelled) - 1}")
+    return 0
+
+
 def command_promote_ready(args: argparse.Namespace) -> int:
     with connect(args.db) as con:
         init_schema(con)
@@ -1438,11 +1549,12 @@ def command_promote_ready(args: argparse.Namespace) -> int:
             con.execute("update handoff_jobs set status = 'open' where job_id = ?", (row["job_id"],))
             event(con, "promoted", job_id=row["job_id"], actor_role=args.actor_role, from_status="blocked", to_status="open")
         con.commit()
-    for job_id in cancelled:
-        print(f"CANCELLED {job_id}")
-    for row in rows:
-        print(f"PROMOTED {row['job_id']}")
-    print(f"Summary: cancelled={len(cancelled)} promoted={len(rows)}")
+    if cancelled or rows or not getattr(args, "quiet", False):
+        for job_id in cancelled:
+            print(f"CANCELLED {job_id}")
+        for row in rows:
+            print(f"PROMOTED {row['job_id']}")
+        print(f"Summary: cancelled={len(cancelled)} promoted={len(rows)}")
     return 0
 
 
@@ -1636,9 +1748,9 @@ def command_wait(args: argparse.Namespace) -> int:
             reason = f" reason={stopped['reason']}" if stopped["reason"] else ""
             print(f"Stopped waiting for role {role} by {stopped['scope']}.{reason}")
             return 3
-        promote_args = argparse.Namespace(db=args.db, actor_role=args.role)
+        promote_args = argparse.Namespace(db=args.db, actor_role=args.role, quiet=True)
         command_promote_ready(promote_args)
-        next_args = argparse.Namespace(db=args.db, role=role)
+        next_args = argparse.Namespace(db=args.db, role=role, quiet=True)
         if command_next(next_args) == 0:
             return 0
         if deadline is not None and time.monotonic() >= deadline:
@@ -1649,17 +1761,27 @@ def command_wait(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="SQLite-backed Baton CLI")
-    parser.add_argument("--db", default=".baton/baton.sqlite3")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {BATON_VERSION}")
+    parser.add_argument("--db", default=".baton/baton.sqlite3", help="SQLite database path; default: .baton/baton.sqlite3")
     parser.add_argument("--agent-id-file", default="", help="local non-shared agent identity file")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("init").set_defaults(func=command_init)
-    sub.add_parser("migrate").set_defaults(func=command_migrate)
-    sub.add_parser("update").set_defaults(func=command_update)
-    sub.add_parser("status").set_defaults(func=command_status)
-    sub.add_parser("promote-ready").set_defaults(func=command_promote_ready, actor_role="sm")
+    sub.add_parser("init", help="initialize a new Baton database").set_defaults(func=command_init)
+    migrate = sub.add_parser(
+        "migrate",
+        help="apply or verify database migrations",
+        description="Apply pending database migrations, or verify the current schema without changing it.",
+    )
+    migrate.add_argument("--check", action="store_true", help="verify schema version and integrity without migrating")
+    migrate.set_defaults(func=command_migrate)
+    sub.add_parser("update", help="deprecated alias for migrate").set_defaults(func=command_update)
+    sub.add_parser("status", help="show handoff counts by status").set_defaults(func=command_status)
+    sub.add_parser("promote-ready", help="promote dependency-ready handoffs").set_defaults(
+        func=command_promote_ready,
+        actor_role="sm",
+    )
 
-    role = sub.add_parser("role")
+    role = sub.add_parser("role", help="manage roles, aliases, and permissions")
     role_sub = role.add_subparsers(dest="role_command", required=True)
     role_sub.add_parser("list").set_defaults(func=command_role_list)
     role_add = role_sub.add_parser("add")
@@ -1678,8 +1800,12 @@ def build_parser() -> argparse.ArgumentParser:
     permission_add.add_argument("role_id")
     permission_add.add_argument("permission")
     permission_add.set_defaults(func=command_role_permission_add)
+    permission_remove = role_sub.add_parser("permission-remove")
+    permission_remove.add_argument("role_id")
+    permission_remove.add_argument("permission")
+    permission_remove.set_defaults(func=command_role_permission_remove)
 
-    agent = sub.add_parser("agent")
+    agent = sub.add_parser("agent", help="manage local agent identity")
     agent_sub = agent.add_subparsers(dest="agent_command", required=True)
     agent_init = agent_sub.add_parser("init")
     agent_init.add_argument("--role", required=True)
@@ -1689,7 +1815,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent_init.set_defaults(func=command_agent_init)
     agent_sub.add_parser("show").set_defaults(func=command_agent_show)
 
-    register = sub.add_parser("register")
+    register = sub.add_parser("register", help="register a handoff job")
     register.add_argument("--title", required=True)
     register.add_argument("--role", required=True)
     register.add_argument("--source-ref", default="")
@@ -1699,7 +1825,7 @@ def build_parser() -> argparse.ArgumentParser:
     register.add_argument("--actor-role", default="sm")
     register.set_defaults(func=command_register)
 
-    cr = sub.add_parser("cr")
+    cr = sub.add_parser("cr", help="manage change requests")
     cr_sub = cr.add_subparsers(dest="cr_command", required=True)
     cr_create = cr_sub.add_parser("create")
     cr_create.add_argument("--title", required=True)
@@ -1779,45 +1905,51 @@ def build_parser() -> argparse.ArgumentParser:
 
     cr_wait_review = cr_sub.add_parser("wait-review")
     cr_wait_review.add_argument("--role", required=True)
-    cr_wait_review.add_argument("--timeout", type=int, default=900, help="seconds; 0 means forever")
-    cr_wait_review.add_argument("--interval", type=parse_poll_interval, default=3)
+    cr_wait_review.add_argument("--timeout", type=int, default=900, help="seconds; default: 900; 0 means forever")
+    cr_wait_review.add_argument("--interval", type=parse_poll_interval, default=3, help="poll seconds; default: 3; minimum: 1")
     cr_wait_review.set_defaults(func=command_cr_wait_review)
 
-    next_parser = sub.add_parser("next")
+    next_parser = sub.add_parser("next", help="inspect the next ready handoff without waiting")
     next_parser.add_argument("--role", required=True)
     next_parser.set_defaults(func=command_next)
 
-    claim = sub.add_parser("claim")
+    claim = sub.add_parser("claim", help="claim an open handoff")
     claim.add_argument("job_id")
     claim.add_argument("--role", required=True)
     claim.add_argument("--claimed-by", default="")
     claim.set_defaults(func=command_claim)
 
-    finish = sub.add_parser("finish")
+    finish = sub.add_parser("finish", help="finish a claimed handoff")
     finish.add_argument("job_id")
     finish.add_argument("--role", required=True)
     finish.add_argument("--evidence", required=True)
     finish.add_argument("--commit", default="")
     finish.set_defaults(func=command_finish)
 
-    events = sub.add_parser("events")
+    cancel = sub.add_parser("cancel", help="cancel one handoff and its blocked dependents")
+    cancel.add_argument("job_id")
+    cancel.add_argument("--role", required=True)
+    cancel.add_argument("--reason", required=True)
+    cancel.set_defaults(func=command_cancel)
+
+    events = sub.add_parser("events", help="show one handoff audit history")
     events.add_argument("job_id")
     events.set_defaults(func=command_events)
 
-    stop = sub.add_parser("stop")
+    stop = sub.add_parser("stop", help="stop role or global wait loops")
     stop_scope = stop.add_mutually_exclusive_group(required=True)
     stop_scope.add_argument("--all", action="store_true")
     stop_scope.add_argument("--role")
     stop.add_argument("--reason", default="")
     stop.set_defaults(func=command_stop)
 
-    resume = sub.add_parser("resume")
+    resume = sub.add_parser("resume", help="resume role or global wait loops")
     resume_scope = resume.add_mutually_exclusive_group(required=True)
     resume_scope.add_argument("--all", action="store_true")
     resume_scope.add_argument("--role")
     resume.set_defaults(func=command_resume)
 
-    shift = sub.add_parser("shift")
+    shift = sub.add_parser("shift", help="manage bounded agent work shifts")
     shift_sub = shift.add_subparsers(dest="shift_command", required=True)
     shift_start = shift_sub.add_parser("start")
     shift_start_scope = shift_start.add_mutually_exclusive_group(required=True)
@@ -1841,14 +1973,14 @@ def build_parser() -> argparse.ArgumentParser:
     shift_status.add_argument("--role", default="")
     shift_status.set_defaults(func=command_shift_status)
 
-    control = sub.add_parser("control")
+    control = sub.add_parser("control", help="inspect wait control state")
     control_sub = control.add_subparsers(dest="control_command", required=True)
     control_sub.add_parser("status").set_defaults(func=command_control_status)
 
-    wait = sub.add_parser("wait")
+    wait = sub.add_parser("wait", help="wait for a ready handoff")
     wait.add_argument("--role", required=True)
-    wait.add_argument("--timeout", type=int, default=900, help="seconds; 0 means forever")
-    wait.add_argument("--interval", type=parse_poll_interval, default=3)
+    wait.add_argument("--timeout", type=int, default=900, help="seconds; default: 900; 0 means forever")
+    wait.add_argument("--interval", type=parse_poll_interval, default=3, help="poll seconds; default: 3; minimum: 1")
     wait.set_defaults(func=command_wait)
     return parser
 

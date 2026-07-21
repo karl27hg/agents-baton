@@ -36,7 +36,9 @@ This repository is currently tested on macOS with Python 3.12.
 ## Quick Start
 
 ```bash
+bin/baton --version
 bin/baton init
+bin/baton migrate --check
 bin/baton role list
 bin/baton status
 ```
@@ -51,11 +53,23 @@ An SM/system-manager agent should read these documents in order before configuri
 4. `docs/agent-usage.md`: command examples for role setup, CR review, waits, shifts, and stop/resume operations.
 5. `docs/schema.md` or `docs/schema-ko.md`: database schema and audit table reference when troubleshooting or reviewing workflow state.
 
-SM setup checklist:
+For a new database:
 
 ```bash
 bin/baton init
+bin/baton migrate --check
+```
+
+For an existing database after updating Baton:
+
+```bash
 bin/baton migrate
+bin/baton migrate --check
+```
+
+Then verify the project configuration:
+
+```bash
 bin/baton role list
 bin/baton role permission-list sm
 bin/baton-report summary
@@ -140,25 +154,30 @@ bin/baton role alias-add fe frontend
 bin/baton next --role fe
 ```
 
-CR review and CR administration permissions are stored separately from role membership. `sm` is seeded with all CR permissions.
+Workflow permissions are stored separately from role membership. `sm` is seeded with all CR permissions and `handoff.cancel`.
 
 ```bash
 bin/baton role permission-list sm
 bin/baton role permission-add architecture cr.review
 bin/baton role permission-add architecture cr.approve
 bin/baton role permission-add architecture cr.admin
+bin/baton role permission-add architecture handoff.cancel
+bin/baton role permission-remove sm cr.approve
 ```
 
 After changing the Baton binary or release tag, run `bin/baton migrate` before starting role agents. Migrations are versioned, transactional, and idempotent: existing handoff, CR, event, control, role, and permission rows are preserved. A failed migration is rolled back.
 
 ```bash
 bin/baton migrate
+bin/baton migrate --check
 bin/baton role permission-list sm
 ```
 
-Every database-backed `baton` command also applies pending migrations before its own operation. The explicit command is still recommended so migration failure is detected before agents start. `baton-report` is read-only and does not migrate the database.
+Every database-backed `baton` command also applies pending migrations before its own operation. The explicit command is still recommended so migration failure is detected before agents start. Project-specific permission removals made with `role permission-remove` are preserved: a later migration adds only permissions introduced by that migration and does not restore the full default set. `baton-report` is read-only and does not migrate the database.
 
 `baton update` remains a deprecated alias for database migration for compatibility with v0.1.6. Use `migrate`; the `update` name is reserved for a future Baton binary update workflow.
+
+Use `bin/baton --version` to inspect the installed CLI version. `migrate --check` performs a read-only compatibility check and exits unsuccessfully when migrations are pending or the database is incompatible.
 
 ## Agent Identity
 
@@ -250,6 +269,16 @@ Inspect events:
 bin/baton events HO-YYYY-MM-DD-001
 ```
 
+Cancel one handoff with a role that has `handoff.cancel`:
+
+```bash
+bin/baton cancel HO-YYYY-MM-DD-001 \
+  --role sm \
+  --reason "Work is no longer required."
+```
+
+Cancellation is scoped. Baton cancels the selected handoff and recursively cancels only `blocked` handoffs that depend on it. Independent `open`, `blocked`, or `in_progress` jobs in other queue branches are unchanged. It does not stop wait loops or clear a role queue; use `stop` for wait control. Finished and already-cancelled handoffs cannot be cancelled again.
+
 ## Change Request Flow
 
 CR Markdown files hold the editable request body. SQLite is the authority for workflow state and Baton keeps only the Markdown frontmatter in sync.
@@ -336,7 +365,9 @@ State-changing commands run inside `BEGIN IMMEDIATE` transactions:
 - `role add`
 - `role alias-add`
 - `role permission-add`
-- `update`
+- `role permission-remove`
+- `migrate`
+- `cancel`
 - `register`
 - `claim`
 - `finish`
@@ -363,6 +394,7 @@ Read-only commands do not claim ownership:
 
 - `role list`
 - `role permission-list`
+- `migrate --check`
 - `status`
 - `next`
 - `events`
@@ -386,6 +418,9 @@ tests/concurrent-claim.sh
 tests/wait-stop.sh
 tests/agent-id.sh
 tests/cr-flow.sh
+tests/handoff-cancel.sh
+tests/handoff-dependencies.sh
+tests/migrate.sh
 tests/shift.sh
 tests/report.sh
 tests/update.sh
@@ -419,6 +454,7 @@ bin/baton-report summary --format json
 
 `wait` repeatedly promotes ready work and checks the target role queue.
 `next` is a single non-blocking queue check; it is not a wait command. Agents must not stop working merely because `next` reports no ready jobs.
+No-op polling is silent. `wait` prints only a ready job, an actual promotion/cancellation, timeout, or stop result.
 
 ```bash
 bin/baton wait --role frontend --timeout 900 --interval 3
@@ -540,7 +576,7 @@ Token and auth files are stored under `.baton/gh/config/`, which is ignored by g
 ## Limitations
 
 - It does not import or export Markdown handoff files.
-- It does not enforce a full permission model for handoff jobs beyond target-role claim/finish checks.
+- Handoff claim/finish authorization remains target-role based; administrative cancellation uses the separate `handoff.cancel` permission.
 - CR review actions use role permissions, but user-level authentication is outside Baton.
 - It is not the active repository handoff workflow.
 

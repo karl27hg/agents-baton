@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.3.0
+
+- Added scoped handoff cancellation through `baton cancel` and the `handoff.cancel` role permission.
+- Added schema migration v2 to grant `handoff.cancel` to the default `sm` role without changing existing workflow data.
+- Added `role permission-remove` and preserved project-specific permission revocations across later migrations.
+- Made no-op wait polling silent while preserving ready, transition, timeout, and stop output.
+- Added `baton --version`, `baton migrate --check`, and expanded command help.
+- Clarified the required agent wait loop, cancellation scope, and install versus upgrade procedures.
+- Added regression coverage for cancellation authorization, dependency propagation, unrelated queue preservation, quiet waits, and v0.2.0 database migration.
+
 ## v0.2.0
 
 - Added versioned, transactional database migrations through `baton migrate`.
