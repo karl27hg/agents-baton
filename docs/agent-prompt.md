@@ -35,7 +35,7 @@ If several agents share the same workspace, do not let them unintentionally shar
 - Use bounded waits by default.
 - `next` is a one-time non-blocking inspection command. It is not a substitute for `wait`.
 - If `next` reports no ready job, enter `wait` instead of ending the agent task.
-- A blocked handoff remains inside Baton until its dependencies finish; `wait` will detect its promotion to `open`.
+- A blocked handoff remains inside Baton until its job dependencies finish and named Gates are released; `wait` will detect its promotion to `open`.
 - Do not send periodic waiting updates while `baton wait` is running.
 - Report only when `wait` returns, times out, or is stopped.
 - No-op polling is silent; normal lack of output does not mean the process is disconnected.
@@ -102,6 +102,8 @@ If claim fails, do not work on the job. Re-check with `next`, then return to bou
 - Do not treat stop/resume as job cancellation.
 - If a required upstream handoff is cancelled, Baton recursively cancels only blocked handoffs in that dependency branch. Unrelated queue branches remain active. Do not attempt to claim or reopen cancelled jobs.
 - Use `baton cancel` only when the user or SM explicitly decides to cancel work and your role has `handoff.cancel`. Worker agents must not infer cancellation from timeout, stop, or missing work.
+- Do not release, cancel, or transfer a Gate unless the handoff or user instruction explicitly assigns that decision to your role. Gate ownership is authority, not evidence that the workflow condition is complete.
+- Use `gate transfer` only for an explicit owner change or emergency recovery. Record a concrete reason; it replaces the full owner set.
 - If a revision handoff asks you to improve a CR, edit the CR Markdown body and use `cr resubmit`; `finish` alone does not change CR state.
 
 ## CR Review Rules

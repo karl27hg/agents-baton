@@ -14,6 +14,10 @@ Tables:
 - `role_permissions`: workflow permissions granted to roles
 - `handoff_jobs`: primary handoff records
 - `handoff_dependencies`: dependency edges between handoff jobs
+- `workflow_gates`: stable named barriers for future or manually resolved workflow stages
+- `gate_owners`: roles authorized to resolve or transfer each Gate
+- `handoff_gate_dependencies`: Gate requirements attached to handoff jobs
+- `gate_events`: Gate ownership and lifecycle audit log
 - `handoff_events`: audit log of state changes and operational events
 - `handoff_controls`: stop/resume controls for wait loops
 - `change_requests`: CR workflow state and Markdown file pointer
@@ -45,6 +49,7 @@ Released migrations:
 ```text
 1 initial_schema
 2 handoff_cancel_permission
+3 named_gates
 ```
 
 `baton migrate --check` performs a read-only check that the database is at the latest known schema version.
@@ -127,7 +132,7 @@ Primary key:
 
 Seed permissions:
 
-- `sm` receives all CR permissions and `handoff.cancel` on `init` or migration.
+- `sm` receives all CR permissions, `handoff.cancel`, and `gate.manage` on `init` or the migration that introduces each permission.
 
 Known permissions:
 
@@ -140,6 +145,7 @@ cr.reject
 cr.assign_implementation
 cr.mark_implemented
 handoff.cancel
+gate.manage
 ```
 
 Use `role permission-add` and `role permission-remove` to manage grants. Removing a permission is an explicit project policy decision and repeated migrations do not restore the full default permission set.
@@ -239,6 +245,34 @@ Promotion rule:
 - `promote-ready` also reconciles older database records that still contain a blocked job behind a cancelled dependency.
 - Independent jobs and dependency branches are never cancelled by this propagation.
 
+## Named Gate Tables
+
+`workflow_gates` stores stable names that can exist before a concrete predecessor handoff is created.
+
+| Column | Type | Required | Purpose |
+| --- | --- | --- | --- |
+| `gate_name` | `text primary key` | yes | Normalized stable Gate name. |
+| `status` | `text` | yes | `pending`, `released`, or `cancelled`. |
+| `created_by_role` | `text` | yes | Role that created the Gate. |
+| `created_at` | `text` | yes | UTC creation timestamp. |
+| `resolved_at` | `text` | no | UTC release or cancellation timestamp. |
+| `resolution_evidence` | `text` | no | Required release evidence or cancellation reason. |
+
+`gate_owners` uses `(gate_name, role_id)` as its primary key. The creator role is the default owner when `gate create` has no `--owner-role`; repeated `--owner-role` values create joint ownership.
+
+`handoff_gate_dependencies` uses `(job_id, gate_name)` as its primary key. A handoff remains `blocked` until all handoff dependencies are `finished` and all Gate dependencies are `released`. A handoff registered behind an already-cancelled Gate starts as `cancelled`.
+
+`gate_events` records `created`, `released`, `cancelled`, and `ownership_transferred` events with actor role, status transition, reason or evidence, and UTC timestamp.
+
+Gate authority rules:
+
+- An owner may release, cancel, or transfer a pending Gate.
+- A role with `gate.manage` may transfer ownership for emergency recovery, but cannot directly release or cancel a Gate it does not own.
+- `gate transfer` replaces the complete owner set and requires an audit reason.
+- Releasing a Gate promotes eligible handoffs in the same transaction.
+- Cancelling a Gate cancels only blocked direct dependents and their blocked handoff descendants; unrelated queue branches remain unchanged.
+- Baton records role authority but does not authenticate an individual human user.
+
 ## `handoff_events`
 
 Purpose:
@@ -274,6 +308,7 @@ finished
 promoted
 cancelled
 dependency_cancelled
+gate_cancelled
 control_stopped
 control_resumed
 shift_started
@@ -450,6 +485,9 @@ idx_handoff_jobs_status_role on handoff_jobs(status, target_role)
 idx_handoff_dependencies_job on handoff_dependencies(job_id)
 idx_handoff_dependencies_dep on handoff_dependencies(depends_on_job_id)
 idx_handoff_events_job on handoff_events(job_id)
+idx_handoff_gate_dependencies_job on handoff_gate_dependencies(job_id)
+idx_handoff_gate_dependencies_gate on handoff_gate_dependencies(gate_name)
+idx_gate_events_gate on gate_events(gate_name)
 idx_cr_status_reviewer on change_requests(status, reviewer_role)
 idx_cr_handoffs_cr on cr_handoffs(cr_id)
 ```
@@ -460,6 +498,8 @@ Purpose:
 - `dependencies.job_id`: Fast dependency lookup for a job.
 - `dependencies.depends_on_job_id`: Fast reverse dependency analysis.
 - `events.job_id`: Fast event history lookup.
+- `handoff_gate_dependencies`: Fast Gate checks by job and dependent-job lookup by Gate.
+- `gate_events.gate_name`: Fast Gate audit history lookup.
 - `cr.status, reviewer_role`: Fast `cr wait-review` lookup.
 - `cr_handoffs.cr_id`: Fast implementation completion checks.
 
@@ -514,4 +554,15 @@ handoff_jobs.status=blocked
 handoff_dependencies records dependency edges
 promote-ready updates status to open after dependencies are finished
 handoff_events.event_type=promoted
+```
+
+Named Gate flow:
+
+```text
+workflow_gates.status=pending
+gate_owners records one or more resolving roles
+handoff_gate_dependencies links blocked jobs to the Gate
+gate release changes status to released and promotes eligible jobs transactionally
+gate cancel changes status to cancelled and cancels only affected blocked branches
+gate_events records every ownership and lifecycle decision
 ```

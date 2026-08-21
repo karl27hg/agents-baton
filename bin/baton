@@ -28,7 +28,7 @@ DEFAULT_ROLES = (
 
 STATUSES = {"blocked", "open", "in_progress", "finished", "cancelled"}
 CR_STATUSES = {"draft", "submitted", "revision_requested", "approved", "rejected", "implemented", "cancelled"}
-BATON_VERSION = "0.3.0"
+BATON_VERSION = "0.4.0"
 REVIEW_PERMISSIONS = {
     "cr.admin",
     "cr.review",
@@ -41,8 +41,11 @@ REVIEW_PERMISSIONS = {
 HANDOFF_PERMISSIONS = {
     "handoff.cancel",
 }
-KNOWN_PERMISSIONS = REVIEW_PERMISSIONS | HANDOFF_PERMISSIONS
-LATEST_SCHEMA_VERSION = 2
+GATE_PERMISSIONS = {
+    "gate.manage",
+}
+KNOWN_PERMISSIONS = REVIEW_PERMISSIONS | HANDOFF_PERMISSIONS | GATE_PERMISSIONS
+LATEST_SCHEMA_VERSION = 3
 
 
 class MigrationError(RuntimeError):
@@ -97,6 +100,13 @@ def today_text() -> str:
 
 def normalize_role(role: str) -> str:
     return role.strip().lower().replace("_", "-").replace(" ", "-")
+
+
+def normalize_gate_name(name: str) -> str:
+    normalized = name.strip().lower().replace("_", "-").replace(" ", "-")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9.-]*", normalized):
+        raise SystemExit("ERROR: gate name must contain only lowercase letters, digits, dots, and hyphens")
+    return normalized
 
 
 def slugify(value: str) -> str:
@@ -310,9 +320,71 @@ def migration_v2_handoff_cancel_permission(con: sqlite3.Connection) -> None:
     )
 
 
+def migration_v3_named_gates(con: sqlite3.Connection) -> None:
+    execute_sql_script(
+        con,
+        """
+        create table if not exists workflow_gates (
+          gate_name text primary key,
+          status text not null check (status in ('pending', 'released', 'cancelled')),
+          created_by_role text not null references roles(role_id),
+          created_at text not null,
+          resolved_at text,
+          resolution_evidence text
+        );
+
+        create table if not exists gate_owners (
+          gate_name text not null references workflow_gates(gate_name) on delete cascade,
+          role_id text not null references roles(role_id),
+          primary key (gate_name, role_id)
+        );
+
+        create table if not exists handoff_gate_dependencies (
+          job_id text not null references handoff_jobs(job_id) on delete cascade,
+          gate_name text not null references workflow_gates(gate_name),
+          primary key (job_id, gate_name)
+        );
+
+        create table if not exists gate_events (
+          id integer primary key autoincrement,
+          gate_name text not null references workflow_gates(gate_name) on delete cascade,
+          event_type text not null,
+          actor_role text,
+          from_status text,
+          to_status text,
+          message text,
+          created_at text not null
+        );
+
+        create index if not exists idx_handoff_gate_dependencies_job
+          on handoff_gate_dependencies(job_id);
+        create index if not exists idx_handoff_gate_dependencies_gate
+          on handoff_gate_dependencies(gate_name);
+        create index if not exists idx_gate_events_gate
+          on gate_events(gate_name);
+        """,
+    )
+    con.execute(
+        """
+        insert into roles(role_id, display_name, created_at, updated_at)
+        values ('sm', 'System Manager', ?, ?)
+        on conflict(role_id) do nothing
+        """,
+        (utc_now(), utc_now()),
+    )
+    con.execute(
+        """
+        insert into role_permissions(role_id, permission)
+        values ('sm', 'gate.manage')
+        on conflict(role_id, permission) do nothing
+        """
+    )
+
+
 MIGRATIONS = (
     (1, "initial_schema", migration_v1_initial_schema),
     (2, "handoff_cancel_permission", migration_v2_handoff_cancel_permission),
+    (3, "named_gates", migration_v3_named_gates),
 )
 
 
@@ -489,6 +561,24 @@ def event(
     )
 
 
+def gate_event(
+    con: sqlite3.Connection,
+    gate_name: str,
+    event_type: str,
+    actor_role: str | None = None,
+    from_status: str | None = None,
+    to_status: str | None = None,
+    message: str | None = None,
+) -> None:
+    con.execute(
+        """
+        insert into gate_events(gate_name, event_type, actor_role, from_status, to_status, message, created_at)
+        values (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (gate_name, event_type, actor_role, from_status, to_status, message, utc_now()),
+    )
+
+
 def cancel_blocked_dependents(
     con: sqlite3.Connection,
     upstream_job_id: str,
@@ -562,6 +652,44 @@ def cancel_handoff_with_dependents(
     return [job_id, *cancel_blocked_dependents(con, job_id, actor_role)]
 
 
+def cancel_jobs_for_gate(
+    con: sqlite3.Connection,
+    gate_name: str,
+    actor_role: str,
+) -> list[str]:
+    rows = con.execute(
+        """
+        select j.job_id
+        from handoff_gate_dependencies d
+        join handoff_jobs j on j.job_id = d.job_id
+        where d.gate_name = ? and j.status = 'blocked'
+        order by j.created_at, j.job_id
+        """,
+        (gate_name,),
+    ).fetchall()
+    cancelled: list[str] = []
+    for row in rows:
+        job_id = row["job_id"]
+        changed = con.execute(
+            "update handoff_jobs set status = 'cancelled' where job_id = ? and status = 'blocked'",
+            (job_id,),
+        ).rowcount
+        if changed != 1:
+            continue
+        event(
+            con,
+            "gate_cancelled",
+            job_id=job_id,
+            actor_role=actor_role,
+            from_status="blocked",
+            to_status="cancelled",
+            message=f"Gate {gate_name} was cancelled.",
+        )
+        cancelled.append(job_id)
+        cancelled.extend(cancel_blocked_dependents(con, job_id, actor_role))
+    return cancelled
+
+
 def cr_event(
     con: sqlite3.Connection,
     cr_id: str,
@@ -607,6 +735,32 @@ def require_permission(con: sqlite3.Connection, role: str, permission: str) -> s
     ).fetchone()
     if not row:
         raise SystemExit(f"ERROR: role {role_id} lacks permission {permission}")
+    return role_id
+
+
+def require_gate_owner(con: sqlite3.Connection, gate_name: str, role: str) -> str:
+    role_id = resolve_role(con, role)
+    owner = con.execute(
+        "select 1 from gate_owners where gate_name = ? and role_id = ?",
+        (gate_name, role_id),
+    ).fetchone()
+    if not owner:
+        raise SystemExit(f"ERROR: role {role_id} does not own gate {gate_name}")
+    return role_id
+
+
+def require_gate_transfer_authority(con: sqlite3.Connection, gate_name: str, role: str) -> str:
+    role_id = resolve_role(con, role)
+    owner = con.execute(
+        "select 1 from gate_owners where gate_name = ? and role_id = ?",
+        (gate_name, role_id),
+    ).fetchone()
+    manager = con.execute(
+        "select 1 from role_permissions where role_id = ? and permission = 'gate.manage'",
+        (role_id,),
+    ).fetchone()
+    if not owner and not manager:
+        raise SystemExit(f"ERROR: role {role_id} does not own gate {gate_name} and lacks permission gate.manage")
     return role_id
 
 
@@ -932,6 +1086,7 @@ def create_handoff_job(
     objective: str,
     exit_criteria: str,
     depends_on: list[str],
+    depends_on_gates: list[str],
     actor_role: str,
 ) -> tuple[str, str, str]:
     target_role = resolve_role(con, role)
@@ -944,11 +1099,31 @@ def create_handoff_job(
         if not dependency:
             raise SystemExit(f"ERROR: dependency does not exist: {dep}")
         dependency_statuses[dep] = dependency["status"]
+    gate_statuses: dict[str, str] = {}
+    normalized_gates: list[str] = []
+    for gate in depends_on_gates:
+        gate_name = normalize_gate_name(gate)
+        if gate_name in gate_statuses:
+            raise SystemExit(f"ERROR: duplicate gate dependency: {gate_name}")
+        gate_row = con.execute(
+            "select status from workflow_gates where gate_name = ?",
+            (gate_name,),
+        ).fetchone()
+        if not gate_row:
+            raise SystemExit(f"ERROR: gate does not exist: {gate_name}")
+        normalized_gates.append(gate_name)
+        gate_statuses[gate_name] = gate_row["status"]
     job_id = next_job_id(con)
     cancelled_dependencies = [
         dep for dep, dependency_status in dependency_statuses.items() if dependency_status == "cancelled"
     ]
-    status = "cancelled" if cancelled_dependencies else ("blocked" if depends_on else "open")
+    cancelled_gates = [gate for gate, gate_status in gate_statuses.items() if gate_status == "cancelled"]
+    waiting_gates = [gate for gate, gate_status in gate_statuses.items() if gate_status == "pending"]
+    status = (
+        "cancelled"
+        if cancelled_dependencies or cancelled_gates
+        else ("blocked" if depends_on or waiting_gates else "open")
+    )
     con.execute(
         """
         insert into handoff_jobs(job_id, title, status, target_role, source_ref, objective, exit_criteria, created_at)
@@ -961,9 +1136,16 @@ def create_handoff_job(
             "insert into handoff_dependencies(job_id, depends_on_job_id) values (?, ?)",
             (job_id, dep),
         )
+    for gate_name in normalized_gates:
+        con.execute(
+            "insert into handoff_gate_dependencies(job_id, gate_name) values (?, ?)",
+            (job_id, gate_name),
+        )
     message = ""
     if cancelled_dependencies:
         message = f"Cancelled dependencies: {', '.join(cancelled_dependencies)}"
+    if cancelled_gates:
+        message = f"Cancelled gates: {', '.join(cancelled_gates)}"
     event(con, "registered", job_id=job_id, actor_role=actor_role, to_status=status, message=message)
     return job_id, status, target_role
 
@@ -981,10 +1163,224 @@ def command_register(args: argparse.Namespace) -> int:
             args.objective,
             args.exit_criteria,
             depends_on,
+            args.depends_on_gate or [],
             args.actor_role,
         )
         con.commit()
     print(f"{job_id}\t{status}\t{role}")
+    return 0
+
+
+def command_gate_create(args: argparse.Namespace) -> int:
+    gate_name = normalize_gate_name(args.gate_name)
+    with connect(args.db) as con:
+        init_schema(con)
+        begin_immediate(con)
+        actor_role = resolve_role(con, args.role)
+        if con.execute("select 1 from workflow_gates where gate_name = ?", (gate_name,)).fetchone():
+            raise SystemExit(f"ERROR: gate already exists: {gate_name}")
+        requested_owners = args.owner_role or [actor_role]
+        owners = list(dict.fromkeys(resolve_role(con, role) for role in requested_owners))
+        con.execute(
+            """
+            insert into workflow_gates(gate_name, status, created_by_role, created_at)
+            values (?, 'pending', ?, ?)
+            """,
+            (gate_name, actor_role, utc_now()),
+        )
+        for owner in owners:
+            con.execute(
+                "insert into gate_owners(gate_name, role_id) values (?, ?)",
+                (gate_name, owner),
+            )
+        gate_event(
+            con,
+            gate_name,
+            "created",
+            actor_role=actor_role,
+            to_status="pending",
+            message=f"owners={','.join(owners)}",
+        )
+        con.commit()
+    print(f"{gate_name}\tpending\towners={','.join(owners)}")
+    return 0
+
+
+def command_gate_status(args: argparse.Namespace) -> int:
+    with connect(args.db) as con:
+        init_schema(con)
+        params: tuple[str, ...] = ()
+        where = ""
+        if args.gate_name:
+            where = "where g.gate_name = ?"
+            params = (normalize_gate_name(args.gate_name),)
+        rows = con.execute(
+            f"""
+            select
+              g.gate_name,
+              g.status,
+              g.created_by_role,
+              g.created_at,
+              g.resolved_at,
+              g.resolution_evidence,
+              group_concat(o.role_id, ',') as owners
+            from workflow_gates g
+            join gate_owners o on o.gate_name = g.gate_name
+            {where}
+            group by g.gate_name
+            order by g.created_at, g.gate_name
+            """,
+            params,
+        ).fetchall()
+    if args.gate_name and not rows:
+        raise SystemExit(f"ERROR: unknown gate: {normalize_gate_name(args.gate_name)}")
+    for row in rows:
+        resolved = f"\tresolved={row['resolved_at']}" if row["resolved_at"] else ""
+        evidence = f"\t{row['resolution_evidence']}" if row["resolution_evidence"] else ""
+        print(
+            f"{row['gate_name']}\t{row['status']}\towners={row['owners']}\t"
+            f"created_by={row['created_by_role']}\tcreated={row['created_at']}{resolved}{evidence}"
+        )
+    return 0
+
+
+def command_gate_release(args: argparse.Namespace) -> int:
+    gate_name = normalize_gate_name(args.gate_name)
+    evidence = args.evidence.strip()
+    if not evidence:
+        raise SystemExit("ERROR: --evidence cannot be blank")
+    with connect(args.db) as con:
+        init_schema(con)
+        begin_immediate(con)
+        row = con.execute("select status from workflow_gates where gate_name = ?", (gate_name,)).fetchone()
+        if not row:
+            raise SystemExit(f"ERROR: unknown gate: {gate_name}")
+        actor_role = require_gate_owner(con, gate_name, args.role)
+        if row["status"] != "pending":
+            raise SystemExit(f"ERROR: gate is not pending: {gate_name} status={row['status']}")
+        con.execute(
+            """
+            update workflow_gates
+            set status = 'released', resolved_at = ?, resolution_evidence = ?
+            where gate_name = ?
+            """,
+            (utc_now(), evidence, gate_name),
+        )
+        gate_event(
+            con,
+            gate_name,
+            "released",
+            actor_role=actor_role,
+            from_status="pending",
+            to_status="released",
+            message=evidence,
+        )
+        promoted = promote_ready_handoffs_for_gate(con, gate_name, actor_role)
+        con.commit()
+    print(f"Released {gate_name} promoted={len(promoted)}")
+    return 0
+
+
+def command_gate_cancel(args: argparse.Namespace) -> int:
+    gate_name = normalize_gate_name(args.gate_name)
+    reason = args.reason.strip()
+    if not reason:
+        raise SystemExit("ERROR: --reason cannot be blank")
+    with connect(args.db) as con:
+        init_schema(con)
+        begin_immediate(con)
+        row = con.execute("select status from workflow_gates where gate_name = ?", (gate_name,)).fetchone()
+        if not row:
+            raise SystemExit(f"ERROR: unknown gate: {gate_name}")
+        actor_role = require_gate_owner(con, gate_name, args.role)
+        if row["status"] != "pending":
+            raise SystemExit(f"ERROR: gate is not pending: {gate_name} status={row['status']}")
+        con.execute(
+            """
+            update workflow_gates
+            set status = 'cancelled', resolved_at = ?, resolution_evidence = ?
+            where gate_name = ?
+            """,
+            (utc_now(), reason, gate_name),
+        )
+        gate_event(
+            con,
+            gate_name,
+            "cancelled",
+            actor_role=actor_role,
+            from_status="pending",
+            to_status="cancelled",
+            message=reason,
+        )
+        cancelled = cancel_jobs_for_gate(con, gate_name, actor_role)
+        con.commit()
+    print(f"Cancelled gate {gate_name} handoffs={len(cancelled)}")
+    return 0
+
+
+def command_gate_transfer(args: argparse.Namespace) -> int:
+    gate_name = normalize_gate_name(args.gate_name)
+    reason = args.reason.strip()
+    if not reason:
+        raise SystemExit("ERROR: --reason cannot be blank")
+    with connect(args.db) as con:
+        init_schema(con)
+        begin_immediate(con)
+        row = con.execute("select status from workflow_gates where gate_name = ?", (gate_name,)).fetchone()
+        if not row:
+            raise SystemExit(f"ERROR: unknown gate: {gate_name}")
+        actor_role = require_gate_transfer_authority(con, gate_name, args.role)
+        if row["status"] != "pending":
+            raise SystemExit(f"ERROR: only pending gate ownership can be transferred: {gate_name} status={row['status']}")
+        owners = list(dict.fromkeys(resolve_role(con, role) for role in args.owner_role))
+        old_owners = [
+            owner["role_id"]
+            for owner in con.execute(
+                "select role_id from gate_owners where gate_name = ? order by role_id",
+                (gate_name,),
+            ).fetchall()
+        ]
+        con.execute("delete from gate_owners where gate_name = ?", (gate_name,))
+        for owner in owners:
+            con.execute(
+                "insert into gate_owners(gate_name, role_id) values (?, ?)",
+                (gate_name, owner),
+            )
+        gate_event(
+            con,
+            gate_name,
+            "ownership_transferred",
+            actor_role=actor_role,
+            from_status="pending",
+            to_status="pending",
+            message=f"{','.join(old_owners)}->{','.join(owners)}: {reason}",
+        )
+        con.commit()
+    print(f"Transferred {gate_name} owners={','.join(owners)}")
+    return 0
+
+
+def command_gate_events(args: argparse.Namespace) -> int:
+    gate_name = normalize_gate_name(args.gate_name)
+    with connect(args.db) as con:
+        init_schema(con)
+        exists = con.execute("select 1 from workflow_gates where gate_name = ?", (gate_name,)).fetchone()
+        if not exists:
+            raise SystemExit(f"ERROR: unknown gate: {gate_name}")
+        rows = con.execute(
+            """
+            select created_at, event_type, actor_role, from_status, to_status, message
+            from gate_events
+            where gate_name = ?
+            order by id
+            """,
+            (gate_name,),
+        ).fetchall()
+    for row in rows:
+        print(
+            f"{row['created_at']}\t{row['event_type']}\t{row['actor_role'] or ''}\t"
+            f"{row['from_status'] or ''}->{row['to_status'] or ''}\t{row['message'] or ''}"
+        )
     return 0
 
 
@@ -1090,6 +1486,7 @@ def command_cr_request_revision(args: argparse.Namespace) -> int:
             row["file_path"],
             f"Address CR revision feedback and resubmit {args.cr_id}.",
             "CR Markdown body is updated and baton cr resubmit is completed.",
+            [],
             [],
             actor_role,
         )
@@ -1262,6 +1659,7 @@ def command_cr_create_handoff(args: argparse.Namespace) -> int:
             args.objective,
             args.exit_criteria,
             args.depends_on or [],
+            args.depends_on_gate or [],
             actor_role,
         )
         con.execute(
@@ -1510,51 +1908,133 @@ def command_cancel(args: argparse.Namespace) -> int:
     return 0
 
 
+def promote_ready_handoffs_for_gate(
+    con: sqlite3.Connection,
+    gate_name: str,
+    actor_role: str,
+) -> list[str]:
+    rows = con.execute(
+        """
+        select j.job_id
+        from handoff_jobs j
+        join handoff_gate_dependencies target_gate on target_gate.job_id = j.job_id
+        where j.status = 'blocked'
+          and target_gate.gate_name = ?
+          and not exists (
+            select 1
+            from handoff_dependencies d
+            join handoff_jobs dep on dep.job_id = d.depends_on_job_id
+            where d.job_id = j.job_id
+              and dep.status != 'finished'
+          )
+          and not exists (
+            select 1
+            from handoff_gate_dependencies gd
+            join workflow_gates g on g.gate_name = gd.gate_name
+            where gd.job_id = j.job_id
+              and g.status != 'released'
+          )
+        order by j.created_at, j.job_id
+        """,
+        (gate_name,),
+    ).fetchall()
+    promoted: list[str] = []
+    for row in rows:
+        con.execute("update handoff_jobs set status = 'open' where job_id = ?", (row["job_id"],))
+        event(
+            con,
+            "promoted",
+            job_id=row["job_id"],
+            actor_role=actor_role,
+            from_status="blocked",
+            to_status="open",
+            message=f"Gate {gate_name} was released.",
+        )
+        promoted.append(row["job_id"])
+    return promoted
+
+
+def reconcile_handoffs(con: sqlite3.Connection, actor_role: str) -> tuple[list[str], list[str]]:
+    cancelled_upstreams = con.execute(
+        """
+        select distinct dep.job_id
+        from handoff_jobs dep
+        join handoff_dependencies d on d.depends_on_job_id = dep.job_id
+        join handoff_jobs child on child.job_id = d.job_id
+        where dep.status = 'cancelled' and child.status = 'blocked'
+        order by dep.created_at, dep.job_id
+        """
+    ).fetchall()
+    cancelled: list[str] = []
+    for upstream in cancelled_upstreams:
+        cancelled.extend(cancel_blocked_dependents(con, upstream["job_id"], actor_role))
+
+    cancelled_gates = con.execute(
+        """
+        select distinct g.gate_name
+        from workflow_gates g
+        join handoff_gate_dependencies d on d.gate_name = g.gate_name
+        join handoff_jobs j on j.job_id = d.job_id
+        where g.status = 'cancelled' and j.status = 'blocked'
+        order by g.created_at, g.gate_name
+        """
+    ).fetchall()
+    for gate in cancelled_gates:
+        cancelled.extend(cancel_jobs_for_gate(con, gate["gate_name"], actor_role))
+
+    rows = con.execute(
+        """
+        select j.job_id
+        from handoff_jobs j
+        where j.status = 'blocked'
+          and (
+            exists (select 1 from handoff_dependencies d where d.job_id = j.job_id)
+            or exists (select 1 from handoff_gate_dependencies gd where gd.job_id = j.job_id)
+          )
+          and not exists (
+            select 1
+            from handoff_dependencies d
+            join handoff_jobs dep on dep.job_id = d.depends_on_job_id
+            where d.job_id = j.job_id
+              and dep.status != 'finished'
+          )
+          and not exists (
+            select 1
+            from handoff_gate_dependencies gd
+            join workflow_gates g on g.gate_name = gd.gate_name
+            where gd.job_id = j.job_id
+              and g.status != 'released'
+          )
+        order by j.created_at, j.job_id
+        """
+    ).fetchall()
+    promoted: list[str] = []
+    for row in rows:
+        con.execute("update handoff_jobs set status = 'open' where job_id = ?", (row["job_id"],))
+        event(
+            con,
+            "promoted",
+            job_id=row["job_id"],
+            actor_role=actor_role,
+            from_status="blocked",
+            to_status="open",
+        )
+        promoted.append(row["job_id"])
+    return cancelled, promoted
+
+
 def command_promote_ready(args: argparse.Namespace) -> int:
     with connect(args.db) as con:
         init_schema(con)
         begin_immediate(con)
-        cancelled_upstreams = con.execute(
-            """
-            select distinct dep.job_id
-            from handoff_jobs dep
-            join handoff_dependencies d on d.depends_on_job_id = dep.job_id
-            join handoff_jobs child on child.job_id = d.job_id
-            where dep.status = 'cancelled' and child.status = 'blocked'
-            order by dep.created_at, dep.job_id
-            """
-        ).fetchall()
-        cancelled: list[str] = []
-        for upstream in cancelled_upstreams:
-            cancelled.extend(cancel_blocked_dependents(con, upstream["job_id"], args.actor_role))
-        rows = con.execute(
-            """
-            select j.job_id
-            from handoff_jobs j
-            where j.status = 'blocked'
-              and exists (
-                select 1 from handoff_dependencies d where d.job_id = j.job_id
-              )
-              and not exists (
-                select 1
-                from handoff_dependencies d
-                join handoff_jobs dep on dep.job_id = d.depends_on_job_id
-                where d.job_id = j.job_id
-                  and dep.status != 'finished'
-              )
-            order by j.created_at, j.job_id
-            """
-        ).fetchall()
-        for row in rows:
-            con.execute("update handoff_jobs set status = 'open' where job_id = ?", (row["job_id"],))
-            event(con, "promoted", job_id=row["job_id"], actor_role=args.actor_role, from_status="blocked", to_status="open")
+        cancelled, promoted = reconcile_handoffs(con, args.actor_role)
         con.commit()
-    if cancelled or rows or not getattr(args, "quiet", False):
+    if cancelled or promoted or not getattr(args, "quiet", False):
         for job_id in cancelled:
             print(f"CANCELLED {job_id}")
-        for row in rows:
-            print(f"PROMOTED {row['job_id']}")
-        print(f"Summary: cancelled={len(cancelled)} promoted={len(rows)}")
+        for job_id in promoted:
+            print(f"PROMOTED {job_id}")
+        print(f"Summary: cancelled={len(cancelled)} promoted={len(promoted)}")
     return 0
 
 
@@ -1822,8 +2302,44 @@ def build_parser() -> argparse.ArgumentParser:
     register.add_argument("--objective", required=True)
     register.add_argument("--exit-criteria", required=True)
     register.add_argument("--depends-on", action="append", default=[])
+    register.add_argument("--depends-on-gate", action="append", default=[])
     register.add_argument("--actor-role", default="sm")
     register.set_defaults(func=command_register)
+
+    gate = sub.add_parser("gate", help="manage named workflow gates")
+    gate_sub = gate.add_subparsers(dest="gate_command", required=True)
+    gate_create = gate_sub.add_parser("create", help="create a pending named gate")
+    gate_create.add_argument("gate_name")
+    gate_create.add_argument("--role", required=True, help="role creating the gate")
+    gate_create.add_argument(
+        "--owner-role",
+        action="append",
+        default=[],
+        help="role allowed to resolve or transfer the gate; repeat for joint ownership; defaults to --role",
+    )
+    gate_create.set_defaults(func=command_gate_create)
+    gate_status = gate_sub.add_parser("status", help="show one or all gates")
+    gate_status.add_argument("gate_name", nargs="?")
+    gate_status.set_defaults(func=command_gate_status)
+    gate_release = gate_sub.add_parser("release", help="release a pending gate")
+    gate_release.add_argument("gate_name")
+    gate_release.add_argument("--role", required=True)
+    gate_release.add_argument("--evidence", required=True)
+    gate_release.set_defaults(func=command_gate_release)
+    gate_cancel = gate_sub.add_parser("cancel", help="cancel a pending gate and blocked dependents")
+    gate_cancel.add_argument("gate_name")
+    gate_cancel.add_argument("--role", required=True)
+    gate_cancel.add_argument("--reason", required=True)
+    gate_cancel.set_defaults(func=command_gate_cancel)
+    gate_transfer = gate_sub.add_parser("transfer", help="replace owners of a pending gate")
+    gate_transfer.add_argument("gate_name")
+    gate_transfer.add_argument("--role", required=True, help="current owner or role with gate.manage")
+    gate_transfer.add_argument("--owner-role", action="append", required=True)
+    gate_transfer.add_argument("--reason", required=True)
+    gate_transfer.set_defaults(func=command_gate_transfer)
+    gate_events = gate_sub.add_parser("events", help="show gate audit history")
+    gate_events.add_argument("gate_name")
+    gate_events.set_defaults(func=command_gate_events)
 
     cr = sub.add_parser("cr", help="manage change requests")
     cr_sub = cr.add_subparsers(dest="cr_command", required=True)
@@ -1887,6 +2403,7 @@ def build_parser() -> argparse.ArgumentParser:
     cr_create_handoff.add_argument("--objective", required=True)
     cr_create_handoff.add_argument("--exit-criteria", required=True)
     cr_create_handoff.add_argument("--depends-on", action="append", default=[])
+    cr_create_handoff.add_argument("--depends-on-gate", action="append", default=[])
     cr_create_handoff.set_defaults(func=command_cr_create_handoff)
 
     cr_mark_implemented = cr_sub.add_parser("mark-implemented")

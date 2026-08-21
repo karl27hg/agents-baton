@@ -29,7 +29,7 @@ Recommended options:
 - Git clone plus tag checkout: acceptable for local-only use, but the consuming project will not record the expected Baton revision unless you document it separately.
 - Release archive download: useful for one-off installation, but harder to update consistently than a submodule.
 
-Plain `git clone` is fine for experimentation. For stable use across projects, use a tag such as `v0.3.0` and update intentionally when a new Baton release is chosen.
+Plain `git clone` is fine for experimentation. For stable use across projects, use a tag such as `v0.4.0` and update intentionally when a new Baton release is chosen.
 
 ## Add Baton As A Submodule
 
@@ -44,7 +44,7 @@ Pin to a release tag:
 
 ```bash
 cd tools/baton
-git checkout v0.3.0
+git checkout v0.4.0
 cd ../..
 git add tools/baton
 git commit -m "Add Baton workflow tool"
@@ -84,7 +84,7 @@ For stable use, check out a release tag after cloning:
 ```bash
 cd tools/baton
 git fetch --tags
-git checkout v0.3.0
+git checkout v0.4.0
 ```
 
 Record the selected version in the consuming project's documentation or onboarding notes.
@@ -153,6 +153,9 @@ Use `tools/baton/bin/baton` for role handoff and CR workflow state.
 - Configure least privilege with `role permission-add` and `role permission-remove`; do not edit permission rows directly.
 - Use handoff `cancel` only with explicit user/SM intent and a role granted `handoff.cancel`.
 - Handoff cancellation affects only the selected job and its blocked dependency descendants; unrelated queues remain active.
+- Use a named Gate when work must wait for a future stage whose handoff ID does not exist yet.
+- Treat Gate release as a workflow decision requiring evidence, not as a routine worker action.
+- Use `gate transfer` only for an explicit ownership change or emergency recovery.
 - Keep CR Markdown files under `docs/change-requests/` unless the user specifies another path.
 ```
 
@@ -216,6 +219,55 @@ Short user-facing command:
 ```text
 Use Baton as the frontend role. Start a shift, wait for work, claim the next eligible job, complete it, finish it with evidence, then re-enter bounded wait if the shift is still active.
 ```
+
+## Staged Review With Markdown Artifacts
+
+For multi-agent review, keep workflow control in Baton and detailed findings in versioned Markdown artifacts. A practical staged flow is:
+
+```text
+Sol initial scan
+  -> Tera scoped deep review
+  -> Sol consolidation
+  -> Planning triage
+  -> implementation, design, and QA handoffs
+```
+
+Store the durable review payload outside SQLite and reference it through each handoff's `source_ref`:
+
+```text
+reports/engineering-review/<review-id>/
+  scope.md
+  sol-initial.md
+  tera-review.md
+  final.md
+```
+
+Create a named Gate before downstream jobs are registered so they cannot open while later review stages are still being created dynamically:
+
+```bash
+tools/baton/bin/baton gate create planning-triage-complete \
+  --role planning \
+  --owner-role planning \
+  --owner-role architecture
+
+tools/baton/bin/baton register \
+  --title "QA finalized review scope" \
+  --role qa \
+  --source-ref "reports/engineering-review/<review-id>/final.md" \
+  --depends-on-gate planning-triage-complete \
+  --objective "Verify the implementation selected by planning triage." \
+  --exit-criteria "QA evidence covers every routed finding."
+```
+
+The reviewer stages may still use ordinary `--depends-on` links as concrete handoffs are created. Planning releases the stable Gate only after consolidation and triage are complete:
+
+```bash
+tools/baton/bin/baton gate release planning-triage-complete \
+  --role planning \
+  --evidence "Final review report triaged and downstream scope approved."
+```
+
+This keeps role ownership, claim safety, state, dependencies, and audit events in Baton while Git and Markdown remain the artifact data plane. If the owner becomes unavailable, a role with `gate.manage` may use `gate transfer` with an explicit reason; it must not bypass unfinished review work.
 
 ## Convenience Wrapper
 

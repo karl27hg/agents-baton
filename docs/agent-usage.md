@@ -64,13 +64,14 @@ bin/baton --db /tmp/baton.sqlite3 role alias-add cd content-design
 bin/baton --db /tmp/baton.sqlite3 next --role cd
 ```
 
-Workflow authority is configured with role permissions. `sm` is seeded with all CR permissions and `handoff.cancel`.
+Workflow authority is configured with role permissions. `sm` is seeded with all CR permissions, `handoff.cancel`, and emergency `gate.manage` authority.
 
 ```bash
 bin/baton --db /tmp/baton.sqlite3 role permission-list sm
 bin/baton --db /tmp/baton.sqlite3 role permission-add architecture cr.review
 bin/baton --db /tmp/baton.sqlite3 role permission-add architecture cr.approve
 bin/baton --db /tmp/baton.sqlite3 role permission-add architecture handoff.cancel
+bin/baton --db /tmp/baton.sqlite3 role permission-add architecture gate.manage
 bin/baton --db /tmp/baton.sqlite3 role permission-remove sm cr.approve
 ```
 
@@ -89,6 +90,37 @@ bin/baton --db /tmp/baton.sqlite3 cancel HO-YYYY-MM-DD-001 \
 ```
 
 This cancels the selected handoff and recursively cancels only `blocked` descendants that depend on it. Unrelated queue branches remain unchanged. It does not stop wait loops or clear a role queue; that is the purpose of `stop`. Baton rejects cancellation of finished or already-cancelled jobs. Worker agents must not infer cancellation from a wait timeout or stop control.
+
+## Named Gate Flow
+
+Use a named Gate when downstream work must be registered before its final dynamic predecessor exists:
+
+```bash
+bin/baton --db /tmp/baton.sqlite3 gate create planning-triage-complete \
+  --role planning
+
+bin/baton --db /tmp/baton.sqlite3 register \
+  --title "QA after planning triage" \
+  --role qa \
+  --depends-on-gate planning-triage-complete \
+  --objective "Verify the final planning scope." \
+  --exit-criteria "QA evidence covers the approved scope."
+```
+
+The creator role owns the Gate by default. Repeat `--owner-role` on `gate create` when multiple roles may resolve it. Only an owner may release or cancel a Gate. An owner or a role with `gate.manage` may transfer ownership.
+
+```bash
+bin/baton --db /tmp/baton.sqlite3 gate release planning-triage-complete \
+  --role planning \
+  --evidence "Planning triage completed."
+
+bin/baton --db /tmp/baton.sqlite3 gate transfer planning-triage-complete \
+  --role sm \
+  --owner-role architecture \
+  --reason "Emergency transfer because the owner is unavailable."
+```
+
+Use `gate transfer` only for an explicit ownership decision. It replaces the complete owner set and records the actor, old owners, new owners, and reason. Gate cancellation cancels only blocked handoffs that require that Gate and their blocked dependency descendants.
 
 ## CR Author Flow
 
@@ -219,7 +251,7 @@ No-op polling is silent. Output is produced for a ready job, an actual promotion
 
 Avoid `--timeout 0` unless the user explicitly asks for a forever-wait experiment. For normal worker operation, repeat bounded waits while the role shift is active. Exit code `2` is only a timeout: check the shift and enter another bounded wait. After finishing a claimed job, re-enter the same wait loop while the shift remains active.
 
-If a required upstream handoff is cancelled, Baton recursively cancels blocked dependent handoffs in that dependency branch. Independent queue branches remain available. Cancelled handoffs do not become ready and must not be reopened by agents.
+If a required upstream handoff or Gate is cancelled, Baton recursively cancels blocked dependent handoffs in that dependency branch. Independent queue branches remain available. Cancelled handoffs do not become ready and must not be reopened by agents.
 
 `--interval` controls the polling sleep between checks. It defaults to 3 seconds and must be at least 1 second.
 

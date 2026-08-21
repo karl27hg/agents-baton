@@ -14,6 +14,10 @@
 - `role_permissions`: role에 부여된 workflow 권한
 - `handoff_jobs`: handoff의 기본 작업 record
 - `handoff_dependencies`: handoff job 사이의 의존성
+- `workflow_gates`: 미래 또는 수동 해제 workflow stage를 위한 named barrier
+- `gate_owners`: 각 Gate를 해제하거나 이관할 수 있는 role
+- `handoff_gate_dependencies`: handoff job에 연결된 Gate 요구사항
+- `gate_events`: Gate 소유권 및 lifecycle 감사 로그
 - `handoff_events`: 상태 변경과 운영 이벤트 감사 로그
 - `handoff_controls`: wait loop 중지/재개 제어
 - `change_requests`: CR workflow 상태와 Markdown 파일 참조
@@ -45,6 +49,7 @@ Release된 migration:
 ```text
 1 initial_schema
 2 handoff_cancel_permission
+3 named_gates
 ```
 
 `baton migrate --check`는 DB가 현재 binary가 아는 최신 schema version인지 읽기 전용으로 확인합니다.
@@ -127,7 +132,7 @@ Primary key:
 
 Seed 권한:
 
-- `init` 또는 migration 시 `sm`은 모든 CR 권한과 `handoff.cancel`을 받습니다.
+- `init` 또는 각 권한을 도입한 migration 시 `sm`은 모든 CR 권한, `handoff.cancel`, `gate.manage`를 받습니다.
 
 알려진 권한:
 
@@ -140,6 +145,7 @@ cr.reject
 cr.assign_implementation
 cr.mark_implemented
 handoff.cancel
+gate.manage
 ```
 
 권한 부여와 철회는 `role permission-add`, `role permission-remove`를 사용합니다. 권한 철회는 프로젝트 정책 결정으로 취급하며, 반복 migration은 전체 기본 권한 집합을 다시 복원하지 않습니다.
@@ -239,6 +245,34 @@ depends_on_job_id=HO-2026-06-02-001
 - `promote-ready`는 취소된 dependency 뒤에 blocked job이 남아 있는 이전 DB record도 함께 정리합니다.
 - 독립 job과 관련 없는 dependency branch는 이 전파로 취소되지 않습니다.
 
+## Named Gate 테이블
+
+`workflow_gates`는 실제 predecessor handoff가 생성되기 전에도 사용할 수 있는 안정적인 이름을 저장합니다.
+
+| 컬럼 | 타입 | 필수 | 용도 |
+| --- | --- | --- | --- |
+| `gate_name` | `text primary key` | 예 | 정규화된 안정적인 Gate 이름입니다. |
+| `status` | `text` | 예 | `pending`, `released`, `cancelled` 중 하나입니다. |
+| `created_by_role` | `text` | 예 | Gate를 생성한 role입니다. |
+| `created_at` | `text` | 예 | UTC 생성 시각입니다. |
+| `resolved_at` | `text` | 아니오 | 해제 또는 취소된 UTC 시각입니다. |
+| `resolution_evidence` | `text` | 아니오 | 필수 해제 evidence 또는 취소 사유입니다. |
+
+`gate_owners`의 primary key는 `(gate_name, role_id)`입니다. `gate create`에 `--owner-role`이 없으면 생성 role이 기본 소유자가 되며, `--owner-role`을 반복하면 공동 소유가 됩니다.
+
+`handoff_gate_dependencies`의 primary key는 `(job_id, gate_name)`입니다. 모든 handoff dependency가 `finished`이고 모든 Gate dependency가 `released`일 때만 handoff가 `open`으로 승격됩니다. 이미 취소된 Gate에 연결해 등록한 handoff는 즉시 `cancelled`가 됩니다.
+
+`gate_events`는 actor role, status transition, 사유 또는 evidence, UTC 시각과 함께 `created`, `released`, `cancelled`, `ownership_transferred` 이벤트를 기록합니다.
+
+Gate 권한 규칙:
+
+- 소유자는 pending Gate를 해제, 취소 또는 이관할 수 있습니다.
+- `gate.manage` 권한이 있는 role은 긴급 복구를 위해 소유권을 이관할 수 있지만, 소유하지 않은 Gate를 직접 해제하거나 취소할 수는 없습니다.
+- `gate transfer`는 전체 소유자 집합을 교체하며 감사 사유가 필수입니다.
+- Gate 해제와 조건을 충족한 handoff 승격은 같은 transaction에서 처리됩니다.
+- Gate 취소는 직접 연결된 blocked handoff와 그 blocked 하위 handoff만 취소하며 관련 없는 queue branch는 유지합니다.
+- Baton은 role 권한을 기록하지만 개별 사용자를 인증하지 않습니다.
+
 ## `handoff_events`
 
 용도:
@@ -274,6 +308,7 @@ finished
 promoted
 cancelled
 dependency_cancelled
+gate_cancelled
 control_stopped
 control_resumed
 shift_started
@@ -450,6 +485,9 @@ idx_handoff_jobs_status_role on handoff_jobs(status, target_role)
 idx_handoff_dependencies_job on handoff_dependencies(job_id)
 idx_handoff_dependencies_dep on handoff_dependencies(depends_on_job_id)
 idx_handoff_events_job on handoff_events(job_id)
+idx_handoff_gate_dependencies_job on handoff_gate_dependencies(job_id)
+idx_handoff_gate_dependencies_gate on handoff_gate_dependencies(gate_name)
+idx_gate_events_gate on gate_events(gate_name)
 idx_cr_status_reviewer on change_requests(status, reviewer_role)
 idx_cr_handoffs_cr on cr_handoffs(cr_id)
 ```
@@ -460,6 +498,8 @@ idx_cr_handoffs_cr on cr_handoffs(cr_id)
 - `dependencies.job_id`: 특정 job의 dependency 조회를 빠르게 처리합니다.
 - `dependencies.depends_on_job_id`: reverse dependency 분석을 빠르게 처리합니다.
 - `events.job_id`: 특정 job의 event history 조회를 빠르게 처리합니다.
+- `handoff_gate_dependencies`: job별 Gate 확인과 Gate별 dependent job 조회를 빠르게 처리합니다.
+- `gate_events.gate_name`: Gate 감사 이력 조회를 빠르게 처리합니다.
 - `cr.status, reviewer_role`: `cr wait-review` 조회를 빠르게 처리합니다.
 - `cr_handoffs.cr_id`: implementation 완료 검사를 빠르게 처리합니다.
 
@@ -514,4 +554,15 @@ handoff_jobs.status=blocked
 handoff_dependencies records dependency edges
 promote-ready updates status to open after dependencies are finished
 handoff_events.event_type=promoted
+```
+
+Named Gate 흐름:
+
+```text
+workflow_gates.status=pending
+gate_owners에 하나 이상의 해제 role 기록
+handoff_gate_dependencies가 blocked job과 Gate 연결
+gate release가 released 전환과 eligible job 승격을 transaction으로 처리
+gate cancel이 cancelled 전환과 영향받는 blocked branch만 취소
+gate_events가 모든 소유권 및 lifecycle 결정을 기록
 ```

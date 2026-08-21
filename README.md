@@ -154,7 +154,7 @@ bin/baton role alias-add fe frontend
 bin/baton next --role fe
 ```
 
-Workflow permissions are stored separately from role membership. `sm` is seeded with all CR permissions and `handoff.cancel`.
+Workflow permissions are stored separately from role membership. `sm` is seeded with all CR permissions, `handoff.cancel`, and emergency `gate.manage` authority.
 
 ```bash
 bin/baton role permission-list sm
@@ -162,6 +162,7 @@ bin/baton role permission-add architecture cr.review
 bin/baton role permission-add architecture cr.approve
 bin/baton role permission-add architecture cr.admin
 bin/baton role permission-add architecture handoff.cancel
+bin/baton role permission-add architecture gate.manage
 bin/baton role permission-remove sm cr.approve
 ```
 
@@ -279,6 +280,53 @@ bin/baton cancel HO-YYYY-MM-DD-001 \
 
 Cancellation is scoped. Baton cancels the selected handoff and recursively cancels only `blocked` handoffs that depend on it. Independent `open`, `blocked`, or `in_progress` jobs in other queue branches are unchanged. It does not stop wait loops or clear a role queue; use `stop` for wait control. Finished and already-cancelled handoffs cannot be cancelled again.
 
+## Named Gates
+
+Create a Gate before the final dynamic predecessor handoff exists, then register downstream work against its stable name:
+
+```bash
+bin/baton gate create planning-triage-complete --role planning
+
+bin/baton register \
+  --title "QA after planning triage" \
+  --role qa \
+  --depends-on-gate planning-triage-complete \
+  --objective "Verify the finalized implementation scope." \
+  --exit-criteria "QA evidence covers the planning-approved scope."
+```
+
+The creating role is the default owner. Repeat `--owner-role` during creation for joint ownership:
+
+```bash
+bin/baton gate create review-complete \
+  --role planning \
+  --owner-role planning \
+  --owner-role architecture
+```
+
+An owner releases or cancels a pending Gate. Release evidence is required and eligible blocked handoffs are promoted transactionally.
+
+```bash
+bin/baton gate release planning-triage-complete \
+  --role planning \
+  --evidence "Planning triage approved the final scope."
+
+bin/baton gate cancel obsolete-phase \
+  --role planning \
+  --reason "The phase was removed from the workflow."
+```
+
+Gate cancellation recursively cancels only blocked handoffs in that Gate's dependency branches. For emergency recovery, a current owner or role with `gate.manage` can replace the owner set with an audited reason:
+
+```bash
+bin/baton gate transfer planning-triage-complete \
+  --role sm \
+  --owner-role architecture \
+  --reason "Planning agent is unavailable."
+```
+
+Inspect Gate state and audit history with `gate status` and `gate events`. Baton records authority by role; user-level authentication remains outside Baton.
+
 ## Change Request Flow
 
 CR Markdown files hold the editable request body. SQLite is the authority for workflow state and Baton keeps only the Markdown frontmatter in sync.
@@ -369,6 +417,10 @@ State-changing commands run inside `BEGIN IMMEDIATE` transactions:
 - `migrate`
 - `cancel`
 - `register`
+- `gate create`
+- `gate release`
+- `gate cancel`
+- `gate transfer`
 - `claim`
 - `finish`
 - `promote-ready`
@@ -398,6 +450,8 @@ Read-only commands do not claim ownership:
 - `status`
 - `next`
 - `events`
+- `gate status`
+- `gate events`
 - `control status`
 - `shift status`
 - `cr status`
@@ -418,6 +472,7 @@ tests/concurrent-claim.sh
 tests/wait-stop.sh
 tests/agent-id.sh
 tests/cr-flow.sh
+tests/gates.sh
 tests/handoff-cancel.sh
 tests/handoff-dependencies.sh
 tests/migrate.sh
@@ -438,6 +493,7 @@ Audit history:
 bin/baton-report audit
 bin/baton-report audit --job HO-YYYY-MM-DD-001
 bin/baton-report audit --cr CR-YYYY-MM-DD-001
+bin/baton-report audit --gate planning-triage-complete
 bin/baton-report audit --role frontend
 bin/baton-report audit --format json
 bin/baton-report audit --format csv
@@ -480,7 +536,7 @@ Required agent loop:
 5. On exit `3`, stop waiting until the role is resumed.
 6. After `finish`, return to step 2 while the shift remains active.
 
-A blocked handoff is not returned by `next`. `wait` keeps checking its required upstream jobs and returns after the handoff is promoted to `open`. If a required upstream handoff is cancelled, Baton recursively marks its blocked dependents as `cancelled`; they will never be promoted.
+A blocked handoff is not returned by `next`. `wait` keeps checking required upstream jobs and named Gates, then returns after every requirement is resolved and the handoff is promoted to `open`. If a required upstream handoff or Gate is cancelled, Baton recursively marks that blocked dependency branch as `cancelled`; unrelated branches remain active.
 
 `--timeout 0` means wait forever, but that should be used only in explicit experiments. Normal workers must repeat bounded waits until their shift expires or a stop control is set.
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.4.0
+
+- Added named workflow gates for handoffs that must wait for a future or manually resolved stage.
+- Added default creator ownership, optional joint owners, owner release/cancel, and audited emergency ownership transfer through `gate.manage`.
+- Added transactional gate release promotion and gate cancellation propagation while preserving unrelated queue branches.
+- Added schema migration v3 and read-only gate audit/summary reporting.
+- Documented the staged Sol/Tera review workflow and durable Markdown artifact pattern from GitHub issue #3.
+- Added gate ownership, migration, promotion, cancellation, reporting, and independent-queue regression coverage.
+
 ## v0.3.0
 
 - Added scoped handoff cancellation through `baton cancel` and the `handoff.cancel` role permission.
