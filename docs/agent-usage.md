@@ -122,6 +122,8 @@ bin/baton --db /tmp/baton.sqlite3 gate transfer planning-triage-complete \
 
 Use `gate transfer` only for an explicit ownership decision. It replaces the complete owner set and records the actor, old owners, new owners, and reason. Gate cancellation cancels only blocked handoffs that require that Gate and their blocked dependency descendants.
 
+Read `docs/gates.md` before operating Gates in a live project. It is the canonical guide for ownership defaults, joint ownership, emergency transfer, terminal states, cancellation propagation, audit, upgrades, and conflict limitations.
+
 ## CR Author Flow
 
 CR Markdown is the editable request body. Baton owns workflow state and synchronizes only the Markdown frontmatter.

@@ -269,6 +269,8 @@ tools/baton/bin/baton gate release planning-triage-complete \
 
 This keeps role ownership, claim safety, state, dependencies, and audit events in Baton while Git and Markdown remain the artifact data plane. If the owner becomes unavailable, a role with `gate.manage` may use `gate transfer` with an explicit reason; it must not bypass unfinished review work.
 
+For production operating rules and failure cases, read `docs/gates.md` before enabling role agents to create or resolve Gates.
+
 ## Convenience Wrapper
 
 For easier use, add a project-local wrapper such as `scripts/baton`:

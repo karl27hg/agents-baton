@@ -49,9 +49,10 @@ An SM/system-manager agent should read these documents in order before configuri
 
 1. `README.md`: project overview, default roles, CR permissions, wait/shift controls, reports, and GitHub issue wrapper.
 2. `docs/using-baton-in-projects.md`: install Baton into another repository, set project `.gitignore`, add `AGENTS.md` rules, and copy role-agent prompts.
-3. `docs/agent-prompt.md`: prompt content to attach to Codex role agents that wait for handoff or CR review work.
-4. `docs/agent-usage.md`: command examples for role setup, CR review, waits, shifts, and stop/resume operations.
-5. `docs/schema.md` or `docs/schema-ko.md`: database schema and audit table reference when troubleshooting or reviewing workflow state.
+3. `docs/gates.md`: named Gate ownership, release, cancellation, emergency transfer, audit, upgrade, and safety rules.
+4. `docs/agent-prompt.md`: prompt content to attach to Codex role agents that wait for handoff or CR review work.
+5. `docs/agent-usage.md`: command examples for role setup, CR review, waits, shifts, and stop/resume operations.
+6. `docs/schema.md` or `docs/schema-ko.md`: database schema and audit table reference when troubleshooting or reviewing workflow state.
 
 For a new database:
 
@@ -326,6 +327,8 @@ bin/baton gate transfer planning-triage-complete \
 ```
 
 Inspect Gate state and audit history with `gate status` and `gate events`. Baton records authority by role; user-level authentication remains outside Baton.
+
+See `docs/gates.md` for the complete operational procedure and cautions, including explicit owner-list replacement, terminal Gate states, cancellation scope, upgrade checks, and the distinction between workflow Gates and execution serialization.
 
 ## Change Request Flow
 

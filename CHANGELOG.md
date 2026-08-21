@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Added a dedicated named Gate operations guide covering ownership, emergency transfer, cancellation scope, terminal states, audit, upgrades, and execution-conflict limitations.
+
 ## v0.4.0
 
 - Added named workflow gates for handoffs that must wait for a future or manually resolved stage.
