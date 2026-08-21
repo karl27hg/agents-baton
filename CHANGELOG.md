@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.4.1
 
 - Added a dedicated named Gate operations guide covering ownership, emergency transfer, cancellation scope, terminal states, audit, upgrades, and execution-conflict limitations.
 
