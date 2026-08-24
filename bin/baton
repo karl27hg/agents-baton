@@ -28,7 +28,10 @@ DEFAULT_ROLES = (
 
 STATUSES = {"blocked", "open", "in_progress", "finished", "cancelled"}
 CR_STATUSES = {"draft", "submitted", "revision_requested", "approved", "rejected", "implemented", "cancelled"}
-BATON_VERSION = "0.4.0"
+BATON_VERSION = "0.5.0"
+AUTO_INTERVAL_BASE_SECONDS = 3
+AUTO_INTERVAL_MAX_SECONDS = 30
+WAITER_LEASE_SECONDS = 30
 REVIEW_PERMISSIONS = {
     "cr.admin",
     "cr.review",
@@ -45,7 +48,7 @@ GATE_PERMISSIONS = {
     "gate.manage",
 }
 KNOWN_PERMISSIONS = REVIEW_PERMISSIONS | HANDOFF_PERMISSIONS | GATE_PERMISSIONS
-LATEST_SCHEMA_VERSION = 3
+LATEST_SCHEMA_VERSION = 4
 
 
 class MigrationError(RuntimeError):
@@ -84,7 +87,9 @@ def parse_duration(value: str) -> timedelta:
     raise SystemExit(f"ERROR: unsupported duration unit: {unit}")
 
 
-def parse_poll_interval(value: str) -> int:
+def parse_poll_interval(value: str) -> int | None:
+    if value.strip().lower() == "auto":
+        return None
     try:
         interval = int(value)
     except ValueError as exc:
@@ -92,6 +97,31 @@ def parse_poll_interval(value: str) -> int:
     if interval < 1:
         raise argparse.ArgumentTypeError("interval must be at least 1 second")
     return interval
+
+
+def automatic_poll_interval(active_waiters: int) -> int:
+    return min(AUTO_INTERVAL_MAX_SECONDS, AUTO_INTERVAL_BASE_SECONDS * max(1, active_waiters))
+
+
+def poll_sleep_seconds(configured_interval: int | None, active_waiters: int, waiter_id: str) -> float:
+    if configured_interval is not None:
+        return float(configured_interval)
+    target = automatic_poll_interval(active_waiters)
+    jitter_units = int(waiter_id.replace("-", "")[-8:], 16) % 501
+    jitter_fraction = 0.05 + (jitter_units / 10000)
+    return max(1.0, target * (1.0 - jitter_fraction))
+
+
+def bounded_sleep_seconds(interval: float, deadline: float | None) -> float:
+    if deadline is None:
+        return interval
+    return min(interval, max(0.0, deadline - time.monotonic()))
+
+
+def waiter_lease_seconds(configured_interval: int | None) -> int:
+    if configured_interval is None:
+        return WAITER_LEASE_SECONDS
+    return max(WAITER_LEASE_SECONDS, configured_interval + 5)
 
 
 def today_text() -> str:
@@ -381,10 +411,30 @@ def migration_v3_named_gates(con: sqlite3.Connection) -> None:
     )
 
 
+def migration_v4_waiter_leases(con: sqlite3.Connection) -> None:
+    execute_sql_script(
+        con,
+        """
+        create table if not exists waiter_leases (
+          waiter_id text primary key,
+          wait_kind text not null check (wait_kind in ('handoff', 'cr_review')),
+          role_id text not null references roles(role_id),
+          started_at text not null,
+          heartbeat_at text not null,
+          lease_expires_at text not null
+        );
+
+        create index if not exists idx_waiter_leases_expiry
+          on waiter_leases(lease_expires_at);
+        """,
+    )
+
+
 MIGRATIONS = (
     (1, "initial_schema", migration_v1_initial_schema),
     (2, "handoff_cancel_permission", migration_v2_handoff_cancel_permission),
     (3, "named_gates", migration_v3_named_gates),
+    (4, "waiter_leases", migration_v4_waiter_leases),
 )
 
 
@@ -883,6 +933,66 @@ def get_stop_control(con: sqlite3.Connection, role: str) -> sqlite3.Row | None:
         """,
         scopes,
     ).fetchone()
+
+
+def start_waiter(args: argparse.Namespace, wait_kind: str, permission: str = "") -> tuple[str, str, int]:
+    with connect(args.db) as con:
+        init_schema(con)
+        role = require_permission(con, args.role, permission) if permission else resolve_role(con, args.role)
+    waiter_id = str(uuid.uuid4())
+    active_waiters = heartbeat_waiter(
+        args.db,
+        waiter_id,
+        wait_kind,
+        role,
+        waiter_lease_seconds(args.interval),
+    )
+    return waiter_id, role, active_waiters
+
+
+def heartbeat_waiter(
+    db_path: str,
+    waiter_id: str,
+    wait_kind: str,
+    role: str,
+    lease_seconds: int,
+) -> int:
+    now_value = datetime.now(timezone.utc)
+    now = format_utc(now_value)
+    expires_at = format_utc(now_value + timedelta(seconds=lease_seconds))
+    with connect(db_path) as con:
+        init_schema(con)
+        begin_immediate(con)
+        con.execute("delete from waiter_leases where lease_expires_at <= ?", (now,))
+        con.execute(
+            """
+            insert into waiter_leases(
+              waiter_id, wait_kind, role_id, started_at, heartbeat_at, lease_expires_at
+            )
+            values (?, ?, ?, ?, ?, ?)
+            on conflict(waiter_id) do update set
+              wait_kind = excluded.wait_kind,
+              role_id = excluded.role_id,
+              heartbeat_at = excluded.heartbeat_at,
+              lease_expires_at = excluded.lease_expires_at
+            """,
+            (waiter_id, wait_kind, role, now, now, expires_at),
+        )
+        active_waiters = con.execute("select count(*) from waiter_leases").fetchone()[0]
+        con.commit()
+    return int(active_waiters)
+
+
+def unregister_waiter(db_path: str, waiter_id: str) -> None:
+    try:
+        with connect(db_path) as con:
+            init_schema(con)
+            begin_immediate(con)
+            con.execute("delete from waiter_leases where waiter_id = ?", (waiter_id,))
+            con.commit()
+    except (MigrationError, OSError, sqlite3.Error):
+        # A failed cleanup is bounded by the lease expiry and must not hide the wait result.
+        pass
 
 
 def upsert_control(con: sqlite3.Connection, scope: str, stopped: bool, reason: str = "") -> None:
@@ -1754,32 +1864,44 @@ def command_cr_events(args: argparse.Namespace) -> int:
 
 def command_cr_wait_review(args: argparse.Namespace) -> int:
     deadline = None if args.timeout == 0 else time.monotonic() + args.timeout
-    while True:
-        with connect(args.db) as con:
-            init_schema(con)
-            role = require_permission(con, args.role, "cr.review")
-            stopped = get_stop_control(con, role)
-            row = con.execute(
-                """
-                select cr_id, title, file_path
-                from change_requests
-                where status = 'submitted' and reviewer_role = ?
-                order by submitted_at, created_at, cr_id
-                limit 1
-                """,
-                (role,),
-            ).fetchone()
-        if stopped:
-            reason = f" reason={stopped['reason']}" if stopped["reason"] else ""
-            print(f"Stopped waiting for CR review role {role} by {stopped['scope']}.{reason}")
-            return 3
-        if row:
-            print(f"{row['cr_id']}\t{row['title']}\t{row['file_path']}")
-            return 0
-        if deadline is not None and time.monotonic() >= deadline:
-            print(f"Timed out waiting for CR review role {role}")
-            return 2
-        time.sleep(args.interval)
+    waiter_id, role, active_waiters = start_waiter(args, "cr_review", "cr.review")
+    try:
+        while True:
+            with connect(args.db) as con:
+                init_schema(con)
+                require_permission(con, role, "cr.review")
+                stopped = get_stop_control(con, role)
+                row = con.execute(
+                    """
+                    select cr_id, title, file_path
+                    from change_requests
+                    where status = 'submitted' and reviewer_role = ?
+                    order by submitted_at, created_at, cr_id
+                    limit 1
+                    """,
+                    (role,),
+                ).fetchone()
+            if stopped:
+                reason = f" reason={stopped['reason']}" if stopped["reason"] else ""
+                print(f"Stopped waiting for CR review role {role} by {stopped['scope']}.{reason}")
+                return 3
+            if row:
+                print(f"{row['cr_id']}\t{row['title']}\t{row['file_path']}")
+                return 0
+            if deadline is not None and time.monotonic() >= deadline:
+                print(f"Timed out waiting for CR review role {role}")
+                return 2
+            interval = poll_sleep_seconds(args.interval, active_waiters, waiter_id)
+            time.sleep(bounded_sleep_seconds(interval, deadline))
+            active_waiters = heartbeat_waiter(
+                args.db,
+                waiter_id,
+                "cr_review",
+                role,
+                waiter_lease_seconds(args.interval),
+            )
+    finally:
+        unregister_waiter(args.db, waiter_id)
 
 
 def command_status(args: argparse.Namespace) -> int:
@@ -2219,24 +2341,35 @@ def command_control_status(args: argparse.Namespace) -> int:
 
 def command_wait(args: argparse.Namespace) -> int:
     deadline = None if args.timeout == 0 else time.monotonic() + args.timeout
-    while True:
-        with connect(args.db) as con:
-            init_schema(con)
-            role = resolve_role(con, args.role)
-            stopped = get_stop_control(con, role)
-        if stopped:
-            reason = f" reason={stopped['reason']}" if stopped["reason"] else ""
-            print(f"Stopped waiting for role {role} by {stopped['scope']}.{reason}")
-            return 3
-        promote_args = argparse.Namespace(db=args.db, actor_role=args.role, quiet=True)
-        command_promote_ready(promote_args)
-        next_args = argparse.Namespace(db=args.db, role=role, quiet=True)
-        if command_next(next_args) == 0:
-            return 0
-        if deadline is not None and time.monotonic() >= deadline:
-            print(f"Timed out waiting for role {role}")
-            return 2
-        time.sleep(args.interval)
+    waiter_id, role, active_waiters = start_waiter(args, "handoff")
+    try:
+        while True:
+            with connect(args.db) as con:
+                init_schema(con)
+                stopped = get_stop_control(con, role)
+            if stopped:
+                reason = f" reason={stopped['reason']}" if stopped["reason"] else ""
+                print(f"Stopped waiting for role {role} by {stopped['scope']}.{reason}")
+                return 3
+            promote_args = argparse.Namespace(db=args.db, actor_role=role, quiet=True)
+            command_promote_ready(promote_args)
+            next_args = argparse.Namespace(db=args.db, role=role, quiet=True)
+            if command_next(next_args) == 0:
+                return 0
+            if deadline is not None and time.monotonic() >= deadline:
+                print(f"Timed out waiting for role {role}")
+                return 2
+            interval = poll_sleep_seconds(args.interval, active_waiters, waiter_id)
+            time.sleep(bounded_sleep_seconds(interval, deadline))
+            active_waiters = heartbeat_waiter(
+                args.db,
+                waiter_id,
+                "handoff",
+                role,
+                waiter_lease_seconds(args.interval),
+            )
+    finally:
+        unregister_waiter(args.db, waiter_id)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2423,7 +2556,12 @@ def build_parser() -> argparse.ArgumentParser:
     cr_wait_review = cr_sub.add_parser("wait-review")
     cr_wait_review.add_argument("--role", required=True)
     cr_wait_review.add_argument("--timeout", type=int, default=900, help="seconds; default: 900; 0 means forever")
-    cr_wait_review.add_argument("--interval", type=parse_poll_interval, default=3, help="poll seconds; default: 3; minimum: 1")
+    cr_wait_review.add_argument(
+        "--interval",
+        type=parse_poll_interval,
+        default=None,
+        help="poll seconds or auto; default: auto (3 seconds per active waiter, maximum 30); minimum fixed value: 1",
+    )
     cr_wait_review.set_defaults(func=command_cr_wait_review)
 
     next_parser = sub.add_parser("next", help="inspect the next ready handoff without waiting")
@@ -2497,7 +2635,12 @@ def build_parser() -> argparse.ArgumentParser:
     wait = sub.add_parser("wait", help="wait for a ready handoff")
     wait.add_argument("--role", required=True)
     wait.add_argument("--timeout", type=int, default=900, help="seconds; default: 900; 0 means forever")
-    wait.add_argument("--interval", type=parse_poll_interval, default=3, help="poll seconds; default: 3; minimum: 1")
+    wait.add_argument(
+        "--interval",
+        type=parse_poll_interval,
+        default=None,
+        help="poll seconds or auto; default: auto (3 seconds per active waiter, maximum 30); minimum fixed value: 1",
+    )
     wait.set_defaults(func=command_wait)
     return parser
 

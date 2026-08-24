@@ -1,5 +1,7 @@
 # SQLite 스키마
 
+[English (primary)](schema.md) | 한국어
+
 이 문서는 SQLite 기반 Baton에서 사용하는 테이블 구조와 record의 용도를 설명합니다.
 
 이 Baton workflow에서는 SQLite DB가 handoff runtime state의 기준입니다. Agent는 record를 직접 수정하지 말고 `baton` 명령을 사용해야 합니다.
@@ -20,6 +22,7 @@
 - `gate_events`: Gate 소유권 및 lifecycle 감사 로그
 - `handoff_events`: 상태 변경과 운영 이벤트 감사 로그
 - `handoff_controls`: wait loop 중지/재개 제어
+- `waiter_leases`: polling interval 자동 조절을 위한 handoff 및 CR waiter heartbeat
 - `change_requests`: CR workflow 상태와 Markdown 파일 참조
 - `cr_events`: CR 상태 변경 감사 로그
 - `cr_handoffs`: CR과 revision/implementation handoff 연결
@@ -50,6 +53,7 @@ Release된 migration:
 1 initial_schema
 2 handoff_cancel_permission
 3 named_gates
+4 waiter_leases
 ```
 
 `baton migrate --check`는 DB가 현재 binary가 아는 최신 schema version인지 읽기 전용으로 확인합니다.
@@ -369,6 +373,34 @@ Claim 동작:
 
 - `claim`은 새 작업 착수 전에 같은 control을 확인합니다.
 - `finish`는 shift control을 확인하지 않으므로, 이미 claim한 작업은 shift 만료 후에도 완료 보고할 수 있습니다.
+
+## `waiter_leases`
+
+용도:
+
+- 같은 Baton DB를 공유하는 `wait`, `cr wait-review` process를 추적합니다.
+- 기본 자동 polling interval 계산에 사용하는 활성 waiter 수를 제공합니다.
+- workflow 이력이나 감사 증거가 아닌 일시적인 조율 상태를 저장합니다.
+
+컬럼:
+
+| 컬럼 | 타입 | 필수 | 용도 |
+| --- | --- | --- | --- |
+| `waiter_id` | `text primary key` | 예 | wait 명령 시작 시 생성되는 process-local UUID입니다. |
+| `wait_kind` | `text` | 예 | `handoff` 또는 `cr_review`입니다. |
+| `role_id` | `text` | 예 | waiter에 연결된 표준 role입니다. |
+| `started_at` | `text` | 예 | wait 명령이 등록된 UTC 시각입니다. |
+| `heartbeat_at` | `text` | 예 | 최근 polling heartbeat UTC 시각입니다. |
+| `lease_expires_at` | `text` | 예 | heartbeat 만료 시각입니다. 자동 wait는 30초이고 긴 고정 interval에는 5초 여유가 추가됩니다. |
+
+동작:
+
+- 정상 timeout, stop, 작업 발견, 오류 종료 시 `finally` cleanup에서 lease를 제거합니다.
+- process 또는 pipe가 cleanup 전에 끊기면 이후 waiter heartbeat가 만료된 lease를 제거합니다.
+- 자동 모드는 `min(30초, 3초 × 활성 waiter 수)`를 목표로 하며 동시 polling 방지를 위한 작은 고정 jitter를 추가합니다.
+- 숫자 `--interval`은 해당 process에 고정 적용되지만, 그 lease도 자동 waiter가 사용하는 활성 수에 포함됩니다.
+- 25초를 초과하는 고정 interval은 정상 sleep 중인 process가 stale로 제거되지 않도록 `interval + 5초` lease를 사용합니다.
+- Lease record는 `baton-report` 감사 또는 workflow summary에 포함되지 않습니다.
 
 ## `change_requests`
 

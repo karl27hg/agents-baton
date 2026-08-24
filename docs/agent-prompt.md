@@ -40,19 +40,20 @@ If several agents share the same workspace, do not let them unintentionally shar
 - Report only when `wait` returns, times out, or is stopped.
 - No-op polling is silent; normal lack of output does not mean the process is disconnected.
 - Avoid `--timeout 0` unless the user explicitly asks for a forever-wait experiment.
-- Keep `--interval` at 1 second or higher; the default is 3 seconds.
+- Use the default automatic interval. Set a numeric `--interval` only when the user or project policy requires a fixed response bound.
+- Omitting `--interval` is equivalent to `--interval auto`.
 - Keep repeating bounded waits while the shift is active. A timeout is not completion.
 
 Recommended command:
 
 ```bash
-bin/baton --db <db> wait --role <role> --timeout 900 --interval 3
+bin/baton --db <db> wait --role <role> --timeout 900
 ```
 
 Reviewer roles waiting for CR review work use:
 
 ```bash
-bin/baton --db <db> cr wait-review --role <role> --timeout 900 --interval 3
+bin/baton --db <db> cr wait-review --role <role> --timeout 900
 ```
 
 Exit handling:

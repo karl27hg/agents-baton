@@ -84,7 +84,7 @@ with sqlite3.connect(sys.argv[1]) as con:
 PY
 
 BEFORE="$(snapshot_workflow_data "$DB")"
-"$CLI" --db "$DB" migrate | grep 'schema=0->3 applied=1:initial_schema,2:handoff_cancel_permission,3:named_gates' >/dev/null
+"$CLI" --db "$DB" migrate | grep 'schema=0->4 applied=1:initial_schema,2:handoff_cancel_permission,3:named_gates,4:waiter_leases' >/dev/null
 AFTER="$(snapshot_workflow_data "$DB")"
 if [[ "$BEFORE" != "$AFTER" ]]; then
   echo "ERROR: workflow data changed during migration" >&2
@@ -101,14 +101,19 @@ with sqlite3.connect(sys.argv[1]) as con:
     row = con.execute(
         "select version, name from schema_migrations order by version"
     ).fetchall()
-if row != [(1, "initial_schema"), (2, "handoff_cancel_permission"), (3, "named_gates")]:
+if row != [
+    (1, "initial_schema"),
+    (2, "handoff_cancel_permission"),
+    (3, "named_gates"),
+    (4, "waiter_leases"),
+]:
     raise SystemExit(f"unexpected migration records: {row}")
 PY
 
-"$CLI" --db "$DB" migrate | grep 'schema=3->3 applied=none' >/dev/null
-"$CLI" --db "$DB" migrate --check | grep 'schema=3' >/dev/null
+"$CLI" --db "$DB" migrate | grep 'schema=4->4 applied=none' >/dev/null
+"$CLI" --db "$DB" migrate --check | grep 'schema=4' >/dev/null
 chmod 444 "$DB"
-"$CLI" --db "$DB" migrate --check | grep 'schema=3' >/dev/null
+"$CLI" --db "$DB" migrate --check | grep 'schema=4' >/dev/null
 chmod 644 "$DB"
 if [[ "$(snapshot_workflow_data "$DB")" != "$AFTER" ]]; then
   echo "ERROR: repeated migration changed workflow data" >&2
@@ -149,7 +154,7 @@ import sys
 
 with sqlite3.connect(sys.argv[1]) as con:
     version = con.execute("select max(version) from schema_migrations").fetchone()[0]
-if version != 3:
+if version != 4:
     raise SystemExit(f"automatic migration did not apply: {version}")
 PY
 
@@ -160,7 +165,9 @@ import sqlite3
 import sys
 
 with sqlite3.connect(sys.argv[1]) as con:
+    con.execute("delete from schema_migrations where version = 4")
     con.execute("delete from schema_migrations where version = 3")
+    con.execute("drop table waiter_leases")
     con.execute("drop table gate_events")
     con.execute("drop table handoff_gate_dependencies")
     con.execute("drop table gate_owners")
@@ -176,14 +183,14 @@ if "$CLI" --db "$UPGRADE_DB" migrate --check >/dev/null 2>&1; then
   echo "ERROR: migrate --check accepted a pending v0.3.0 database" >&2
   exit 1
 fi
-"$CLI" --db "$UPGRADE_DB" migrate | grep 'schema=2->3 applied=3:named_gates' >/dev/null
+"$CLI" --db "$UPGRADE_DB" migrate | grep 'schema=2->4 applied=3:named_gates,4:waiter_leases' >/dev/null
 "$CLI" --db "$UPGRADE_DB" role permission-list sm | grep 'handoff.cancel' >/dev/null
 "$CLI" --db "$UPGRADE_DB" role permission-list sm | grep 'gate.manage' >/dev/null
 if "$CLI" --db "$UPGRADE_DB" role permission-list sm | grep 'cr.approve' >/dev/null; then
   echo "ERROR: migration restored a project-revoked permission" >&2
   exit 1
 fi
-"$CLI" --db "$UPGRADE_DB" migrate --check | grep 'schema=3' >/dev/null
+"$CLI" --db "$UPGRADE_DB" migrate --check | grep 'schema=4' >/dev/null
 
 ROLLBACK_DB="$TMP/rollback.sqlite3"
 python3 - "$ROLLBACK_DB" <<'PY'

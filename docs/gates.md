@@ -1,5 +1,7 @@
 # Named Gate Operations
 
+English (primary) | [한국어 안내](../README.ko.md)
+
 This guide covers the operational use and safety rules for named workflow Gates introduced in Baton v0.4.0.
 
 A Gate is a stable workflow prerequisite. Use it when downstream work must be registered before a future dynamic stage has a handoff ID, or when a human or role must explicitly approve progression.

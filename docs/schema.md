@@ -1,5 +1,7 @@
 # SQLite Schema
 
+English (primary) | [한국어](schema.ko.md)
+
 This document explains the SQLite tables used by the Baton.
 
 The SQLite database is the runtime authority for handoff state in this Baton workflow. Agents should use `baton` commands instead of editing records directly.
@@ -20,6 +22,7 @@ Tables:
 - `gate_events`: Gate ownership and lifecycle audit log
 - `handoff_events`: audit log of state changes and operational events
 - `handoff_controls`: stop/resume controls for wait loops
+- `waiter_leases`: short-lived handoff and CR waiter heartbeats for automatic polling intervals
 - `change_requests`: CR workflow state and Markdown file pointer
 - `cr_events`: audit log of CR state changes
 - `cr_handoffs`: links CRs to revision or implementation handoffs
@@ -50,6 +53,7 @@ Released migrations:
 1 initial_schema
 2 handoff_cancel_permission
 3 named_gates
+4 waiter_leases
 ```
 
 `baton migrate --check` performs a read-only check that the database is at the latest known schema version.
@@ -369,6 +373,34 @@ Claim behavior:
 
 - `claim` checks the same controls before starting new work.
 - `finish` does not check shift controls, so already-claimed work can be reported after shift expiry.
+
+## `waiter_leases`
+
+Purpose:
+
+- Tracks active `wait` and `cr wait-review` processes sharing one Baton database.
+- Provides the active waiter count used by the default automatic polling interval.
+- Stores ephemeral coordination state, not workflow history or audit evidence.
+
+Columns:
+
+| Column | Type | Required | Purpose |
+| --- | --- | --- | --- |
+| `waiter_id` | `text primary key` | yes | Process-local UUID generated when a wait command starts. |
+| `wait_kind` | `text` | yes | `handoff` or `cr_review`. |
+| `role_id` | `text` | yes | Canonical role associated with the waiter. |
+| `started_at` | `text` | yes | UTC timestamp when this wait command registered. |
+| `heartbeat_at` | `text` | yes | UTC timestamp of its latest polling heartbeat. |
+| `lease_expires_at` | `text` | yes | UTC heartbeat expiry. Automatic waits use 30 seconds; long fixed intervals include a 5-second grace. |
+
+Behavior:
+
+- Normal timeout, stop, ready-work, and error exits remove the lease in a `finally` cleanup.
+- If a process or pipe disconnects before cleanup, a later waiter heartbeat deletes the expired lease.
+- Automatic mode targets `min(30, 3 * active waiters)` seconds and adds a small stable jitter to avoid synchronized polling.
+- A numeric `--interval` remains fixed for that process, but its lease is included in the count used by automatic waiters.
+- A fixed interval over 25 seconds uses a lease of `interval + 5` seconds so a healthy sleeping process is not removed as stale.
+- Lease rows are not included in `baton-report` audit or workflow summaries.
 
 ## `change_requests`
 

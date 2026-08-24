@@ -1,5 +1,9 @@
 # Baton
 
+English (primary) | [한국어 안내](README.ko.md)
+
+English documentation is the canonical source for behavior and command semantics. The Korean guide provides an overview and navigation to the canonical documents; when the two differ, follow the English document and the installed CLI help.
+
 Baton is a SQLite-backed CLI for coordinating role handoffs, CR review, bounded waits, and shift controls between Codex app agents working in the same repository.
 
 It is designed for use in the Codex app, where multiple role-oriented agents may need a shared local workflow state while working in the same repository.
@@ -52,7 +56,7 @@ An SM/system-manager agent should read these documents in order before configuri
 3. `docs/gates.md`: named Gate ownership, release, cancellation, emergency transfer, audit, upgrade, and safety rules.
 4. `docs/agent-prompt.md`: prompt content to attach to Codex role agents that wait for handoff or CR review work.
 5. `docs/agent-usage.md`: command examples for role setup, CR review, waits, shifts, and stop/resume operations.
-6. `docs/schema.md` or `docs/schema-ko.md`: database schema and audit table reference when troubleshooting or reviewing workflow state.
+6. `docs/schema.md` or its Korean translation, `docs/schema.ko.md`: database schema and audit table reference when troubleshooting or reviewing workflow state.
 
 For a new database:
 
@@ -97,7 +101,7 @@ Schema reference:
 
 ```text
 docs/schema.md
-docs/schema-ko.md
+docs/schema.ko.md
 ```
 
 Using Baton in another project:
@@ -350,7 +354,7 @@ The author role and reviewer role must be different. Baton rejects self-review C
 Reviewer roles can wait for submitted CRs:
 
 ```bash
-bin/baton cr wait-review --role sm --timeout 900 --interval 3
+bin/baton cr wait-review --role sm --timeout 900
 ```
 
 If the CR needs more work, request a revision. Baton creates a revision handoff for the author role, and another revision cannot be requested until the CR is resubmitted.
@@ -427,6 +431,7 @@ State-changing commands run inside `BEGIN IMMEDIATE` transactions:
 - `claim`
 - `finish`
 - `promote-ready`
+- `wait`
 - `stop`
 - `resume`
 - `shift start`
@@ -442,6 +447,7 @@ State-changing commands run inside `BEGIN IMMEDIATE` transactions:
 - `cr cancel`
 - `cr create-handoff`
 - `cr mark-implemented`
+- `cr wait-review`
 
 This is intended to replace ad-hoc lock files for ID assignment and state transitions.
 
@@ -473,6 +479,7 @@ Run smoke tests:
 tests/smoke.sh
 tests/concurrent-claim.sh
 tests/wait-stop.sh
+tests/auto-interval.sh
 tests/agent-id.sh
 tests/cr-flow.sh
 tests/gates.sh
@@ -516,13 +523,20 @@ bin/baton-report summary --format json
 No-op polling is silent. `wait` prints only a ready job, an actual promotion/cancellation, timeout, or stop result.
 
 ```bash
-bin/baton wait --role frontend --timeout 900 --interval 3
+bin/baton wait --role frontend --timeout 900
+```
+
+Omitting `--interval` is equivalent to selecting automatic mode explicitly:
+
+```bash
+bin/baton wait --role frontend --timeout 900 --interval auto
 ```
 
 Default wait settings:
 
 - `--timeout 900`: wait for up to 900 seconds.
-- `--interval 3`: poll every 3 seconds. The minimum accepted interval is 1 second.
+- `--interval auto`: the default. The target interval is `min(30, 3 * active waiters)` seconds across handoff and CR waiters sharing the database.
+- `--interval N`: optional fixed override. The minimum accepted value is 1 second.
 
 Exit behavior:
 
@@ -544,6 +558,26 @@ A blocked handoff is not returned by `next`. `wait` keeps checking required upst
 `--timeout 0` means wait forever, but that should be used only in explicit experiments. Normal workers must repeat bounded waits until their shift expires or a stop control is set.
 
 `cr wait-review` uses the same stop/resume controls and exit codes, but checks submitted CRs assigned to the reviewer role instead of handoff jobs.
+
+## Resource Usage
+
+The wait commands use polling with `time.sleep()` between unsuccessful checks. They do not busy-spin:
+
+- `wait` checks stop/shift controls, reconciles dependency and Gate state, and inspects one role queue per polling cycle.
+- `cr wait-review` checks stop/shift controls and the assigned review queue per polling cycle.
+- Both commands register a heartbeat lease in `waiter_leases`. Automatic waits use 30 seconds; fixed intervals over 25 seconds use `interval + 5` seconds so healthy sleepers remain active. Normal exits remove the lease immediately, and a later heartbeat removes stale leases left by disconnected processes.
+- Automatic mode counts all active handoff and CR waiters in the same database, including waiters using a fixed override. Its target interval is 3 seconds per active waiter, capped at 30 seconds, with a small stable jitter to avoid synchronized polling.
+- A numeric `--interval N` keeps that process on a fixed interval but does not exclude it from the active count used by automatic waiters.
+
+Automatic mode keeps aggregate idle polling approximately bounded as agent count grows. One active waiter targets 3 seconds; two target 6 seconds each; ten or more target 30 seconds each. An explicit fixed interval is intended for a role with a measured response requirement and can increase aggregate SQLite activity when used by many processes.
+
+Measure the installed environment with an empty queue before changing the default. For example, on macOS:
+
+```bash
+/usr/bin/time -l bin/baton wait --role frontend --timeout 30
+```
+
+The timeout result is expected. Compare user and system CPU time with elapsed time, and repeat using the intended number of concurrent role agents.
 
 ## Shift Controls
 
@@ -605,7 +639,7 @@ Stop/resume commands do not move jobs or change job status. They only affect fut
 
 `resume` clears a manual stop flag. If the shift deadline has already expired, use `shift extend` or `shift start` before re-entering a wait loop.
 
-`stop` writes the stop flag immediately. A running wait loop exits the next time it checks the flag, so response can be delayed by up to the current `--interval`.
+`stop` writes the stop flag immediately. A running wait loop exits the next time it checks the flag, so response can be delayed by up to the current fixed interval or about 30 seconds in automatic mode.
 
 ## GitHub Issue Wrapper
 

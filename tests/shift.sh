@@ -28,7 +28,7 @@ delta = (after - before).total_seconds()
 if not 0.9 * 3600 <= delta <= 1.1 * 3600:
     raise SystemExit(f"unexpected default extend duration seconds={delta}")
 PY
-"$CLI" --db "$DB" shift start --role frontend --duration 1s | grep "role:frontend" | grep "active" >/dev/null
+"$CLI" --db "$DB" shift start --role frontend --duration 2s | grep "role:frontend" | grep "active" >/dev/null
 
 JOB1="$("$CLI" --db "$DB" register \
   --title "Finish after shift expiry" \
@@ -36,7 +36,7 @@ JOB1="$("$CLI" --db "$DB" register \
   --objective "Verify finish is allowed after shift expiry." \
   --exit-criteria "The in-progress job can be finished." | awk '{print $1}')"
 "$CLI" --db "$DB" claim "$JOB1" --role frontend --claimed-by shift-a >/dev/null
-sleep 2
+sleep 3
 "$CLI" --db "$DB" finish "$JOB1" --role frontend --evidence "Finished after shift expiry." >/dev/null
 
 JOB2="$("$CLI" --db "$DB" register \

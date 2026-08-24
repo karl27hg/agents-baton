@@ -1,5 +1,7 @@
 # Using Baton In Other Projects
 
+English (primary) | [한국어 안내](../README.ko.md)
+
 This guide explains how to add Baton to another repository as a local workflow tool.
 
 ## Recommended Layout
@@ -29,7 +31,7 @@ Recommended options:
 - Git clone plus tag checkout: acceptable for local-only use, but the consuming project will not record the expected Baton revision unless you document it separately.
 - Release archive download: useful for one-off installation, but harder to update consistently than a submodule.
 
-Plain `git clone` is fine for experimentation. For stable use across projects, use a tag such as `v0.4.0` and update intentionally when a new Baton release is chosen.
+Plain `git clone` is fine for experimentation. For stable use across projects, use a published release tag and update intentionally when a new Baton release is chosen.
 
 ## Add Baton As A Submodule
 
@@ -44,7 +46,7 @@ Pin to a release tag:
 
 ```bash
 cd tools/baton
-git checkout v0.4.0
+git checkout vX.Y.Z
 cd ../..
 git add tools/baton
 git commit -m "Add Baton workflow tool"
@@ -65,8 +67,10 @@ The last command uses Baton's default bounded wait settings:
 
 ```text
 --timeout 900
---interval 3
+--interval auto
 ```
+
+Automatic mode targets `min(30, 3 * active waiters)` seconds across handoff and CR waiters sharing the project database. Use a numeric interval only for an explicit fixed response requirement.
 
 ## Add Baton As A Plain Clone
 
@@ -84,10 +88,10 @@ For stable use, check out a release tag after cloning:
 ```bash
 cd tools/baton
 git fetch --tags
-git checkout v0.4.0
+git checkout vX.Y.Z
 ```
 
-Record the selected version in the consuming project's documentation or onboarding notes.
+Replace `vX.Y.Z` with the selected published release tag. Record that version in the consuming project's documentation or onboarding notes.
 
 ## Use A Release Archive
 
@@ -144,6 +148,7 @@ Use `tools/baton/bin/baton` for role handoff and CR workflow state.
 - Do not edit Baton SQLite records directly.
 - Use `tools/baton/docs/agent-prompt.md` as the worker prompt for role agents.
 - Use bounded waits; do not use `--timeout 0` unless explicitly requested.
+- Keep the default automatic interval unless the user or project policy requires a fixed numeric interval.
 - Treat `next` as a one-time queue check, not as a wait command.
 - After wait timeout, repeat bounded waits while the shift remains active.
 - Start a shift before long-running waits.
@@ -175,7 +180,7 @@ Before waiting, start or extend your shift:
 tools/baton/bin/baton shift start --role frontend
 
 Then repeat bounded waits while the shift is active:
-tools/baton/bin/baton wait --role frontend --timeout 900 --interval 3
+tools/baton/bin/baton wait --role frontend --timeout 900
 
 Do not use repeated next commands as a substitute for wait, and do not stop when next reports no ready job.
 Exit 2 means only that the bounded wait timed out: check the shift and run wait again while it remains active.
@@ -197,7 +202,7 @@ Before waiting, start or extend your shift:
 tools/baton/bin/baton shift start --role sm
 
 Then repeat bounded CR review waits while the shift is active:
-tools/baton/bin/baton cr wait-review --role sm --timeout 900 --interval 3
+tools/baton/bin/baton cr wait-review --role sm --timeout 900
 
 When a CR appears, inspect the Markdown file, then approve, reject, or request revision through Baton.
 If approved implementation should proceed, create implementation handoffs through Baton.
@@ -304,10 +309,10 @@ When using a submodule:
 ```bash
 cd tools/baton
 git fetch --tags
-git checkout <new-version>
+git checkout vX.Y.Z
 cd ../..
 git add tools/baton
-git commit -m "Update Baton to <new-version>"
+git commit -m "Update Baton to vX.Y.Z"
 ```
 
 When using a plain clone:
@@ -315,7 +320,7 @@ When using a plain clone:
 ```bash
 cd tools/baton
 git fetch --tags
-git checkout <new-version>
+git checkout vX.Y.Z
 ```
 
 After changing Baton versions, run the database migration command from the consuming project root before starting agents:

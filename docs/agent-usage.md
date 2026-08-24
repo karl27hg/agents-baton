@@ -1,5 +1,7 @@
 # Agent Usage: Baton
 
+English (primary) | [한국어 안내](../README.ko.md)
+
 This document is for agents using or testing Baton.
 
 Do not use a test Baton database to operate a live repository handoff queue unless the user explicitly asks for an experiment.
@@ -20,12 +22,12 @@ Do not use a test Baton database to operate a live repository handoff queue unle
 ```bash
 bin/baton --db /tmp/baton.sqlite3 init
 bin/baton --db /tmp/baton.sqlite3 shift start --role frontend
-bin/baton --db /tmp/baton.sqlite3 wait --role frontend --timeout 900 --interval 3
+bin/baton --db /tmp/baton.sqlite3 wait --role frontend --timeout 900
 bin/baton --db /tmp/baton.sqlite3 next --role frontend
 bin/baton --db /tmp/baton.sqlite3 claim HO-YYYY-MM-DD-001 --role frontend
 bin/baton --db /tmp/baton.sqlite3 finish HO-YYYY-MM-DD-001 --role frontend --evidence "Evidence summary"
 bin/baton --db /tmp/baton.sqlite3 shift status --role frontend
-bin/baton --db /tmp/baton.sqlite3 wait --role frontend --timeout 900 --interval 3
+bin/baton --db /tmp/baton.sqlite3 wait --role frontend --timeout 900
 ```
 
 The final `wait` starts the next work cycle. A timeout is not completion; repeat bounded waits while the shift remains active.
@@ -158,7 +160,7 @@ Reviewer roles need `cr.review` plus the action-specific permission such as `cr.
 The CR author role and reviewer role must be different. If an old CR is stuck because it has the same author and reviewer role, an SM/admin role with `cr.admin` must reassign or cancel it instead of editing SQLite directly.
 
 ```bash
-bin/baton --db /tmp/baton.sqlite3 cr wait-review --role sm --timeout 900 --interval 3
+bin/baton --db /tmp/baton.sqlite3 cr wait-review --role sm --timeout 900
 ```
 
 Possible review actions:
@@ -243,8 +245,8 @@ If multiple agents share one workspace, prefer explicit `--claimed-by <profile-n
 Use bounded waits by default:
 
 ```bash
-bin/baton --db /tmp/baton.sqlite3 wait --role frontend --timeout 900 --interval 3
-bin/baton --db /tmp/baton.sqlite3 cr wait-review --role sm --timeout 900 --interval 3
+bin/baton --db /tmp/baton.sqlite3 wait --role frontend --timeout 900
+bin/baton --db /tmp/baton.sqlite3 cr wait-review --role sm --timeout 900
 ```
 
 `next` checks the queue once and exits immediately; it does not wait. If no ready handoff exists, run `wait`. A blocked handoff becomes visible after all required upstream handoffs finish and `wait` promotes it to `open`.
@@ -255,7 +257,7 @@ Avoid `--timeout 0` unless the user explicitly asks for a forever-wait experimen
 
 If a required upstream handoff or Gate is cancelled, Baton recursively cancels blocked dependent handoffs in that dependency branch. Independent queue branches remain available. Cancelled handoffs do not become ready and must not be reopened by agents.
 
-`--interval` controls the polling sleep between checks. It defaults to 3 seconds and must be at least 1 second.
+`--interval` defaults to `auto`. Automatic mode counts active handoff and CR waiters in the same database and targets `min(30, 3 * active waiters)` seconds with a small stable jitter. Use `--interval N` only for an explicit fixed override; `N` must be at least 1. Fixed waiters remain part of the active count used by automatic waiters.
 
 ## Shift Usage
 
@@ -297,4 +299,4 @@ Stopping wait loops must not be treated as cancelling handoff jobs. It only cont
 
 `resume` clears manual stops. If the shift has expired, extend or restart the shift before starting another wait.
 
-`stop` writes the stop flag immediately, but a running wait exits only when it next checks the flag. With the default interval, this can take up to 3 seconds.
+`stop` writes the stop flag immediately, but a running wait exits only when it next checks the flag. Automatic mode can take up to about 30 seconds when many waiters share the database.

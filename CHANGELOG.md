@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.5.0
+
+- Made automatic polling the default for handoff and CR review waits, targeting three seconds per active waiter with a 30-second cap and stable jitter.
+- Added schema migration v4 for short-lived waiter heartbeat leases, including stale lease cleanup and fixed-interval compatibility.
+- Bounded polling sleep by the remaining timeout so a scaled interval cannot overrun a short wait deadline.
+- Added concurrent waiter, automatic scaling, stale cleanup, fixed override, timeout, migration, and data-preservation coverage.
+- Made English the canonical documentation language and added Korean overview and schema navigation.
+
 ## v0.4.1
 
 - Added a dedicated named Gate operations guide covering ownership, emergency transfer, cancellation scope, terminal states, audit, upgrades, and execution-conflict limitations.
