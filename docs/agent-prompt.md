@@ -37,7 +37,10 @@ If several agents share the same workspace, do not let them unintentionally shar
 - If `next` reports no ready job, enter `wait` instead of ending the agent task.
 - A blocked handoff remains inside Baton until its job dependencies finish and named Gates are released; `wait` will detect its promotion to `open`.
 - Do not send periodic waiting updates while `baton wait` is running.
-- Report only when `wait` returns, times out, or is stopped.
+- Treat an ordinary timeout as an internal loop boundary, not as user-visible progress.
+- After exit `2`, check the shift and re-enter the bounded wait without sending a status message while the shift remains active.
+- Report once when work becomes ready, a claim or completion changes state, waiting is stopped or the shift expires, an unrecoverable error occurs, or the user explicitly asks for status.
+- Do not repeat a report when the observable Baton state has not changed.
 - No-op polling is silent; normal lack of output does not mean the process is disconnected.
 - Avoid `--timeout 0` unless the user explicitly asks for a forever-wait experiment.
 - Use the default automatic interval. Set a numeric `--interval` only when the user or project policy requires a fixed response bound.
@@ -59,7 +62,7 @@ bin/baton --db <db> cr wait-review --role <role> --timeout 900
 Exit handling:
 
 - `0`: A ready job exists. Re-check with `next` before claiming.
-- `2`: Timeout. Check shift status and immediately start another bounded wait if the shift is still active.
+- `2`: Timeout. Check shift status and immediately start another bounded wait without reporting the timeout if the shift is still active.
 - `3`: Stopped. Report stopped once and do not retry until resumed.
 
 Shift handling:
@@ -149,5 +152,7 @@ bin/baton --db <db> finish <job-id> --role <role> --evidence "Evidence summary" 
 ## Reporting Rules
 
 - Do not emit periodic waiting status messages.
-- Report final wait result, claimed job ID, completed work, and evidence.
+- Do not relay ordinary timeout text from a bounded wait while the shift remains active.
+- Report only state transitions, final stop/shift expiry, errors requiring intervention, claimed job ID, completed work, and evidence.
+- Suppress duplicate reports for an unchanged state.
 - Keep reports concise.

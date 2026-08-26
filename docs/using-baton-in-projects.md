@@ -146,11 +146,14 @@ Example:
 Use `tools/baton/bin/baton` for role handoff and CR workflow state.
 
 - Do not edit Baton SQLite records directly.
+- Use `tools/baton/docs/planner-prompt.md` for agents that decompose or register parallel work.
 - Use `tools/baton/docs/agent-prompt.md` as the worker prompt for role agents.
+- Treat work as parallel only after confirming independent inputs, write sets, contracts, shared state, and completion order; otherwise declare a dependency or Gate.
 - Use bounded waits; do not use `--timeout 0` unless explicitly requested.
 - Keep the default automatic interval unless the user or project policy requires a fixed numeric interval.
 - Treat `next` as a one-time queue check, not as a wait command.
 - After wait timeout, repeat bounded waits while the shift remains active.
+- Do not report ordinary wait timeouts or unchanged waiting state; report actual state transitions once.
 - Start a shift before long-running waits.
 - Finish already-claimed work even if the shift expires.
 - Do not create CRs with the same author and reviewer role.
@@ -183,7 +186,8 @@ Then repeat bounded waits while the shift is active:
 tools/baton/bin/baton wait --role frontend --timeout 900
 
 Do not use repeated next commands as a substitute for wait, and do not stop when next reports no ready job.
-Exit 2 means only that the bounded wait timed out: check the shift and run wait again while it remains active.
+Exit 2 means only that the bounded wait timed out: check the shift and run wait again silently while it remains active.
+Do not send periodic or duplicate waiting updates. Report once when work becomes ready, a claim or completion changes state, waiting stops or the shift expires, an error needs intervention, or the user asks for status.
 When work appears, re-check with next, claim it, complete only the claimed task, then finish it with concrete evidence.
 After finish, return to bounded wait while the shift remains active.
 Blocked handoffs are promoted automatically after their dependencies finish. Cancelled dependency branches will not become ready, while unrelated queue branches remain active.
@@ -204,6 +208,7 @@ tools/baton/bin/baton shift start --role sm
 Then repeat bounded CR review waits while the shift is active:
 tools/baton/bin/baton cr wait-review --role sm --timeout 900
 
+On exit 2, check the shift and re-enter the wait silently while it remains active. Do not report unchanged waiting state.
 When a CR appears, inspect the Markdown file, then approve, reject, or request revision through Baton.
 If approved implementation should proceed, create implementation handoffs through Baton.
 Do not edit Baton SQLite records directly.

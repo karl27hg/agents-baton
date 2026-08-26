@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Added reproducible v0.5.0 idle-wait CPU, memory, SQLite growth, lease cleanup, thermal interpretation, and distribution evidence.
+- Added a planner policy for dependency-safe parallel handoffs and strengthened worker prompts to suppress ordinary timeout and unchanged-wait reports.
+
 ## v0.5.0
 
 - Made automatic polling the default for handoff and CR review waits, targeting three seconds per active waiter with a 30-second cap and stable jitter.

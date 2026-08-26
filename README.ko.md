@@ -50,10 +50,11 @@ bin/baton --db /tmp/baton.sqlite3 init
 1. [README.md](README.md): 전체 기능, 기본값, 명령 및 운영 규칙
 2. [다른 프로젝트에서 사용하기](docs/using-baton-in-projects.md): 설치, 버전 고정, 프로젝트 설정
 3. [Named Gate 운영](docs/gates.md): Gate 소유권, 해제, 취소, 긴급 이관
-4. [Agent prompt](docs/agent-prompt.md): Baton worker agent에 추가할 영문 prompt
-5. [Agent 사용법](docs/agent-usage.md): role, CR, wait, shift 명령 예시
-6. [SQLite schema](docs/schema.md) 또는 [한국어 번역](docs/schema.ko.md): 테이블과 migration 명세
-7. [CHANGELOG.md](CHANGELOG.md): 버전별 변경 사항
+4. [Planner prompt](docs/planner-prompt.md): 병렬 작업의 독립성 판정과 의존성 등록 정책
+5. [Agent prompt](docs/agent-prompt.md): Baton worker agent에 추가할 영문 prompt
+6. [Agent 사용법](docs/agent-usage.md): role, CR, wait, shift 명령 예시
+7. [SQLite schema](docs/schema.md) 또는 [한국어 번역](docs/schema.ko.md): 테이블과 migration 명세
+8. [CHANGELOG.md](CHANGELOG.md): 버전별 변경 사항
 
 `docs/agent-prompt.md`는 Codex role agent가 직접 따를 명령 규칙이므로 영문 원본을 agent 지시 사항에 연결하는 것을 권장합니다.
 
@@ -89,6 +90,8 @@ bin/baton role permission-add architecture cr.approve
 ## 기본 Handoff 흐름
 
 작업을 등록하고 대상 role이 대기, claim, 완료합니다.
+
+Planning agent는 병렬 handoff를 등록하기 전에 [Planner prompt](docs/planner-prompt.md)를 따라야 합니다. 입력, 수정 대상, contract, 공유 상태와 완료 순서가 모두 독립적인 작업만 병렬로 열고, 하나라도 불확실하면 `--depends-on` 또는 named Gate로 순서를 명시합니다. Baton은 선언된 의존성과 claim 원자성을 보장하지만 소스 파일 충돌이나 누락된 의존성을 추론하지는 않습니다.
 
 ```bash
 bin/baton register \
@@ -151,6 +154,8 @@ bin/baton cr resubmit CR-YYYY-MM-DD-001 \
 
 `--interval`을 생략하는 것은 `--interval auto`를 명시하는 것과 동일합니다.
 
+종료 코드 `2`는 shift가 활성 상태인 동안 내부 bounded-loop 경계일 뿐 사용자에게 보고할 진행 상태가 아닙니다. Agent는 상태 변화가 없으면 timeout이나 대기 메시지를 반복하지 않고 즉시 다시 대기합니다. 작업 발견, claim/finish, stop 또는 shift 만료, 개입이 필요한 오류, 사용자의 상태 요청이 있을 때만 한 번 보고합니다.
+
 ```bash
 bin/baton wait --role frontend --timeout 900
 bin/baton wait --role frontend --timeout 900 --interval auto
@@ -159,6 +164,8 @@ bin/baton wait --role frontend --timeout 900 --interval auto
 일반 `wait`는 주기마다 stop/shift 확인, 의존성 및 Gate 조정, role queue 조회를 수행합니다. Baton은 handoff와 CR waiter를 같은 `waiter_leases` table에 heartbeat로 등록하고 활성 수에 비례해 interval을 자동으로 늘립니다. 한 명은 3초, 두 명은 각각 6초, 열 명 이상은 각각 최대 30초를 목표로 하며 동시 polling을 줄이는 작은 jitter가 적용됩니다.
 
 정상 종료 시 lease는 즉시 제거됩니다. 자동 waiter의 process 연결이 끊기면 30초 lease가 만료되고 이후 heartbeat가 stale record를 정리합니다. 25초를 초과하는 고정 interval은 정상 sleep을 보호하기 위해 `interval + 5초` lease를 사용합니다. 숫자 interval을 명시한 waiter도 활성 수에는 포함되지만 자신의 sleep은 지정된 값으로 고정됩니다.
+
+단일 및 10개 동시 waiter의 CPU, memory, DB 증가와 한계는 영문 기준 문서인 [Baton v0.5.0 idle wait resource check](docs/benchmarks/v0.5.0-idle-wait-resource.md)에 기록되어 있습니다. 이 자료는 저장소 evidence로 유지하며 별도의 release 첨부 파일로 배포하지 않습니다.
 
 ## Shift와 중지
 

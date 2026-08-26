@@ -36,6 +36,8 @@ The final `wait` starts the next work cycle. A timeout is not completion; repeat
 
 Any role may register downstream work when it has a valid source reference and does not expand product scope.
 
+The planning agent must follow `docs/planner-prompt.md` before registering parallel work. Jobs are parallel only when their inputs, write sets, contracts, shared state, and accepted completion order are independent. Unknown independence is a dependency, not permission to run concurrently.
+
 ```bash
 bin/baton --db /tmp/baton.sqlite3 register \
   --title "Backend follow-up" \
@@ -251,9 +253,9 @@ bin/baton --db /tmp/baton.sqlite3 cr wait-review --role sm --timeout 900
 
 `next` checks the queue once and exits immediately; it does not wait. If no ready handoff exists, run `wait`. A blocked handoff becomes visible after all required upstream handoffs finish and `wait` promotes it to `open`.
 
-No-op polling is silent. Output is produced for a ready job, an actual promotion or cancellation, timeout, or stop result.
+No-op polling is silent. CLI output is produced for a ready job, an actual promotion or cancellation, timeout, or stop result. A worker must not relay an ordinary timeout as a user-facing update while its shift remains active.
 
-Avoid `--timeout 0` unless the user explicitly asks for a forever-wait experiment. For normal worker operation, repeat bounded waits while the role shift is active. Exit code `2` is only a timeout: check the shift and enter another bounded wait. After finishing a claimed job, re-enter the same wait loop while the shift remains active.
+Avoid `--timeout 0` unless the user explicitly asks for a forever-wait experiment. For normal worker operation, repeat bounded waits while the role shift is active. Exit code `2` is only an internal loop boundary: check the shift and enter another bounded wait without reporting when the state is unchanged. Report once for ready work, claim/finish transitions, stop or shift expiry, errors requiring intervention, or an explicit status request. After finishing a claimed job, re-enter the same wait loop while the shift remains active.
 
 If a required upstream handoff or Gate is cancelled, Baton recursively cancels blocked dependent handoffs in that dependency branch. Independent queue branches remain available. Cancelled handoffs do not become ready and must not be reopened by agents.
 

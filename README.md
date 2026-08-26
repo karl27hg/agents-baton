@@ -54,9 +54,10 @@ An SM/system-manager agent should read these documents in order before configuri
 1. `README.md`: project overview, default roles, CR permissions, wait/shift controls, reports, and GitHub issue wrapper.
 2. `docs/using-baton-in-projects.md`: install Baton into another repository, set project `.gitignore`, add `AGENTS.md` rules, and copy role-agent prompts.
 3. `docs/gates.md`: named Gate ownership, release, cancellation, emergency transfer, audit, upgrade, and safety rules.
-4. `docs/agent-prompt.md`: prompt content to attach to Codex role agents that wait for handoff or CR review work.
-5. `docs/agent-usage.md`: command examples for role setup, CR review, waits, shifts, and stop/resume operations.
-6. `docs/schema.md` or its Korean translation, `docs/schema.ko.md`: database schema and audit table reference when troubleshooting or reviewing workflow state.
+4. `docs/planner-prompt.md`: parallel-safety and dependency policy for agents that decompose or register work.
+5. `docs/agent-prompt.md`: prompt content to attach to Codex role agents that wait for handoff or CR review work.
+6. `docs/agent-usage.md`: command examples for role setup, CR review, waits, shifts, and stop/resume operations.
+7. `docs/schema.md` or its Korean translation, `docs/schema.ko.md`: database schema and audit table reference when troubleshooting or reviewing workflow state.
 
 For a new database:
 
@@ -85,6 +86,7 @@ Then:
 - Map the project's actual role names to Baton roles. Add missing roles with `role add` or aliases with `role alias-add`.
 - Decide which roles may review CRs. Grant `cr.review` plus action-specific permissions with `role permission-add`.
 - Add `docs/agent-prompt.md` to each Codex role agent's instructions, adjusted for that role and command path.
+- Add `docs/planner-prompt.md` to planning agents that decompose or register concurrent work.
 - Configure shifts and bounded waits using the rules in the Wait and Shift Controls sections below.
 - If GitHub issues are used, configure `scripts/gh-repo` with a repo-limited token as described in the GitHub Issue Wrapper section.
 - Use `bin/baton-report audit` and `bin/baton-report summary` for read-only operational review.
@@ -232,6 +234,8 @@ The default identity file is ignored by git:
 If multiple agents share one workspace, do not let them share the same default identity file unless they intentionally represent the same profile. In that case, use `--claimed-by` or `BATON_AGENT_ID` with the assigned profile name for each agent.
 
 ## Handoff Flow
+
+Before registering concurrent handoffs, the planning agent must follow `docs/planner-prompt.md`. Work is parallel only when inputs, write sets, contracts, shared state, and accepted completion order are independent. Otherwise, register the upstream work first and use `--depends-on`, or use a named Gate when the predecessor is not known yet. Baton enforces declared edges and atomic claims but cannot infer missing dependencies or source-level conflicts.
 
 Register a ready handoff:
 
@@ -520,7 +524,7 @@ bin/baton-report summary --format json
 
 `wait` repeatedly promotes ready work and checks the target role queue.
 `next` is a single non-blocking queue check; it is not a wait command. Agents must not stop working merely because `next` reports no ready jobs.
-No-op polling is silent. `wait` prints only a ready job, an actual promotion/cancellation, timeout, or stop result.
+No-op polling is silent. `wait` prints only a ready job, an actual promotion/cancellation, timeout, or stop result. An ordinary timeout is a local bounded-loop result; while the shift remains active, the agent must re-enter wait without relaying the timeout or repeating an unchanged waiting status to the user.
 
 ```bash
 bin/baton wait --role frontend --timeout 900
@@ -549,7 +553,7 @@ Required agent loop:
 1. Start or extend the role shift.
 2. Run a bounded `wait`.
 3. On exit `0`, run `next`, claim the returned job, complete it, and report it with `finish`.
-4. On exit `2`, check the shift and immediately start another bounded wait while the shift remains active.
+4. On exit `2`, check the shift and immediately start another bounded wait without reporting while the shift remains active.
 5. On exit `3`, stop waiting until the role is resumed.
 6. After `finish`, return to step 2 while the shift remains active.
 
@@ -558,6 +562,8 @@ A blocked handoff is not returned by `next`. `wait` keeps checking required upst
 `--timeout 0` means wait forever, but that should be used only in explicit experiments. Normal workers must repeat bounded waits until their shift expires or a stop control is set.
 
 `cr wait-review` uses the same stop/resume controls and exit codes, but checks submitted CRs assigned to the reviewer role instead of handoff jobs.
+
+Agents should report waiting state only when it changes: work becomes ready, claim/finish succeeds, stop or shift expiry occurs, an error needs intervention, or the user explicitly asks for status. Repeated polling and repeated exit `2` timeouts are not progress events.
 
 ## Resource Usage
 
@@ -578,6 +584,8 @@ Measure the installed environment with an empty queue before changing the defaul
 ```
 
 The timeout result is expected. Compare user and system CPU time with elapsed time, and repeat using the intended number of concurrent role agents.
+
+See [Baton v0.5.0 idle wait resource check](docs/benchmarks/v0.5.0-idle-wait-resource.md) for the recorded single- and ten-waiter measurements, interpretation, limitations, and distribution policy. The benchmark is repository evidence and is not published as a separate release asset.
 
 ## Shift Controls
 
