@@ -28,7 +28,7 @@ DEFAULT_ROLES = (
 
 STATUSES = {"blocked", "open", "in_progress", "finished", "cancelled"}
 CR_STATUSES = {"draft", "submitted", "revision_requested", "approved", "rejected", "implemented", "cancelled"}
-BATON_VERSION = "0.5.0"
+BATON_VERSION = "0.5.1"
 AUTO_INTERVAL_BASE_SECONDS = 3
 AUTO_INTERVAL_MAX_SECONDS = 30
 WAITER_LEASE_SECONDS = 30

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.5.1
 
 - Added reproducible v0.5.0 idle-wait CPU, memory, SQLite growth, lease cleanup, thermal interpretation, and distribution evidence.
 - Added a planner policy for dependency-safe parallel handoffs and strengthened worker prompts to suppress ordinary timeout and unchanged-wait reports.
