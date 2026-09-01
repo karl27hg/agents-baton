@@ -695,7 +695,7 @@ Run the isolated installation test when `pipx` is available:
 tests/pipx-install.sh
 ```
 
-It installs the current checkout into a temporary pipx home, operates a separate temporary consumer project, verifies both commands and bundled guides, and uninstalls the package. The test confirms that command links and the isolated environment are removed while the consumer project's database is preserved. It does not modify the user's normal pipx installation.
+It installs the current checkout into a temporary pipx home, operates separate temporary consumer projects, verifies both commands and bundled guides, force-updates to a synthetic next package version, and uninstalls the package. The test confirms that existing project data survives the executable update and that command links and the isolated environment are removed while project databases remain. It does not modify the user's normal pipx installation.
 
 The concurrent claim test starts two separate CLI processes against the same open job and expects exactly one claim to succeed.
 
