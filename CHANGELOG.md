@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Added Python packaging with `baton` and `baton-report` console entry points for isolated pipx installation.
+- Added a temporary-home pipx installation test that operates a separate consumer project without changing user-level pipx state.
+
 ## v0.5.1
 
 - Added reproducible v0.5.0 idle-wait CPU, memory, SQLite growth, lease cleanup, thermal interpretation, and distribution evidence.

@@ -8,18 +8,19 @@ DB="$TMP/baton.sqlite3"
 
 "$CLI" --db "$DB" init >/dev/null
 
-python3 - "$CLI" "$DB" <<'PY'
-import runpy
+python3 - "$ROOT/src" "$DB" <<'PY'
 import sqlite3
 import sys
 
-cli, db = sys.argv[1:]
-module = runpy.run_path(cli, run_name="baton_module")
+source_root, db = sys.argv[1:]
+sys.path.insert(0, source_root)
 
-automatic_poll_interval = module["automatic_poll_interval"]
-poll_sleep_seconds = module["poll_sleep_seconds"]
-parse_poll_interval = module["parse_poll_interval"]
-waiter_lease_seconds = module["waiter_lease_seconds"]
+from agents_baton.cli import (
+    automatic_poll_interval,
+    parse_poll_interval,
+    poll_sleep_seconds,
+    waiter_lease_seconds,
+)
 
 assert parse_poll_interval("auto") is None
 assert parse_poll_interval("3") == 3

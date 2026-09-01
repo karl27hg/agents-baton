@@ -26,6 +26,8 @@ Supported operating systems:
 
 No third-party Python packages are required.
 
+`pipx` is optional and is used only to install Baton as a user-level command. It is not a Baton runtime dependency.
+
 The shell tests require additional Unix command-line tools:
 
 - `bash`
@@ -39,6 +41,8 @@ This repository is currently tested on macOS with Python 3.12.
 
 ## Quick Start
 
+From a source checkout:
+
 ```bash
 bin/baton --version
 bin/baton init
@@ -46,6 +50,37 @@ bin/baton migrate --check
 bin/baton role list
 bin/baton status
 ```
+
+After a pipx installation, run the installed command from the project that Baton should manage:
+
+```bash
+cd /path/to/your-project
+baton init
+baton migrate --check
+baton status
+```
+
+The current directory determines the default `.baton/baton.sqlite3` location.
+
+## Install With Pipx
+
+For local validation from this Baton source checkout, run `pipx install .` in the Baton repository root:
+
+```bash
+cd /path/to/agents-baton
+pipx install .
+baton --version
+```
+
+The installation command reads `pyproject.toml`, creates an isolated environment, and exposes `baton` and `baton-report` on the user `PATH`. After installation, leave the Baton repository and run those commands from the project that should own the workflow database.
+
+Once a release containing the packaging metadata is published, install that exact Git tag without cloning it first:
+
+```bash
+pipx install "git+https://github.com/karl27hg/agents-baton.git@vX.Y.Z"
+```
+
+Use `pipx upgrade agents-baton` for a package-index installation and `pipx uninstall agents-baton` to remove the commands. A pipx installation is convenient for one user but does not record the selected Baton version in a consuming repository. Use a release-pinned submodule when the project itself must record and review the tool version.
 
 ## SM Agent Reading Path
 
@@ -494,6 +529,14 @@ tests/shift.sh
 tests/report.sh
 tests/update.sh
 ```
+
+Run the isolated installation test when `pipx` is available:
+
+```bash
+tests/pipx-install.sh
+```
+
+It installs the current checkout into a temporary pipx home, operates a separate temporary consumer project, verifies both commands, and uninstalls the package. It does not modify the user's normal pipx installation.
 
 The concurrent claim test starts two separate CLI processes against the same open job and expects exactly one claim to succeed.
 
