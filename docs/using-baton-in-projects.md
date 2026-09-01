@@ -56,12 +56,15 @@ Then change to the consuming project before initializing or operating Baton:
 ```bash
 cd /path/to/your-project
 baton --version
+baton guide show bootstrap
 baton init
 baton migrate --check
 baton role list
 ```
 
 The installation location does not select the Baton database. The current working directory at command execution selects the default `.baton/baton.sqlite3` path.
+
+Do not run `baton init` when a project used Baton previously but the default database is absent. First use `baton project migrate --check` to discover and rehearse migration from supported legacy tool layouts. If discovery fails, use `--source-db /path/to/existing/baton.sqlite3`; an explicit path is checked but never applied automatically. Apply only after reviewing the plan and passing its `plan_token` to `baton project migrate --apply` with the same path options.
 
 For a package-index installation, upgrade the user-level command with pipx:
 
@@ -184,6 +187,25 @@ Do not ignore CR Markdown files if they are part of the project workflow. They s
 ## AGENTS.md
 
 Add project-specific Baton rules to the consuming project's `AGENTS.md`.
+
+For a pipx installation, use a short bootstrap that reads instructions bundled with the installed Baton version:
+
+```md
+## Baton Workflow
+
+Use `baton` from `PATH` for role handoff and CR workflow state.
+
+- Before project setup or migration, read `baton guide show bootstrap`.
+- Before worker or reviewer operation, read `baton guide show worker`.
+- Before decomposing or registering parallel work, read `baton guide show planner`.
+- Do not initialize a new database when an existing Baton database may be in another path.
+- Do not edit Baton SQLite records directly.
+- If a Baton command, role authority, database path, or migration plan is unclear, stop and ask the user or SM.
+```
+
+The `guide` output comes from the installed package, so it follows the executable version even when no `tools/baton` checkout exists. `AGENTS.md` remains responsible for assigning the project role and requiring the guide; Baton does not modify project agent instructions automatically.
+
+For a source checkout or submodule, use the equivalent repository-local rules:
 
 Example:
 
@@ -391,6 +413,16 @@ If migration fails, Baton rolls back the transaction and leaves the previous dat
 Database-backed `baton` commands apply pending migrations automatically, but run `migrate` explicitly during an upgrade so failures are found before role agents start. `migrate --check` is read-only and verifies that no migrations remain pending. `baton-report` is read-only and requires the migration to be completed first.
 
 The old `update` command remains a deprecated migration alias for v0.1.6 compatibility. New scripts must use `migrate`.
+
+When moving from a nested source checkout to a pipx-installed command, inspect the database path before the normal schema migration:
+
+```bash
+baton project migrate --check
+baton project migrate --apply --plan-token <token>
+baton migrate --check
+```
+
+Automatic discovery recognizes `.baton/baton.sqlite3`, `tools/baton/.baton/baton.sqlite3`, and `tools/agents-baton/.baton/baton.sqlite3` under the selected project root. Use `--project-root PATH` when the current Git root is not the intended project, or `--source-db PATH` when the existing database is elsewhere. Check mode performs the real migration logic only on an in-memory clone. Apply mode rechecks the source signature, blocks active waiters, backs up the source, and refuses to overwrite or merge a different existing target database.
 
 ## When To Avoid Sharing One Database
 

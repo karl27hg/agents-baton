@@ -55,6 +55,7 @@ After a pipx installation, run the installed command from the project that Baton
 
 ```bash
 cd /path/to/your-project
+baton guide show bootstrap
 baton init
 baton migrate --check
 baton status
@@ -155,7 +156,7 @@ pipx install --force "git+https://github.com/karl27hg/agents-baton.git@vNEW.VERS
 baton --version
 ```
 
-After changing the installed Baton version, enter every active consuming project and apply or verify its database migration before starting agents:
+After changing the installed Baton version, enter every active consuming project and inspect its database location before starting agents. If `.baton/baton.sqlite3` already exists, apply or verify its schema migration:
 
 ```bash
 cd /path/to/your-project
@@ -164,6 +165,26 @@ baton migrate --check
 ```
 
 Baton migrations are transactional and preserve existing workflow data. Avoid downgrading to an older Baton after a schema migration because an older executable may not support the newer database schema. Back up the project `.baton/` directory before a planned rollback or high-risk upgrade.
+
+If the project used Baton from a nested `tools/baton` checkout and the expected project-root database is missing, do not initialize a new empty database. Discover and rehearse a layout/schema migration first:
+
+```bash
+baton project migrate --check
+```
+
+Baton checks the project-root database and supported legacy `tools/baton` or `tools/agents-baton` layouts. If automatic discovery fails, provide the existing database explicitly; this still performs only a read-only check:
+
+```bash
+baton project migrate --check --source-db /path/to/existing/baton.sqlite3
+```
+
+Review the printed source, target, schema versions, pending migrations, layout move, and active waiter count. Stop active agents, then apply the same plan with its token:
+
+```bash
+baton project migrate --apply --plan-token <token>
+```
+
+Repeat `--source-db` and `--project-root` on apply when they were used during check. Baton rechecks the source and refuses stale tokens, active waiters, incompatible databases, ambiguous discovery, or a distinct existing target. Before a schema or layout change, it writes a validated backup under `.baton/backups/`; a migrated legacy source is retained.
 
 Pin or unpin a pipx environment when automatic upgrades must be controlled:
 
@@ -182,19 +203,29 @@ Uninstall does not delete `.baton/` directories or SQLite databases in consuming
 
 A pipx installation is convenient for one user but does not record the selected Baton version in a consuming repository. Use a release-pinned submodule when the project itself must record and review the tool version.
 
-Pipx installs the CLI only. It does not modify a consuming project's `AGENTS.md` or automatically attach the Baton prompts to Codex agents. Complete the project setup in `docs/using-baton-in-projects.md`, including `.gitignore`, role configuration, `docs/agent-prompt.md`, and `docs/planner-prompt.md`.
+Pipx installs the CLI and version-matched agent guides, but it does not modify a consuming project's `AGENTS.md` or automatically attach instructions to Codex agents. Agents can read the installed guides without a Baton source checkout:
+
+```bash
+baton guide list
+baton guide show bootstrap
+baton guide show worker
+baton guide show planner
+```
+
+Complete the project setup in `docs/using-baton-in-projects.md`, including `.gitignore`, role configuration, and `AGENTS.md` rules that require the appropriate installed guide. Files under `docs/` are the canonical sources for the bundled guides; packaging tests require their installed copies to remain identical.
 
 ## SM Agent Reading Path
 
 An SM/system-manager agent should read these documents in order before configuring Baton for a project:
 
-1. `README.md`: project overview, default roles, CR permissions, wait/shift controls, reports, and GitHub issue wrapper.
-2. `docs/using-baton-in-projects.md`: install Baton into another repository, set project `.gitignore`, add `AGENTS.md` rules, and copy role-agent prompts.
-3. `docs/gates.md`: named Gate ownership, release, cancellation, emergency transfer, audit, upgrade, and safety rules.
-4. `docs/planner-prompt.md`: parallel-safety and dependency policy for agents that decompose or register work.
-5. `docs/agent-prompt.md`: prompt content to attach to Codex role agents that wait for handoff or CR review work.
-6. `docs/agent-usage.md`: command examples for role setup, CR review, waits, shifts, and stop/resume operations.
-7. `docs/schema.md` or its Korean translation, `docs/schema.ko.md`: database schema and audit table reference when troubleshooting or reviewing workflow state.
+1. `docs/agent-bootstrap.md`: installed-command, project discovery, and database migration safety checks.
+2. `README.md`: project overview, default roles, CR permissions, wait/shift controls, reports, and GitHub issue wrapper.
+3. `docs/using-baton-in-projects.md`: install Baton into another repository, set project `.gitignore`, and add `AGENTS.md` rules.
+4. `docs/gates.md`: named Gate ownership, release, cancellation, emergency transfer, audit, upgrade, and safety rules.
+5. `docs/planner-prompt.md`: parallel-safety and dependency policy for agents that decompose or register work.
+6. `docs/agent-prompt.md`: prompt content to attach to Codex role agents that wait for handoff or CR review work.
+7. `docs/agent-usage.md`: command examples for role setup, CR review, waits, shifts, and stop/resume operations.
+8. `docs/schema.md` or its Korean translation, `docs/schema.ko.md`: database schema and audit table reference when troubleshooting or reviewing workflow state.
 
 For a new database:
 
@@ -627,6 +658,8 @@ tests/gates.sh
 tests/handoff-cancel.sh
 tests/handoff-dependencies.sh
 tests/migrate.sh
+tests/project-migrate.sh
+tests/guides.sh
 tests/shift.sh
 tests/report.sh
 tests/update.sh
@@ -638,7 +671,7 @@ Run the isolated installation test when `pipx` is available:
 tests/pipx-install.sh
 ```
 
-It installs the current checkout into a temporary pipx home, operates a separate temporary consumer project, verifies both commands, and uninstalls the package. The test confirms that command links and the isolated environment are removed while the consumer project's database is preserved. It does not modify the user's normal pipx installation.
+It installs the current checkout into a temporary pipx home, operates a separate temporary consumer project, verifies both commands and bundled guides, and uninstalls the package. The test confirms that command links and the isolated environment are removed while the consumer project's database is preserved. It does not modify the user's normal pipx installation.
 
 The concurrent claim test starts two separate CLI processes against the same open job and expects exactly one claim to succeed.
 
