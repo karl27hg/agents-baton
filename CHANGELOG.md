@@ -3,7 +3,7 @@
 ## Unreleased
 
 - Added Python packaging with `baton` and `baton-report` console entry points for isolated pipx installation.
-- Added a temporary-home pipx installation test that operates a separate consumer project without changing user-level pipx state.
+- Added a temporary-home pipx lifecycle test that verifies command and environment removal while preserving the consumer project's Baton database.
 
 ## v0.5.1
 

@@ -108,7 +108,54 @@ pipx list
 baton --version
 ```
 
-Use `pipx upgrade agents-baton` for a package-index installation and `pipx uninstall agents-baton` to remove the commands. A pipx installation is convenient for one user but does not record the selected Baton version in a consuming repository. Use a release-pinned submodule when the project itself must record and review the tool version.
+## Upgrade Or Remove A Pipx Installation
+
+Check the installed version before changing it:
+
+```bash
+pipx list
+baton --version
+```
+
+For a future package-index installation, upgrade the managed application with:
+
+```bash
+pipx upgrade agents-baton
+```
+
+For a Git tag installation, explicitly replace it with the selected new tag:
+
+```bash
+pipx install --force "git+https://github.com/karl27hg/agents-baton.git@vNEW.VERSION"
+baton --version
+```
+
+After changing the installed Baton version, enter every active consuming project and apply or verify its database migration before starting agents:
+
+```bash
+cd /path/to/your-project
+baton migrate
+baton migrate --check
+```
+
+Baton migrations are transactional and preserve existing workflow data. Avoid downgrading to an older Baton after a schema migration because an older executable may not support the newer database schema. Back up the project `.baton/` directory before a planned rollback or high-risk upgrade.
+
+Pin or unpin a pipx environment when automatic upgrades must be controlled:
+
+```bash
+pipx pin agents-baton
+pipx unpin agents-baton
+```
+
+Remove only the installed CLI and its isolated environment with:
+
+```bash
+pipx uninstall agents-baton
+```
+
+Uninstall does not delete `.baton/` directories or SQLite databases in consuming projects. Remove project runtime state separately only when its workflow history is intentionally being discarded.
+
+A pipx installation is convenient for one user but does not record the selected Baton version in a consuming repository. Use a release-pinned submodule when the project itself must record and review the tool version.
 
 Pipx installs the CLI only. It does not modify a consuming project's `AGENTS.md` or automatically attach the Baton prompts to Codex agents. Complete the project setup in `docs/using-baton-in-projects.md`, including `.gitignore`, role configuration, `docs/agent-prompt.md`, and `docs/planner-prompt.md`.
 
@@ -566,7 +613,7 @@ Run the isolated installation test when `pipx` is available:
 tests/pipx-install.sh
 ```
 
-It installs the current checkout into a temporary pipx home, operates a separate temporary consumer project, verifies both commands, and uninstalls the package. It does not modify the user's normal pipx installation.
+It installs the current checkout into a temporary pipx home, operates a separate temporary consumer project, verifies both commands, and uninstalls the package. The test confirms that command links and the isolated environment are removed while the consumer project's database is preserved. It does not modify the user's normal pipx installation.
 
 The concurrent claim test starts two separate CLI processes against the same open job and expects exactly one claim to succeed.
 

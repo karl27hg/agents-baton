@@ -22,6 +22,7 @@ EXPECTED_VERSION="$("$ROOT/bin/baton" --version)"
 ACTUAL_VERSION="$("$PIPX_BIN_DIR/baton" --version)"
 test "$ACTUAL_VERSION" = "$EXPECTED_VERSION"
 test -x "$PIPX_BIN_DIR/baton-report"
+test -d "$PIPX_HOME/venvs/agents-baton"
 
 CONSUMER="$TMP_ROOT/consumer-project"
 mkdir -p "$CONSUMER"
@@ -37,5 +38,11 @@ mkdir -p "$CONSUMER"
 "$PIPX_COMMAND" uninstall agents-baton
 test ! -e "$PIPX_BIN_DIR/baton"
 test ! -e "$PIPX_BIN_DIR/baton-report"
+test ! -d "$PIPX_HOME/venvs/agents-baton"
+test -f "$CONSUMER/.baton/baton.sqlite3"
+if "$PIPX_COMMAND" list --short | grep -q '^agents-baton '; then
+  echo "ERROR: agents-baton remains registered after uninstall" >&2
+  exit 1
+fi
 
-echo "OK pipx install consumer=$CONSUMER version=$ACTUAL_VERSION"
+echo "OK pipx lifecycle consumer=$CONSUMER version=$ACTUAL_VERSION db=preserved"
