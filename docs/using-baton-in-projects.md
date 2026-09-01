@@ -27,11 +27,50 @@ For normal project use, prefer pinning Baton to a release tag instead of trackin
 
 Recommended options:
 
+- pipx installed from a release tag: fastest user-level setup and command access from any project, but the consuming repository does not record the selected version.
 - Git submodule pinned to a release tag: best when the consuming project should record the exact Baton version.
 - Git clone plus tag checkout: acceptable for local-only use, but the consuming project will not record the expected Baton revision unless you document it separately.
 - Release archive download: useful for one-off installation, but harder to update consistently than a submodule.
 
 Plain `git clone` is fine for experimentation. For stable use across projects, use a published release tag and update intentionally when a new Baton release is chosen.
+
+## Install Baton With Pipx
+
+Use pipx when one user should run `baton` from multiple local projects without keeping a Baton checkout inside each project.
+
+From a local Baton checkout containing `pyproject.toml`:
+
+```bash
+cd /path/to/agents-baton
+pipx install .
+```
+
+From a published release tag containing the packaging metadata:
+
+```bash
+pipx install "git+https://github.com/karl27hg/agents-baton.git@vX.Y.Z"
+```
+
+Then change to the consuming project before initializing or operating Baton:
+
+```bash
+cd /path/to/your-project
+baton --version
+baton init
+baton migrate --check
+baton role list
+```
+
+The installation location does not select the Baton database. The current working directory at command execution selects the default `.baton/baton.sqlite3` path.
+
+Upgrade or remove the user-level installation with pipx:
+
+```bash
+pipx upgrade agents-baton
+pipx uninstall agents-baton
+```
+
+For Git URL installations, reinstall the chosen tag when changing versions. Prefer a submodule instead when the consuming repository must pin Baton in version control.
 
 ## Add Baton As A Submodule
 

@@ -25,9 +25,13 @@ SQLite가 workflow 상태의 기준이며 agent는 DB를 직접 수정하지 않
 - Windows는 현재 테스트하지 않음
 - 런타임용 외부 Python 패키지는 필요하지 않음
 
+`pipx`는 Baton을 사용자 명령으로 설치할 때만 사용하는 선택 도구이며 런타임 의존성이 아닙니다.
+
 테스트 실행에는 `bash`, `mktemp`, `awk`, `grep`, `sed`, `sleep`이 추가로 필요합니다.
 
 ## 빠른 시작
+
+소스 checkout에서는 `bin/baton`을 사용합니다.
 
 ```bash
 bin/baton --version
@@ -36,6 +40,17 @@ bin/baton migrate --check
 bin/baton role list
 bin/baton status
 ```
+
+`pipx install .`로 설치한 뒤에는 Baton 저장소가 아니라 관리할 프로젝트에서 명령을 실행합니다.
+
+```bash
+cd /path/to/your-project
+baton init
+baton migrate --check
+baton status
+```
+
+기본 DB 경로 `.baton/baton.sqlite3`는 `baton`을 실행한 현재 프로젝트를 기준으로 결정됩니다. 사용자 단위의 빠른 설치에는 pipx가 적합하지만, 프로젝트 저장소가 Baton 버전을 직접 기록해야 하면 release tag에 고정한 submodule을 사용합니다. 자세한 내용은 [설치 가이드](docs/using-baton-in-projects.md)를 확인합니다.
 
 기본 DB 경로는 `.baton/baton.sqlite3`입니다. 다른 DB를 사용하려면 모든 명령에 `--db`를 지정합니다.
 
