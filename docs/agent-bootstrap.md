@@ -19,6 +19,14 @@ baton --version
 git rev-parse --show-toplevel
 ```
 
+Use command help for syntax and options. Use guides for role behavior and operational policy:
+
+```bash
+baton help
+baton help project migrate
+baton guide show worker
+```
+
 Change to the reported project root before running Baton. The default database is `<project-root>/.baton/baton.sqlite3`.
 
 If no database exists and the project is new, initialize it only with user or SM approval:

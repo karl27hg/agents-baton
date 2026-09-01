@@ -6,6 +6,7 @@
 - Added a temporary-home pipx lifecycle test that verifies command and environment removal while preserving the consumer project's Baton database.
 - Added checked project database discovery and migration from legacy tool layouts, with explicit source paths, in-memory rehearsal, plan tokens, active-waiter protection, validated backups, and no implicit database merging.
 - Bundled version-matched bootstrap, worker, and planner instructions behind `baton guide` for agents using a pipx installation without a Baton source checkout.
+- Added `baton help [COMMAND ...]` as a conventional equivalent to nested `-h`/`--help`, distinct from the longer agent operating guides.
 
 ## v0.5.1
 

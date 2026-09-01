@@ -63,6 +63,29 @@ baton status
 
 The current directory determines the default `.baton/baton.sqlite3` location.
 
+## Command Help And Agent Guides
+
+Use `-h`, `--help`, or `help` to inspect command syntax and options. The explicit `help` form accepts a nested command path:
+
+```bash
+baton -h
+baton help
+baton help wait
+baton help cr wait-review
+baton help project migrate
+```
+
+Use `guide` for the longer operational policy that an SM, worker, reviewer, or planner agent should follow:
+
+```bash
+baton guide list
+baton guide show bootstrap
+baton guide show worker
+baton guide show planner
+```
+
+Both interfaces are included in a pipx installation. Help answers “what arguments does this command accept?”; guides answer “how should an agent operate Baton safely?”
+
 ## Install With Pipx
 
 Install pipx first if the `pipx` command is not already available.
@@ -660,6 +683,7 @@ tests/handoff-dependencies.sh
 tests/migrate.sh
 tests/project-migrate.sh
 tests/guides.sh
+tests/help.sh
 tests/shift.sh
 tests/report.sh
 tests/update.sh
