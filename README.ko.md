@@ -45,6 +45,7 @@ bin/baton status
 
 ```bash
 cd /path/to/your-project
+baton guide show bootstrap
 baton init
 baton migrate --check
 baton status
@@ -94,7 +95,27 @@ cd /path/to/project-b
 baton init
 ```
 
-두 프로젝트는 동일한 설치 실행파일을 사용하지만 각각 `project-a/.baton/baton.sqlite3`와 `project-b/.baton/baton.sqlite3`를 사용합니다. pipx는 CLI만 설치하며 프로젝트의 `AGENTS.md`, worker prompt 또는 planner prompt를 자동으로 설정하지 않으므로 [설치 가이드](docs/using-baton-in-projects.md)에 따라 agent 설정을 별도로 적용해야 합니다.
+두 프로젝트는 동일한 설치 실행파일을 사용하지만 각각 `project-a/.baton/baton.sqlite3`와 `project-b/.baton/baton.sqlite3`를 사용합니다. pipx 패키지는 실행파일과 현재 버전에 맞는 agent guide를 함께 설치하지만 프로젝트의 `AGENTS.md`는 자동으로 변경하지 않습니다. `AGENTS.md`에서 `baton guide show bootstrap`, `baton guide show worker`, `baton guide show planner`를 역할에 맞게 읽도록 요구해야 합니다.
+
+기존에 `tools/baton` 아래에서 Baton을 사용한 프로젝트라면 기본 DB가 보이지 않는다는 이유로 새 DB를 초기화하지 않습니다. 먼저 쓰기 없이 자동 탐색과 migration 가능 여부를 검사합니다.
+
+```bash
+baton project migrate --check
+```
+
+자동으로 찾지 못하면 기존 DB 경로를 지정합니다. 경로를 지정해도 즉시 migration하지 않고 동일한 검사를 수행합니다.
+
+```bash
+baton project migrate --check --source-db /path/to/existing/baton.sqlite3
+```
+
+출력된 원본, 대상, schema, 대기 agent 수를 확인하고 agent를 중지한 뒤 `plan_token`으로 적용합니다.
+
+```bash
+baton project migrate --apply --plan-token <token>
+```
+
+검사 때 `--source-db` 또는 `--project-root`를 사용했다면 적용할 때도 같은 값을 사용합니다. Baton은 변경된 원본, 활성 waiter, 호환되지 않는 DB, 복수 후보, 서로 다른 기존 대상 DB를 거부하며, 적용 전 `.baton/backups/`에 검증된 백업을 만듭니다.
 
 Git tag 설치의 버전을 변경할 때는 새 tag를 명시하여 교체하고 각 프로젝트 DB를 migration합니다.
 
@@ -125,14 +146,15 @@ bin/baton --db /tmp/baton.sqlite3 init
 
 영문 문서를 기준으로 다음 순서로 읽는 것을 권장합니다.
 
-1. [README.md](README.md): 전체 기능, 기본값, 명령 및 운영 규칙
-2. [다른 프로젝트에서 사용하기](docs/using-baton-in-projects.md): 설치, 버전 고정, 프로젝트 설정
-3. [Named Gate 운영](docs/gates.md): Gate 소유권, 해제, 취소, 긴급 이관
-4. [Planner prompt](docs/planner-prompt.md): 병렬 작업의 독립성 판정과 의존성 등록 정책
-5. [Agent prompt](docs/agent-prompt.md): Baton worker agent에 추가할 영문 prompt
-6. [Agent 사용법](docs/agent-usage.md): role, CR, wait, shift 명령 예시
-7. [SQLite schema](docs/schema.md) 또는 [한국어 번역](docs/schema.ko.md): 테이블과 migration 명세
-8. [CHANGELOG.md](CHANGELOG.md): 버전별 변경 사항
+1. [Agent bootstrap](docs/agent-bootstrap.md): 설치 명령, 프로젝트 확인, 기존 DB migration 안전 절차
+2. [README.md](README.md): 전체 기능, 기본값, 명령 및 운영 규칙
+3. [다른 프로젝트에서 사용하기](docs/using-baton-in-projects.md): 설치, 버전 고정, 프로젝트 설정
+4. [Named Gate 운영](docs/gates.md): Gate 소유권, 해제, 취소, 긴급 이관
+5. [Planner prompt](docs/planner-prompt.md): 병렬 작업의 독립성 판정과 의존성 등록 정책
+6. [Agent prompt](docs/agent-prompt.md): Baton worker agent에 추가할 영문 prompt
+7. [Agent 사용법](docs/agent-usage.md): role, CR, wait, shift 명령 예시
+8. [SQLite schema](docs/schema.md) 또는 [한국어 번역](docs/schema.ko.md): 테이블과 migration 명세
+9. [CHANGELOG.md](CHANGELOG.md): 버전별 변경 사항
 
 `docs/agent-prompt.md`는 Codex role agent가 직접 따를 명령 규칙이므로 영문 원본을 agent 지시 사항에 연결하는 것을 권장합니다.
 

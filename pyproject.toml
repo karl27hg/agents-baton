@@ -41,3 +41,6 @@ version = { attr = "agents_baton.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+agents_baton = ["guides/*.md"]

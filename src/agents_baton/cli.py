@@ -4,13 +4,16 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import sqlite3
 import sys
 import time
 import uuid
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
+from importlib.resources import files
 from pathlib import Path
 
 from agents_baton import __version__
@@ -51,6 +54,11 @@ GATE_PERMISSIONS = {
 }
 KNOWN_PERMISSIONS = REVIEW_PERMISSIONS | HANDOFF_PERMISSIONS | GATE_PERMISSIONS
 LATEST_SCHEMA_VERSION = 4
+GUIDE_FILES = {
+    "bootstrap": "agent-bootstrap.md",
+    "worker": "agent-prompt.md",
+    "planner": "planner-prompt.md",
+}
 
 
 class MigrationError(RuntimeError):
@@ -558,6 +566,266 @@ def migrate_schema(con: sqlite3.Connection) -> tuple[int, int, list[str]]:
             raise MigrationError(f"database migration failed: {exc}") from exc
         raise
     return previous_version, LATEST_SCHEMA_VERSION, applied_names
+
+
+def project_root_path(explicit_root: str) -> Path:
+    if explicit_root:
+        root = Path(explicit_root).expanduser().resolve()
+        if not root.is_dir():
+            raise MigrationError(f"project root is not a directory: {root}")
+        return root
+    current = Path.cwd().resolve()
+    for candidate in (current, *current.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return current
+
+
+def project_database_paths(root: Path) -> tuple[Path, tuple[Path, ...]]:
+    target = (root / ".baton" / "baton.sqlite3").resolve()
+    candidates = (
+        target,
+        (root / "tools" / "baton" / ".baton" / "baton.sqlite3").resolve(),
+        (root / "tools" / "agents-baton" / ".baton" / "baton.sqlite3").resolve(),
+    )
+    return target, candidates
+
+
+def resolve_migration_source(root: Path, source_value: str) -> tuple[Path, Path]:
+    target, candidates = project_database_paths(root)
+    if source_value:
+        source = Path(source_value).expanduser()
+        if not source.is_absolute():
+            source = (Path.cwd() / source).resolve()
+        else:
+            source = source.resolve()
+        if not source.is_file():
+            raise MigrationError(f"source database does not exist: {source}")
+        return source, target
+
+    found = tuple(path for path in candidates if path.is_file())
+    if not found:
+        raise MigrationError(
+            "no Baton database found in the project or legacy tools layout; "
+            "rerun with --source-db PATH"
+        )
+    if len(found) > 1:
+        paths = ", ".join(str(path) for path in found)
+        raise MigrationError(
+            f"multiple Baton databases found; choose the canonical database with --source-db: {paths}"
+        )
+    return found[0], target
+
+
+def database_content_signature(con: sqlite3.Connection) -> str:
+    digest = hashlib.sha256()
+    for line in con.iterdump():
+        encoded = line.encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+    return digest.hexdigest()
+
+
+def database_path_content_signature(path: Path) -> str:
+    with closing(connect_readonly(str(path))) as con:
+        return database_content_signature(con)
+
+
+def database_table_names(con: sqlite3.Connection) -> set[str]:
+    return {
+        str(row[0])
+        for row in con.execute(
+            "select name from sqlite_master where type = 'table' and name not like 'sqlite_%'"
+        ).fetchall()
+    }
+
+
+def active_waiter_count(con: sqlite3.Connection) -> int:
+    if "waiter_leases" not in database_table_names(con):
+        return 0
+    row = con.execute(
+        "select count(*) from waiter_leases where lease_expires_at > ?",
+        (utc_now(),),
+    ).fetchone()
+    return int(row[0])
+
+
+def inspect_project_migration(root: Path, source: Path, target: Path) -> dict[str, object]:
+    if target.is_file() and source.resolve() != target.resolve():
+        raise MigrationError(
+            "target database already exists and differs from the selected source; "
+            f"source={source} target={target}; Baton will not merge or overwrite databases"
+        )
+    try:
+        with closing(connect_readonly(str(source))) as source_con:
+            tables = database_table_names(source_con)
+            baton_tables = {"roles", "handoff_jobs", "handoff_controls", "change_requests"}
+            if not tables.intersection(baton_tables):
+                raise MigrationError(f"source is not a recognized Baton database: {source}")
+            validate_database(source_con)
+            source_version = current_schema_version(source_con)
+            if source_version > LATEST_SCHEMA_VERSION:
+                raise MigrationError(
+                    "database schema is newer than this Baton version: "
+                    f"schema={source_version} latest={LATEST_SCHEMA_VERSION}"
+                )
+            if migration_table_exists(source_con):
+                applied_migration_versions(source_con)
+            waiters = active_waiter_count(source_con)
+            probe = sqlite3.connect(":memory:")
+            probe.row_factory = sqlite3.Row
+            probe.execute("PRAGMA foreign_keys = ON")
+            try:
+                source_con.backup(probe)
+                signature = database_content_signature(probe)
+                previous, current, pending = migrate_schema(probe)
+                check_schema(probe)
+            finally:
+                probe.close()
+    except sqlite3.DatabaseError as exc:
+        raise MigrationError(f"database migration check failed: {exc}") from exc
+
+    token_source = "\n".join(
+        (
+            str(root),
+            str(source),
+            str(target),
+            signature,
+            str(source_version),
+            str(LATEST_SCHEMA_VERSION),
+            ",".join(pending),
+        )
+    )
+    token = hashlib.sha256(token_source.encode("utf-8")).hexdigest()[:24]
+    return {
+        "project_root": root,
+        "source": source,
+        "target": target,
+        "source_schema": source_version,
+        "target_schema": current,
+        "pending": pending,
+        "layout_move": source.resolve() != target.resolve(),
+        "active_waiters": waiters,
+        "token": token,
+        "signature": signature,
+        "previous": previous,
+    }
+
+
+def print_project_migration_plan(plan: dict[str, object]) -> None:
+    pending = ",".join(plan["pending"]) if plan["pending"] else "none"
+    print("Migration check OK")
+    print(f"project_root: {plan['project_root']}")
+    print(f"source_db: {plan['source']}")
+    print(f"target_db: {plan['target']}")
+    print(f"source_schema: {plan['source_schema']}")
+    print(f"target_schema: {plan['target_schema']}")
+    print(f"pending_migrations: {pending}")
+    print(f"layout_move: {'yes' if plan['layout_move'] else 'no'}")
+    print(f"active_waiters: {plan['active_waiters']}")
+    print(f"plan_token: {plan['token']}")
+
+
+def backup_database(source: Path, backup_path: Path, expected_signature: str = "") -> None:
+    backup_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with closing(connect_readonly(str(source))) as source_con:
+            backup_con = sqlite3.connect(backup_path)
+            try:
+                source_con.backup(backup_con)
+                backup_con.row_factory = sqlite3.Row
+                validate_database(backup_con)
+            finally:
+                backup_con.close()
+        with closing(connect_readonly(str(backup_path))) as backup_con:
+            actual_signature = database_content_signature(backup_con)
+        if expected_signature and actual_signature != expected_signature:
+            backup_path.unlink()
+            raise MigrationError("source database changed after migration check; rerun --check")
+        backup_path.chmod(0o600)
+    except sqlite3.DatabaseError as exc:
+        if backup_path.exists():
+            backup_path.unlink()
+        raise MigrationError(f"database backup failed: {exc}") from exc
+
+
+def command_project_migrate(args: argparse.Namespace) -> int:
+    root = project_root_path(args.project_root)
+    source, target = resolve_migration_source(root, args.source_db)
+    plan = inspect_project_migration(root, source, target)
+    if args.check:
+        print_project_migration_plan(plan)
+        return 0
+    if args.plan_token != plan["token"]:
+        raise MigrationError(
+            "migration plan token is missing or stale; rerun --check with the same paths, "
+            "then pass --plan-token TOKEN to --apply"
+        )
+    if plan["active_waiters"]:
+        raise MigrationError(
+            f"cannot migrate while {plan['active_waiters']} Baton waiter(s) are active; stop agents and check again"
+        )
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup_path = root / ".baton" / "backups" / f"baton-before-{timestamp}-{uuid.uuid4().hex[:8]}.sqlite3"
+    pending = list(plan["pending"])
+
+    if source.resolve() == target.resolve() and not pending:
+        print(f"Migration not required source={source} schema={plan['source_schema']}")
+        return 0
+
+    backup_database(source, backup_path, str(plan["signature"]))
+    applied: list[str]
+    if source.resolve() == target.resolve():
+        with closing(connect(str(target))) as con:
+            previous, current, applied = migrate_schema(con)
+    else:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary_target = target.parent / f".{target.name}.migrating-{uuid.uuid4().hex}"
+        try:
+            backup_database(backup_path, temporary_target)
+            with closing(connect(str(temporary_target))) as con:
+                previous, current, applied = migrate_schema(con)
+                check_schema(con)
+            with closing(sqlite3.connect(temporary_target)) as con:
+                con.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                con.execute("PRAGMA journal_mode = DELETE").fetchone()
+            if database_path_content_signature(source) != plan["signature"]:
+                raise MigrationError("source database changed during project migration; target was not installed")
+            os.replace(temporary_target, target)
+            target.chmod(0o600)
+        finally:
+            for temporary_file in (
+                temporary_target,
+                Path(f"{temporary_target}-wal"),
+                Path(f"{temporary_target}-shm"),
+            ):
+                if temporary_file.exists():
+                    temporary_file.unlink()
+
+    with closing(connect_readonly(str(target))) as con:
+        check_schema(con)
+    applied_text = ",".join(applied) if applied else "none"
+    print(
+        f"Project migration complete source={source} target={target} "
+        f"schema={previous}->{current} applied={applied_text} backup={backup_path}"
+    )
+    if source.resolve() != target.resolve():
+        print(f"Source retained: {source}")
+    return 0
+
+
+def command_guide_list(args: argparse.Namespace) -> int:
+    del args
+    for name in GUIDE_FILES:
+        print(name)
+    return 0
+
+
+def command_guide_show(args: argparse.Namespace) -> int:
+    guide = files("agents_baton").joinpath("guides", GUIDE_FILES[args.guide_name])
+    print(guide.read_text(encoding="utf-8"), end="")
+    return 0
 
 
 def init_schema(con: sqlite3.Connection) -> None:
@@ -2390,6 +2658,42 @@ def build_parser() -> argparse.ArgumentParser:
     migrate.add_argument("--check", action="store_true", help="verify schema version and integrity without migrating")
     migrate.set_defaults(func=command_migrate)
     sub.add_parser("update", help="deprecated alias for migrate").set_defaults(func=command_update)
+
+    project = sub.add_parser("project", help="inspect or migrate project-local Baton state")
+    project_sub = project.add_subparsers(dest="project_command", required=True)
+    project_migrate = project_sub.add_parser(
+        "migrate",
+        help="check and apply a project database migration plan",
+        description=(
+            "Discover a standard or legacy Baton database, prove migration compatibility without "
+            "writing, then apply only with the plan token returned by --check."
+        ),
+    )
+    project_migrate_action = project_migrate.add_mutually_exclusive_group(required=True)
+    project_migrate_action.add_argument("--check", action="store_true", help="perform a read-only migration rehearsal")
+    project_migrate_action.add_argument(
+        "--apply", action="store_true", help="apply a previously checked migration plan"
+    )
+    project_migrate.add_argument(
+        "--project-root",
+        default="",
+        help="project root; defaults to the nearest Git root or current directory",
+    )
+    project_migrate.add_argument(
+        "--source-db",
+        default="",
+        help="explicit existing Baton database path when discovery fails",
+    )
+    project_migrate.add_argument("--plan-token", default="", help="token printed by --check; required with --apply")
+    project_migrate.set_defaults(func=command_project_migrate)
+
+    guide = sub.add_parser("guide", help="show agent instructions bundled with this Baton version")
+    guide_sub = guide.add_subparsers(dest="guide_command", required=True)
+    guide_sub.add_parser("list", help="list bundled agent guides").set_defaults(func=command_guide_list)
+    guide_show = guide_sub.add_parser("show", help="print one bundled agent guide")
+    guide_show.add_argument("guide_name", choices=tuple(GUIDE_FILES))
+    guide_show.set_defaults(func=command_guide_show)
+
     sub.add_parser("status", help="show handoff counts by status").set_defaults(func=command_status)
     sub.add_parser("promote-ready", help="promote dependency-ready handoffs").set_defaults(
         func=command_promote_ready,

@@ -9,6 +9,7 @@ dist/
 
 # Baton local runtime state
 .baton/agent-id
+.baton/backups/
 .baton/*.sqlite3
 .baton/*.sqlite3-shm
 .baton/*.sqlite3-wal
