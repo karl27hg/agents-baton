@@ -64,6 +64,31 @@ The current directory determines the default `.baton/baton.sqlite3` location.
 
 ## Install With Pipx
 
+Install pipx first if the `pipx` command is not already available.
+
+On macOS with Homebrew:
+
+```bash
+brew install pipx
+pipx ensurepath
+```
+
+On Ubuntu 23.04 or newer:
+
+```bash
+sudo apt update
+sudo apt install pipx
+pipx ensurepath
+```
+
+Open a new terminal after `pipx ensurepath`, then verify the installation:
+
+```bash
+pipx --version
+```
+
+For other Linux distributions or installation methods, follow the [official pipx installation guide](https://pipx.pypa.io/latest/how-to/install-pipx.html). Baton does not require pipx when it is run directly from a source checkout through `bin/baton`.
+
 For local validation from this Baton source checkout, run `pipx install .` in the Baton repository root:
 
 ```bash

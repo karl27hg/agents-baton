@@ -52,6 +52,31 @@ baton status
 
 기본 DB 경로 `.baton/baton.sqlite3`는 `baton`을 실행한 현재 프로젝트를 기준으로 결정됩니다. 사용자 단위의 빠른 설치에는 pipx가 적합하지만, 프로젝트 저장소가 Baton 버전을 직접 기록해야 하면 release tag에 고정한 submodule을 사용합니다. 자세한 내용은 [설치 가이드](docs/using-baton-in-projects.md)를 확인합니다.
 
+`pipx` 명령이 없다면 Baton을 설치하기 전에 pipx를 먼저 설치합니다.
+
+macOS와 Homebrew 환경:
+
+```bash
+brew install pipx
+pipx ensurepath
+```
+
+Ubuntu 23.04 이상:
+
+```bash
+sudo apt update
+sudo apt install pipx
+pipx ensurepath
+```
+
+`pipx ensurepath` 실행 후 새 터미널을 열고 설치를 확인합니다.
+
+```bash
+pipx --version
+```
+
+그 밖의 Linux 배포판과 설치 방식은 [pipx 공식 설치 안내](https://pipx.pypa.io/latest/how-to/install-pipx.html)를 따릅니다. 소스 checkout에서 `bin/baton`을 직접 실행하는 경우에는 pipx가 필요하지 않습니다.
+
 현재 내부 검증 브랜치는 다음 명령으로 설치할 수 있습니다.
 
 ```bash
