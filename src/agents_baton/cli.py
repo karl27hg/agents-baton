@@ -2648,7 +2648,13 @@ def command_wait(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="SQLite-backed Baton CLI")
+    parser = argparse.ArgumentParser(
+        description="SQLite-backed Baton CLI",
+        epilog=(
+            "Agent operating guides: run 'baton guide list', then "
+            "'baton guide show bootstrap|worker|planner'."
+        ),
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {BATON_VERSION}")
     parser.add_argument("--db", default=".baton/baton.sqlite3", help="SQLite database path; default: .baton/baton.sqlite3")
     parser.add_argument("--agent-id-file", default="", help="local non-shared agent identity file")

@@ -12,6 +12,9 @@ trap 'rm -rf "$TMP"' EXIT
 cmp "$TMP/root-short.txt" "$TMP/root-long.txt"
 cmp "$TMP/root-short.txt" "$TMP/root-command.txt"
 grep 'help.*show command help' "$TMP/root-command.txt" >/dev/null
+grep "baton guide list" "$TMP/root-command.txt" >/dev/null
+grep "baton guide show" "$TMP/root-command.txt" >/dev/null
+grep "bootstrap|worker|planner" "$TMP/root-command.txt" >/dev/null
 
 "$CLI" project migrate -h >"$TMP/migrate-short.txt"
 "$CLI" help project migrate >"$TMP/migrate-command.txt"
