@@ -74,13 +74,43 @@ baton --version
 
 The installation command reads `pyproject.toml`, creates an isolated environment, and exposes `baton` and `baton-report` on the user `PATH`. After installation, leave the Baton repository and run those commands from the project that should own the workflow database.
 
+To test the current unpublished packaging branch directly from GitHub:
+
+```bash
+pipx install "git+https://github.com/karl27hg/agents-baton.git@codex/pipx-packaging"
+baton --version
+```
+
 Once a release containing the packaging metadata is published, install that exact Git tag without cloning it first:
 
 ```bash
 pipx install "git+https://github.com/karl27hg/agents-baton.git@vX.Y.Z"
 ```
 
+Install Baton once per operating-system user. Do not run `pipx install` again for every project. Instead, change to each project root and initialize its independent runtime database:
+
+```bash
+cd /path/to/project-a
+baton init
+baton migrate --check
+
+cd /path/to/project-b
+baton init
+baton migrate --check
+```
+
+Both projects use the same installed `baton` executable, while `project-a/.baton/baton.sqlite3` and `project-b/.baton/baton.sqlite3` remain separate. Always run Baton from the intended project root unless an explicit `--db` path is supplied.
+
+Verify the managed installation with:
+
+```bash
+pipx list
+baton --version
+```
+
 Use `pipx upgrade agents-baton` for a package-index installation and `pipx uninstall agents-baton` to remove the commands. A pipx installation is convenient for one user but does not record the selected Baton version in a consuming repository. Use a release-pinned submodule when the project itself must record and review the tool version.
+
+Pipx installs the CLI only. It does not modify a consuming project's `AGENTS.md` or automatically attach the Baton prompts to Codex agents. Complete the project setup in `docs/using-baton-in-projects.md`, including `.gitignore`, role configuration, `docs/agent-prompt.md`, and `docs/planner-prompt.md`.
 
 ## SM Agent Reading Path
 

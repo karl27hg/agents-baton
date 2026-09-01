@@ -52,6 +52,25 @@ baton status
 
 기본 DB 경로 `.baton/baton.sqlite3`는 `baton`을 실행한 현재 프로젝트를 기준으로 결정됩니다. 사용자 단위의 빠른 설치에는 pipx가 적합하지만, 프로젝트 저장소가 Baton 버전을 직접 기록해야 하면 release tag에 고정한 submodule을 사용합니다. 자세한 내용은 [설치 가이드](docs/using-baton-in-projects.md)를 확인합니다.
 
+현재 내부 검증 브랜치는 다음 명령으로 설치할 수 있습니다.
+
+```bash
+pipx install "git+https://github.com/karl27hg/agents-baton.git@codex/pipx-packaging"
+baton --version
+```
+
+pipx 설치는 OS 사용자당 한 번만 하면 됩니다. 프로젝트마다 다시 설치하지 말고 각 프로젝트 루트에서 `baton init`을 실행합니다.
+
+```bash
+cd /path/to/project-a
+baton init
+
+cd /path/to/project-b
+baton init
+```
+
+두 프로젝트는 동일한 설치 실행파일을 사용하지만 각각 `project-a/.baton/baton.sqlite3`와 `project-b/.baton/baton.sqlite3`를 사용합니다. pipx는 CLI만 설치하며 프로젝트의 `AGENTS.md`, worker prompt 또는 planner prompt를 자동으로 설정하지 않으므로 [설치 가이드](docs/using-baton-in-projects.md)에 따라 agent 설정을 별도로 적용해야 합니다.
+
 기본 DB 경로는 `.baton/baton.sqlite3`입니다. 다른 DB를 사용하려면 모든 명령에 `--db`를 지정합니다.
 
 ```bash
