@@ -71,6 +71,25 @@ baton init
 
 두 프로젝트는 동일한 설치 실행파일을 사용하지만 각각 `project-a/.baton/baton.sqlite3`와 `project-b/.baton/baton.sqlite3`를 사용합니다. pipx는 CLI만 설치하며 프로젝트의 `AGENTS.md`, worker prompt 또는 planner prompt를 자동으로 설정하지 않으므로 [설치 가이드](docs/using-baton-in-projects.md)에 따라 agent 설정을 별도로 적용해야 합니다.
 
+Git tag 설치의 버전을 변경할 때는 새 tag를 명시하여 교체하고 각 프로젝트 DB를 migration합니다.
+
+```bash
+pipx install --force "git+https://github.com/karl27hg/agents-baton.git@vNEW.VERSION"
+baton --version
+
+cd /path/to/your-project
+baton migrate
+baton migrate --check
+```
+
+이전 Baton이 새 schema를 지원하지 않을 수 있으므로 schema migration 후 임의로 downgrade하지 않습니다. 설치 버전을 고정하려면 `pipx pin agents-baton`, 다시 업그레이드를 허용하려면 `pipx unpin agents-baton`을 사용합니다.
+
+```bash
+pipx uninstall agents-baton
+```
+
+Uninstall은 `baton`, `baton-report` 명령과 pipx 가상환경만 제거합니다. 각 프로젝트의 `.baton/` DB와 감사 이력은 삭제하지 않습니다.
+
 기본 DB 경로는 `.baton/baton.sqlite3`입니다. 다른 DB를 사용하려면 모든 명령에 `--db`를 지정합니다.
 
 ```bash

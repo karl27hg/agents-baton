@@ -63,14 +63,22 @@ baton role list
 
 The installation location does not select the Baton database. The current working directory at command execution selects the default `.baton/baton.sqlite3` path.
 
-Upgrade or remove the user-level installation with pipx:
+For a package-index installation, upgrade the user-level command with pipx:
 
 ```bash
 pipx upgrade agents-baton
-pipx uninstall agents-baton
 ```
 
-For Git URL installations, reinstall the chosen tag when changing versions. Prefer a submodule instead when the consuming repository must pin Baton in version control.
+For a Git URL installation, explicitly replace it with the chosen new tag, then migrate each active project database:
+
+```bash
+pipx install --force "git+https://github.com/karl27hg/agents-baton.git@vNEW.VERSION"
+cd /path/to/your-project
+baton migrate
+baton migrate --check
+```
+
+Remove the managed commands and isolated environment with `pipx uninstall agents-baton`. Uninstall leaves every consuming project's `.baton/` directory and workflow database intact. Prefer a submodule when the consuming repository must pin Baton in version control, and do not downgrade an executable after applying a schema migration unless the target version is known to support that schema.
 
 ## Add Baton As A Submodule
 
