@@ -33,6 +33,7 @@ mkdir -p "$CONSUMER"
   cd "$CONSUMER"
   "$PIPX_BIN_DIR/baton" init
   "$PIPX_BIN_DIR/baton" migrate --check
+  "$PIPX_BIN_DIR/baton" role add update-sentinel --display-name "Update Sentinel"
   "$PIPX_BIN_DIR/baton" role list >/dev/null
   "$PIPX_BIN_DIR/baton-report" summary >/dev/null
   test -f .baton/baton.sqlite3
@@ -54,6 +55,39 @@ test -n "$MIGRATION_TOKEN"
 test -f "$MIGRATION_CONSUMER/.baton/baton.sqlite3"
 "$PIPX_BIN_DIR/baton" --db "$MIGRATION_CONSUMER/.baton/baton.sqlite3" migrate --check >/dev/null
 
+UPGRADE_SOURCE="$TMP_ROOT/upgrade-source"
+mkdir -p "$UPGRADE_SOURCE"
+cp "$ROOT/pyproject.toml" "$ROOT/README.md" "$UPGRADE_SOURCE/"
+cp -R "$ROOT/src" "$UPGRADE_SOURCE/src"
+python3 - "$UPGRADE_SOURCE/src/agents_baton/__init__.py" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+content = path.read_text(encoding="utf-8")
+updated, count = re.subn(
+    r'^__version__ = "[^"]+"$',
+    '__version__ = "9999.0.0"',
+    content,
+    count=1,
+    flags=re.MULTILINE,
+)
+if count != 1:
+    raise SystemExit("could not replace test package version")
+path.write_text(updated, encoding="utf-8")
+PY
+"$PIPX_COMMAND" install --force "$UPGRADE_SOURCE"
+UPDATED_VERSION="$("$PIPX_BIN_DIR/baton" --version)"
+test "$UPDATED_VERSION" = "baton 9999.0.0"
+(
+  cd "$CONSUMER"
+  "$PIPX_BIN_DIR/baton" migrate --check >/dev/null
+  "$PIPX_BIN_DIR/baton" role list | grep '^update-sentinel' >/dev/null
+  "$PIPX_BIN_DIR/baton" guide show bootstrap | grep '^# Agent Bootstrap: Installed Baton' >/dev/null
+)
+"$PIPX_BIN_DIR/baton" --db "$MIGRATION_CONSUMER/.baton/baton.sqlite3" migrate --check >/dev/null
+
 "$PIPX_COMMAND" uninstall agents-baton
 test ! -e "$PIPX_BIN_DIR/baton"
 test ! -e "$PIPX_BIN_DIR/baton-report"
@@ -65,4 +99,4 @@ if "$PIPX_COMMAND" list --short | grep -q '^agents-baton '; then
   exit 1
 fi
 
-echo "OK pipx lifecycle consumer=$CONSUMER version=$ACTUAL_VERSION db=preserved"
+echo "OK pipx lifecycle consumer=$CONSUMER version=$ACTUAL_VERSION updated=$UPDATED_VERSION db=preserved"
