@@ -828,6 +828,11 @@ def command_guide_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_help(args: argparse.Namespace) -> int:
+    args.root_parser.print_help()
+    return 0
+
+
 def init_schema(con: sqlite3.Connection) -> None:
     if current_schema_version(con) != LATEST_SCHEMA_VERSION:
         migrate_schema(con)
@@ -2649,6 +2654,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--agent-id-file", default="", help="local non-shared agent identity file")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    help_command = sub.add_parser("help", help="show command help; optionally name a command path")
+    help_command.add_argument("command_path", nargs="*", metavar="COMMAND")
+    help_command.set_defaults(func=command_help, root_parser=parser)
+
     sub.add_parser("init", help="initialize a new Baton database").set_defaults(func=command_init)
     migrate = sub.add_parser(
         "migrate",
@@ -2953,7 +2962,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     parser = build_parser()
-    args = parser.parse_args()
+    argv = sys.argv[1:]
+    if argv and argv[0] == "help":
+        argv = [*argv[1:], "--help"]
+    args = parser.parse_args(argv)
     try:
         return args.func(args)
     except MigrationError as exc:

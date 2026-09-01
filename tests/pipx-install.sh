@@ -23,6 +23,7 @@ ACTUAL_VERSION="$("$PIPX_BIN_DIR/baton" --version)"
 test "$ACTUAL_VERSION" = "$EXPECTED_VERSION"
 test -x "$PIPX_BIN_DIR/baton-report"
 test -d "$PIPX_HOME/venvs/agents-baton"
+"$PIPX_BIN_DIR/baton" help project migrate | grep -- '--source-db SOURCE_DB' >/dev/null
 test "$("$PIPX_BIN_DIR/baton" guide list)" = $'bootstrap\nworker\nplanner'
 "$PIPX_BIN_DIR/baton" guide show bootstrap | grep '^# Agent Bootstrap: Installed Baton' >/dev/null
 

@@ -64,6 +64,15 @@ baton role list
 
 The installation location does not select the Baton database. The current working directory at command execution selects the default `.baton/baton.sqlite3` path.
 
+The installed command provides two discovery interfaces:
+
+```bash
+baton help project migrate
+baton guide show bootstrap
+```
+
+Use `help` or `-h` for command syntax and options. Use `guide` for version-matched agent operating policy.
+
 Do not run `baton init` when a project used Baton previously but the default database is absent. First use `baton project migrate --check` to discover and rehearse migration from supported legacy tool layouts. If discovery fails, use `--source-db /path/to/existing/baton.sqlite3`; an explicit path is checked but never applied automatically. Apply only after reviewing the plan and passing its `plan_token` to `baton project migrate --apply` with the same path options.
 
 For a package-index installation, upgrade the user-level command with pipx:

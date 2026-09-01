@@ -53,6 +53,25 @@ baton status
 
 기본 DB 경로 `.baton/baton.sqlite3`는 `baton`을 실행한 현재 프로젝트를 기준으로 결정됩니다. 사용자 단위의 빠른 설치에는 pipx가 적합하지만, 프로젝트 저장소가 Baton 버전을 직접 기록해야 하면 release tag에 고정한 submodule을 사용합니다. 자세한 내용은 [설치 가이드](docs/using-baton-in-projects.md)를 확인합니다.
 
+명령 문법과 옵션은 일반적인 `-h`, `--help` 또는 `help`로 확인합니다. `help`는 중첩된 하위 명령도 지정할 수 있습니다.
+
+```bash
+baton -h
+baton help
+baton help wait
+baton help cr wait-review
+baton help project migrate
+```
+
+`guide`는 단순 명령 목록이 아니라 agent가 따라야 할 운영 정책을 출력합니다. 두 기능 모두 pipx 설치에 포함됩니다.
+
+```bash
+baton guide list
+baton guide show bootstrap
+baton guide show worker
+baton guide show planner
+```
+
 `pipx` 명령이 없다면 Baton을 설치하기 전에 pipx를 먼저 설치합니다.
 
 macOS와 Homebrew 환경:
