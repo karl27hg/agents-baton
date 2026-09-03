@@ -16,12 +16,15 @@ LEGACY_DB="$LEGACY_PROJECT/tools/baton/.baton/baton.sqlite3"
 TARGET_DB="$LEGACY_PROJECT/.baton/baton.sqlite3"
 mkdir -p "$(dirname "$LEGACY_DB")"
 "$CLI" --db "$LEGACY_DB" init >/dev/null
+mv "$LEGACY_PROJECT/tools/baton/.baton/project.json" \
+  "$LEGACY_PROJECT/tools/baton/.baton/project.json.removed"
 "$CLI" --db "$LEGACY_DB" role add migration-custom --display-name "Migration Custom" >/dev/null
 JOB_ID="$("$CLI" --db "$LEGACY_DB" register \
   --title "Preserve legacy project data" \
   --role backend \
   --objective "Move the legacy Baton database." \
   --exit-criteria "The target contains this handoff." | awk '{print $1}')"
+"$CLI" --db "$LEGACY_DB" stop --all --reason "project migration test" >/dev/null
 
 CHECK_OUTPUT="$("$CLI" project migrate --check --project-root "$LEGACY_PROJECT")"
 TOKEN="$(printf '%s\n' "$CHECK_OUTPUT" | plan_token)"
@@ -29,6 +32,8 @@ test -n "$TOKEN"
 printf '%s\n' "$CHECK_OUTPUT" | grep "source_db: $LEGACY_DB" >/dev/null
 printf '%s\n' "$CHECK_OUTPUT" | grep "target_db: $TARGET_DB" >/dev/null
 printf '%s\n' "$CHECK_OUTPUT" | grep 'layout_move: yes' >/dev/null
+printf '%s\n' "$CHECK_OUTPUT" | grep 'global_stop: yes' >/dev/null
+printf '%s\n' "$CHECK_OUTPUT" | grep 'project_marker: missing' >/dev/null
 test ! -e "$TARGET_DB"
 
 if "$CLI" project migrate --apply --project-root "$LEGACY_PROJECT" >/dev/null 2>&1; then
@@ -44,9 +49,15 @@ test ! -e "$TARGET_DB"
 "$CLI" project migrate --apply --project-root "$LEGACY_PROJECT" --plan-token "$TOKEN" >/dev/null
 test -f "$TARGET_DB"
 test -f "$LEGACY_DB"
+test -L "$LEGACY_DB"
+test "$LEGACY_DB" -ef "$TARGET_DB"
+test -f "$LEGACY_PROJECT/.baton/project.json"
 test "$(find "$LEGACY_PROJECT/.baton/backups" -type f -name '*.sqlite3' | wc -l | tr -d ' ')" = "1"
-"$CLI" --db "$TARGET_DB" migrate --check | grep 'schema=4' >/dev/null
+"$CLI" --db "$TARGET_DB" migrate --check | grep 'schema=6' >/dev/null
 "$CLI" --db "$TARGET_DB" role list | grep '^migration-custom' >/dev/null
+POST_CHECK="$("$CLI" project migrate --check --project-root "$LEGACY_PROJECT")"
+printf '%s\n' "$POST_CHECK" | grep 'layout_move: no' >/dev/null
+printf '%s\n' "$POST_CHECK" | grep 'project_marker: present' >/dev/null
 python3 - "$TARGET_DB" "$JOB_ID" <<'PY'
 import sqlite3
 import sys
@@ -63,13 +74,16 @@ EXPLICIT_PROJECT="$TMP/explicit-project"
 EXPLICIT_DB="$TMP/existing-baton.sqlite3"
 mkdir -p "$EXPLICIT_PROJECT"
 "$CLI" --db "$EXPLICIT_DB" init >/dev/null
+"$CLI" --db "$EXPLICIT_DB" stop --all --reason "project migration test" >/dev/null
 python3 - "$EXPLICIT_DB" <<'PY'
 import sqlite3
 import sys
 
 with sqlite3.connect(sys.argv[1]) as con:
-    con.execute("delete from schema_migrations where version in (3, 4)")
+    con.execute("delete from schema_migrations where version in (3, 4, 5, 6)")
+    con.execute("drop table workspace_events")
     con.execute("drop table waiter_leases")
+    con.execute("drop table database_metadata")
     con.execute("drop table gate_events")
     con.execute("drop table handoff_gate_dependencies")
     con.execute("drop table gate_owners")
@@ -81,7 +95,7 @@ EXPLICIT_CHECK="$("$CLI" project migrate --check \
   --source-db "$EXPLICIT_DB")"
 EXPLICIT_TOKEN="$(printf '%s\n' "$EXPLICIT_CHECK" | plan_token)"
 printf '%s\n' "$EXPLICIT_CHECK" | grep 'source_schema: 2' >/dev/null
-printf '%s\n' "$EXPLICIT_CHECK" | grep 'pending_migrations: 3:named_gates,4:waiter_leases' >/dev/null
+printf '%s\n' "$EXPLICIT_CHECK" | grep 'pending_migrations: 3:named_gates,4:waiter_leases,5:database_metadata,6:workspace_provenance' >/dev/null
 test ! -e "$EXPLICIT_PROJECT/.baton/baton.sqlite3"
 
 python3 - "$EXPLICIT_DB" <<'PY'
@@ -107,7 +121,7 @@ EXPLICIT_TOKEN="$("$CLI" project migrate --check \
   --project-root "$EXPLICIT_PROJECT" \
   --source-db "$EXPLICIT_DB" \
   --plan-token "$EXPLICIT_TOKEN" >/dev/null
-"$CLI" --db "$EXPLICIT_PROJECT/.baton/baton.sqlite3" migrate --check | grep 'schema=4' >/dev/null
+"$CLI" --db "$EXPLICIT_PROJECT/.baton/baton.sqlite3" migrate --check | grep 'schema=6' >/dev/null
 
 IN_PLACE_PROJECT="$TMP/in-place-project"
 IN_PLACE_DB="$IN_PLACE_PROJECT/.baton/baton.sqlite3"
@@ -117,17 +131,18 @@ import sqlite3
 import sys
 
 with sqlite3.connect(sys.argv[1]) as con:
-    con.execute("delete from schema_migrations where version = 4")
-    con.execute("drop table waiter_leases")
+    con.execute("delete from schema_migrations where version in (5, 6)")
+    con.execute("drop table workspace_events")
+    con.execute("drop table database_metadata")
 PY
 IN_PLACE_CHECK="$("$CLI" project migrate --check --project-root "$IN_PLACE_PROJECT")"
 IN_PLACE_TOKEN="$(printf '%s\n' "$IN_PLACE_CHECK" | plan_token)"
 printf '%s\n' "$IN_PLACE_CHECK" | grep 'layout_move: no' >/dev/null
-printf '%s\n' "$IN_PLACE_CHECK" | grep 'pending_migrations: 4:waiter_leases' >/dev/null
+printf '%s\n' "$IN_PLACE_CHECK" | grep 'pending_migrations: 5:database_metadata,6:workspace_provenance' >/dev/null
 "$CLI" project migrate --apply \
   --project-root "$IN_PLACE_PROJECT" \
   --plan-token "$IN_PLACE_TOKEN" >/dev/null
-"$CLI" --db "$IN_PLACE_DB" migrate --check | grep 'schema=4' >/dev/null
+"$CLI" --db "$IN_PLACE_DB" migrate --check | grep 'schema=6' >/dev/null
 test "$(find "$IN_PLACE_PROJECT/.baton/backups" -type f -name '*.sqlite3' | wc -l | tr -d ' ')" = "1"
 
 MISSING_PROJECT="$TMP/missing-project"
@@ -169,6 +184,7 @@ fi
 WAITER_PROJECT="$TMP/waiter-project"
 WAITER_DB="$WAITER_PROJECT/tools/baton/.baton/baton.sqlite3"
 "$CLI" --db "$WAITER_DB" init >/dev/null
+"$CLI" --db "$WAITER_DB" stop --all --reason "project migration test" >/dev/null
 python3 - "$WAITER_DB" <<'PY'
 import sqlite3
 import sys
@@ -194,5 +210,40 @@ if "$CLI" project migrate --apply \
   exit 1
 fi
 test ! -e "$WAITER_PROJECT/.baton/baton.sqlite3"
+
+ACTIVE_PROJECT="$TMP/active-project"
+ACTIVE_DB="$ACTIVE_PROJECT/tools/baton/.baton/baton.sqlite3"
+"$CLI" --db "$ACTIVE_DB" init >/dev/null
+ACTIVE_JOB="$("$CLI" --db "$ACTIVE_DB" register \
+  --title "Active migration handoff" \
+  --role backend \
+  --objective "Remain active during migration check." \
+  --exit-criteria "Migration is blocked." | awk '{print $1}')"
+"$CLI" --db "$ACTIVE_DB" claim "$ACTIVE_JOB" --role backend >/dev/null
+"$CLI" --db "$ACTIVE_DB" stop --all --reason "project migration test" >/dev/null
+ACTIVE_CHECK="$("$CLI" project migrate --check --project-root "$ACTIVE_PROJECT")"
+ACTIVE_TOKEN="$(printf '%s\n' "$ACTIVE_CHECK" | plan_token)"
+printf '%s\n' "$ACTIVE_CHECK" | grep 'in_progress_handoffs: 1' >/dev/null
+if "$CLI" project migrate --apply \
+  --project-root "$ACTIVE_PROJECT" \
+  --plan-token "$ACTIVE_TOKEN" >/dev/null 2>&1; then
+  echo "ERROR: migration applied while a handoff was in progress" >&2
+  exit 1
+fi
+test ! -e "$ACTIVE_PROJECT/.baton/baton.sqlite3"
+
+RUNNING_PROJECT="$TMP/running-project"
+RUNNING_DB="$RUNNING_PROJECT/tools/baton/.baton/baton.sqlite3"
+"$CLI" --db "$RUNNING_DB" init >/dev/null
+RUNNING_CHECK="$("$CLI" project migrate --check --project-root "$RUNNING_PROJECT")"
+RUNNING_TOKEN="$(printf '%s\n' "$RUNNING_CHECK" | plan_token)"
+printf '%s\n' "$RUNNING_CHECK" | grep 'global_stop: no' >/dev/null
+if "$CLI" project migrate --apply \
+  --project-root "$RUNNING_PROJECT" \
+  --plan-token "$RUNNING_TOKEN" >/dev/null 2>&1; then
+  echo "ERROR: layout migration applied without a global maintenance stop" >&2
+  exit 1
+fi
+test ! -e "$RUNNING_PROJECT/.baton/baton.sqlite3"
 
 echo "OK project migration target=$TARGET_DB explicit=$EXPLICIT_DB"

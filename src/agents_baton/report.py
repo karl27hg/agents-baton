@@ -10,6 +10,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
+from agents_baton.cli import MigrationError, check_schema, default_database_path
+
 
 def connect_readonly(db_path: str) -> sqlite3.Connection:
     path = Path(db_path)
@@ -58,34 +60,44 @@ def command_audit(args: argparse.Namespace) -> int:
     cr_params = list(params)
     gate_conditions = list(conditions)
     gate_params = list(params)
+    workspace_conditions = list(conditions)
+    workspace_params = list(params)
     if args.job:
         handoff_conditions.append("job_id = ?")
         handoff_params.append(args.job)
         cr_conditions.append("0")
         gate_conditions.append("0")
+        workspace_conditions.extend(("entity_type = 'handoff'", "entity_id = ?"))
+        workspace_params.append(args.job)
     if args.cr:
         cr_conditions.append("cr_id = ?")
         cr_params.append(args.cr)
         handoff_conditions.append("0")
         gate_conditions.append("0")
+        workspace_conditions.extend(("entity_type = 'cr'", "entity_id = ?"))
+        workspace_params.append(args.cr)
     if args.gate:
         gate_conditions.append("gate_name = ?")
         gate_params.append(args.gate)
         handoff_conditions.append("0")
         cr_conditions.append("0")
+        workspace_conditions.append("0")
 
     handoff_where = " and ".join(handoff_conditions) if handoff_conditions else "1"
     cr_where = " and ".join(cr_conditions) if cr_conditions else "1"
     gate_where = " and ".join(gate_conditions) if gate_conditions else "1"
+    workspace_where = " and ".join(workspace_conditions) if workspace_conditions else "1"
     limit = " limit ?" if args.limit else ""
     limit_params: list[int] = [args.limit] if args.limit else []
 
     with connect_readonly(args.db) as con:
+        check_schema(con)
         rows = con.execute(
             f"""
             select *
             from (
               select
+                id as event_id,
                 created_at,
                 'handoff' as source,
                 job_id as target_id,
@@ -103,6 +115,7 @@ def command_audit(args: argparse.Namespace) -> int:
               where {handoff_where}
               union all
               select
+                id as event_id,
                 created_at,
                 'cr' as source,
                 cr_id as target_id,
@@ -116,6 +129,7 @@ def command_audit(args: argparse.Namespace) -> int:
               where {cr_where}
               union all
               select
+                id as event_id,
                 created_at,
                 'gate' as source,
                 gate_name as target_id,
@@ -127,14 +141,38 @@ def command_audit(args: argparse.Namespace) -> int:
                 message
               from gate_events
               where {gate_where}
+              union all
+              select
+                id as event_id,
+                created_at,
+                'workspace' as source,
+                entity_id as target_id,
+                operation || ':' || outcome as event_type,
+                actor_role as actor,
+                actor_role,
+                null as from_status,
+                null as to_status,
+                trim(
+                  'head=' || coalesce(head_commit, '') ||
+                  ' baseline=' || coalesce(baseline_commit, '') ||
+                  ' branch=' || coalesce(branch, '') ||
+                  ' dirty=' || dirty ||
+                  ' ' || coalesce(message, '')
+                ) as message
+              from workspace_events
+              where {workspace_where}
             )
-            order by created_at, source, target_id, event_type
+            order by created_at, source, target_id, event_id
             {limit}
             """,
-            handoff_params + cr_params + gate_params + limit_params,
+            handoff_params + cr_params + gate_params + workspace_params + limit_params,
         ).fetchall()
     output_rows = [
-        {key: value for key, value in row_dict(row).items() if key != "actor_role"}
+        {
+            key: value
+            for key, value in row_dict(row).items()
+            if key not in {"actor_role", "event_id"}
+        }
         for row in rows
     ]
     print_rows(output_rows, args.format)
@@ -150,6 +188,7 @@ def count_by_status(con: sqlite3.Connection, table: str) -> list[dict[str, objec
 
 def command_summary(args: argparse.Namespace) -> int:
     with connect_readonly(args.db) as con:
+        check_schema(con)
         summary = {
             "handoffs": count_by_status(con, "handoff_jobs"),
             "change_requests": count_by_status(con, "change_requests"),
@@ -158,6 +197,7 @@ def command_summary(args: argparse.Namespace) -> int:
                 "handoff_events": con.execute("select count(*) from handoff_events").fetchone()[0],
                 "cr_events": con.execute("select count(*) from cr_events").fetchone()[0],
                 "gate_events": con.execute("select count(*) from gate_events").fetchone()[0],
+                "workspace_events": con.execute("select count(*) from workspace_events").fetchone()[0],
             },
         }
     if args.format == "json":
@@ -179,12 +219,17 @@ def command_summary(args: argparse.Namespace) -> int:
     print(f"handoff_events: {summary['events']['handoff_events']}")
     print(f"cr_events: {summary['events']['cr_events']}")
     print(f"gate_events: {summary['events']['gate_events']}")
+    print(f"workspace_events: {summary['events']['workspace_events']}")
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Read-only Baton reporting CLI")
-    parser.add_argument("--db", default=".baton/baton.sqlite3")
+    parser.add_argument(
+        "--db",
+        default="",
+        help="SQLite database path; default: <nearest-baton-marker>/.baton/baton.sqlite3",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     audit = sub.add_parser("audit")
@@ -206,7 +251,13 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-    return args.func(args)
+    try:
+        if not args.db:
+            args.db = default_database_path()
+        return args.func(args)
+    except MigrationError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

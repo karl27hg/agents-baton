@@ -11,6 +11,7 @@
 테이블:
 
 - `schema_migrations`: 순서가 보장되는 DB migration 이력
+- `database_metadata`: 생성 및 migration에 사용한 Baton package version 진단 정보
 - `roles`: 표준 role 정의
 - `role_aliases`: 표준 role로 변환되는 별칭
 - `role_permissions`: role에 부여된 workflow 권한
@@ -23,11 +24,14 @@
 - `handoff_events`: 상태 변경과 운영 이벤트 감사 로그
 - `handoff_controls`: wait loop 중지/재개 제어
 - `waiter_leases`: polling interval 자동 조절을 위한 handoff 및 CR waiter heartbeat
+- `workspace_events`: handoff 전환의 선택적 Git commit provenance와 정책 결과
 - `change_requests`: CR workflow 상태와 Markdown 파일 참조
 - `cr_events`: CR 상태 변경 감사 로그
 - `cr_handoffs`: CR과 revision/implementation handoff 연결
 
 상태를 변경하는 CLI 명령은 `BEGIN IMMEDIATE` transaction을 사용해 write 작업을 직렬화합니다.
+
+새 timestamp는 `YYYY-MM-DD HH:MM:SS.ffffff UTC` 형식을 사용합니다. Reader는 기존 초 단위 값도 읽으며, 과거 event의 timestamp가 같으면 audit report가 source별 event ID로 순서를 결정합니다.
 
 ## `schema_migrations`
 
@@ -45,7 +49,7 @@
 | `name` | `text` | 예 | 변경되지 않는 migration 이름입니다. |
 | `applied_at` | `text` | 예 | migration이 commit된 UTC 시각입니다. |
 
-`baton migrate`는 pending migration, 해당되는 seed 보강, `PRAGMA quick_check`, `PRAGMA foreign_key_check`를 하나의 transaction에서 실행합니다. 실패하면 schema 변경, seed 변경, migration record가 함께 rollback됩니다. 전체 기본 권한은 신규 또는 무버전 DB에만 seed하며, 이후 migration은 그 migration에서 새로 도입한 권한만 추가하므로 프로젝트별 권한 철회가 보존됩니다.
+`baton migrate`는 검증된 SQLite backup을 먼저 만든 뒤 pending migration, 해당되는 seed 보강, `PRAGMA quick_check`, `PRAGMA foreign_key_check`를 하나의 transaction에서 실행합니다. 실패하면 schema 변경, seed 변경, migration record가 함께 rollback됩니다. 일반 workflow 명령은 pending migration을 자동 적용하지 않고 실패합니다. 전체 기본 권한은 신규 또는 무버전 DB에만 seed하며, 이후 migration은 그 migration에서 새로 도입한 권한만 추가하므로 프로젝트별 권한 철회가 보존됩니다.
 
 Release된 migration:
 
@@ -54,11 +58,59 @@ Release된 migration:
 2 handoff_cancel_permission
 3 named_gates
 4 waiter_leases
+5 database_metadata
+6 workspace_provenance
 ```
 
 `baton migrate --check`는 DB가 현재 binary가 아는 최신 schema version인지 읽기 전용으로 확인합니다.
 
+## `database_metadata`
+
+용도:
+
+- 신규 versioned DB를 생성한 Baton package version을 알 수 있을 때 기록합니다.
+- 최근 schema migration에 사용한 package version과 UTC 시각을 기록합니다.
+- `baton project info` 진단에 사용하며 호환성 판단 기준은 아닙니다.
+
+컬럼:
+
+| 컬럼 | 타입 | 필수 | 용도 |
+| --- | --- | --- | --- |
+| `key` | `text primary key` | 예 | 고정된 metadata key입니다. |
+| `value` | `text` | 예 | 진단 값입니다. |
+| `updated_at` | `text` | 예 | metadata 갱신 UTC 시각입니다. |
+
+알려진 key는 `created_with_baton_version`, `last_migrated_with_baton_version`, `last_migrated_at`입니다. 과거 unversioned DB를 처음 migration하면 생성 version은 `unknown`으로 기록합니다. Schema 변경이 없는 package update는 이 table을 다시 쓰지 않습니다.
+
 앞으로 schema를 변경할 때는 새 migration을 추가하고 `LATEST_SCHEMA_VERSION`을 증가시켜야 합니다. 이미 release된 migration을 직접 수정하면 안 됩니다.
+
+## `workspace_events`
+
+용도:
+
+- Handoff register, claim, finish의 선택적 Git provenance를 기록합니다.
+- Git history, diff 또는 source 본문을 복제하지 않고 workflow event와 commit ID를 연결합니다.
+- `warn` 결과와 승인된 `strict` override를 감사 및 report에 제공합니다.
+
+컬럼:
+
+| 컬럼 | 타입 | 필수 | 용도 |
+| --- | --- | --- | --- |
+| `id` | `integer primary key` | 예 | 증가하는 workspace event ID입니다. |
+| `entity_type` | `text` | 예 | `project`, `handoff` 또는 향후 `cr` provenance scope입니다. |
+| `entity_id` | `text` | 아니오 | 해당되는 handoff 또는 CR ID입니다. |
+| `operation` | `text` | 예 | `registered`, `claimed`, `finished` 같은 상태 전환입니다. |
+| `policy` | `text` | 예 | 적용된 `warn` 또는 `strict` 정책입니다. `off`는 event를 만들지 않습니다. |
+| `outcome` | `text` | 예 | `accepted`, `warning` 또는 승인된 `override`입니다. |
+| `head_commit` | `text` | 아니오 | 전환 시점의 HEAD commit입니다. |
+| `baseline_commit` | `text` | 아니오 | ancestry 비교에 사용한 이전 Baton commit입니다. |
+| `branch` | `text` | 아니오 | 참고용 branch 이름 또는 `DETACHED`입니다. |
+| `dirty` | `integer` | 예 | Git이 working tree 변경을 보고하면 `1`입니다. |
+| `actor_role` | `text` | 아니오 | 전환 수행 또는 override 승인 role입니다. |
+| `message` | `text` | 아니오 | 경고 상세 또는 override 사유입니다. |
+| `created_at` | `text` | 예 | UTC event 시각입니다. |
+
+Migration 6은 기본 `sm` role에 `workspace.override` 권한도 추가합니다. 기존 프로젝트 권한은 새로 도입된 이 권한 외에는 변경하지 않습니다.
 
 ## `roles`
 
@@ -136,7 +188,7 @@ Primary key:
 
 Seed 권한:
 
-- `init` 또는 각 권한을 도입한 migration 시 `sm`은 모든 CR 권한, `handoff.cancel`, `gate.manage`를 받습니다.
+- `init` 또는 각 권한을 도입한 migration 시 `sm`은 모든 CR 권한, `handoff.cancel`, `gate.manage`, `workspace.override`를 받습니다.
 
 알려진 권한:
 
@@ -150,6 +202,7 @@ cr.assign_implementation
 cr.mark_implemented
 handoff.cancel
 gate.manage
+workspace.override
 ```
 
 권한 부여와 철회는 `role permission-add`, `role permission-remove`를 사용합니다. 권한 철회는 프로젝트 정책 결정으로 취급하며, 반복 migration은 전체 기본 권한 집합을 다시 복원하지 않습니다.

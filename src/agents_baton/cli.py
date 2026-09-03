@@ -4,14 +4,18 @@
 from __future__ import annotations
 
 import argparse
+import configparser
 import hashlib
+import json
 import os
 import re
 import sqlite3
+import subprocess
 import sys
 import time
 import uuid
 from contextlib import closing
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from importlib.resources import files
 from pathlib import Path
@@ -52,12 +56,21 @@ HANDOFF_PERMISSIONS = {
 GATE_PERMISSIONS = {
     "gate.manage",
 }
-KNOWN_PERMISSIONS = REVIEW_PERMISSIONS | HANDOFF_PERMISSIONS | GATE_PERMISSIONS
-LATEST_SCHEMA_VERSION = 4
+WORKSPACE_PERMISSIONS = {
+    "workspace.override",
+}
+KNOWN_PERMISSIONS = (
+    REVIEW_PERMISSIONS | HANDOFF_PERMISSIONS | GATE_PERMISSIONS | WORKSPACE_PERMISSIONS
+)
+LATEST_SCHEMA_VERSION = 6
+PROJECT_FORMAT_VERSION = 1
+PROJECT_MARKER_NAME = "project.json"
+PROJECT_CONFIG_NAME = "baton.toml"
 GUIDE_FILES = {
     "bootstrap": "agent-bootstrap.md",
     "worker": "agent-prompt.md",
     "planner": "planner-prompt.md",
+    "git": "git-integration.md",
 }
 
 
@@ -65,16 +78,46 @@ class MigrationError(RuntimeError):
     pass
 
 
+@dataclass(frozen=True)
+class WorkspaceConfig:
+    root: Path
+    path: Path
+    provider: str
+    policy: str
+    required_version: str
+
+
+@dataclass(frozen=True)
+class WorkspaceSnapshot:
+    repository_root: Path
+    head_commit: str
+    branch: str
+    dirty: bool
+
+
+@dataclass(frozen=True)
+class WorkspaceAssessment:
+    config: WorkspaceConfig
+    snapshot: WorkspaceSnapshot | None
+    baseline_commit: str
+    issues: tuple[str, ...]
+
+
 def utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f UTC")
 
 
 def parse_utc(value: str) -> datetime:
-    return datetime.strptime(value, "%Y-%m-%d %H:%M:%S UTC").replace(tzinfo=timezone.utc)
+    for timestamp_format in ("%Y-%m-%d %H:%M:%S.%f UTC", "%Y-%m-%d %H:%M:%S UTC"):
+        try:
+            return datetime.strptime(value, timestamp_format).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    raise ValueError(f"invalid UTC timestamp: {value}")
 
 
 def format_utc(value: datetime) -> str:
-    return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f UTC")
 
 
 def parse_duration(value: str) -> timedelta:
@@ -154,9 +197,11 @@ def slugify(value: str) -> str:
     return slug.strip("-") or "change-request"
 
 
-def connect(db_path: str) -> sqlite3.Connection:
+def connect(db_path: str, *, create: bool = False) -> sqlite3.Connection:
     path = Path(db_path)
-    if path.parent != Path("."):
+    if not path.exists() and not create:
+        raise MigrationError(f"database does not exist: {db_path}; run 'baton init' first")
+    if create and path.parent != Path("."):
         path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(path, timeout=30)
     con.row_factory = sqlite3.Row
@@ -176,23 +221,50 @@ def connect_readonly(db_path: str) -> sqlite3.Connection:
     return con
 
 
+def enable_wal(con: sqlite3.Connection, timeout_seconds: float = 30.0) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            con.execute("PRAGMA journal_mode = WAL").fetchone()
+            return
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                raise
+            if time.monotonic() >= deadline:
+                raise MigrationError("timed out waiting to enable SQLite WAL mode") from exc
+            time.sleep(0.05)
+
+
 def default_agent_id_file() -> Path:
     override = os.environ.get("BATON_AGENT_ID_FILE") or os.environ.get("HANDOFF_AGENT_ID_FILE")
     if override:
         return Path(override)
-    return Path(".baton/agent-id")
+    root = find_project_root() or find_legacy_project_root()
+    if not root:
+        raise MigrationError("Baton project marker not found; run 'baton init' in the intended project root")
+    return root / ".baton" / "agent-id"
 
 
 def agent_id_file(args: argparse.Namespace) -> Path:
     value = getattr(args, "agent_id_file", "") or ""
-    return Path(value) if value else default_agent_id_file()
+    if value:
+        return Path(value)
+    database_value = getattr(args, "db", "") or ""
+    if database_value:
+        database = Path(database_value).expanduser().resolve()
+        if database.is_file() and database.name == "baton.sqlite3" and database.parent.name == ".baton":
+            return database.parent / "agent-id"
+    return default_agent_id_file()
 
 
 def read_agent_id(args: argparse.Namespace) -> str:
     env_value = (os.environ.get("BATON_AGENT_ID") or os.environ.get("HANDOFF_AGENT_ID") or "").strip()
     if env_value:
         return env_value
-    path = agent_id_file(args)
+    try:
+        path = agent_id_file(args)
+    except MigrationError:
+        return ""
     if path.exists():
         return path.read_text(encoding="utf-8").strip()
     return ""
@@ -440,11 +512,67 @@ def migration_v4_waiter_leases(con: sqlite3.Connection) -> None:
     )
 
 
+def migration_v5_database_metadata(con: sqlite3.Connection) -> None:
+    execute_sql_script(
+        con,
+        """
+        create table if not exists database_metadata (
+          key text primary key,
+          value text not null,
+          updated_at text not null
+        );
+        """,
+    )
+
+
+def migration_v6_workspace_provenance(con: sqlite3.Connection) -> None:
+    execute_sql_script(
+        con,
+        """
+        create table if not exists workspace_events (
+          id integer primary key autoincrement,
+          entity_type text not null check (entity_type in ('project', 'handoff', 'cr')),
+          entity_id text,
+          operation text not null,
+          policy text not null check (policy in ('warn', 'strict')),
+          outcome text not null check (outcome in ('accepted', 'warning', 'override')),
+          head_commit text,
+          baseline_commit text,
+          branch text,
+          dirty integer not null default 0,
+          actor_role text,
+          message text,
+          created_at text not null
+        );
+
+        create index if not exists idx_workspace_events_entity
+          on workspace_events(entity_type, entity_id, operation, id);
+        """,
+    )
+    con.execute(
+        """
+        insert into roles(role_id, display_name, created_at, updated_at)
+        values ('sm', 'System Manager', ?, ?)
+        on conflict(role_id) do nothing
+        """,
+        (utc_now(), utc_now()),
+    )
+    con.execute(
+        """
+        insert into role_permissions(role_id, permission)
+        values ('sm', 'workspace.override')
+        on conflict(role_id, permission) do nothing
+        """
+    )
+
+
 MIGRATIONS = (
     (1, "initial_schema", migration_v1_initial_schema),
     (2, "handoff_cancel_permission", migration_v2_handoff_cancel_permission),
     (3, "named_gates", migration_v3_named_gates),
     (4, "waiter_leases", migration_v4_waiter_leases),
+    (5, "database_metadata", migration_v5_database_metadata),
+    (6, "workspace_provenance", migration_v6_workspace_provenance),
 )
 
 
@@ -522,17 +650,29 @@ def check_schema(con: sqlite3.Connection) -> int:
     return current
 
 
-def migrate_schema(con: sqlite3.Connection) -> tuple[int, int, list[str]]:
-    previous_version = current_schema_version(con)
+def migrate_schema(
+    con: sqlite3.Connection,
+    *,
+    transaction_started: bool = False,
+) -> tuple[int, int, list[str]]:
     validate_migration_definitions()
-    if previous_version > LATEST_SCHEMA_VERSION:
-        raise MigrationError(
-            "database schema is newer than this Baton version: "
-            f"schema={previous_version} latest={LATEST_SCHEMA_VERSION}"
-        )
-    con.execute("PRAGMA journal_mode = WAL")
-    con.execute("BEGIN IMMEDIATE")
+    if not transaction_started:
+        enable_wal(con)
+        con.execute("BEGIN IMMEDIATE")
     try:
+        existing_tables = {
+            str(row[0])
+            for row in con.execute(
+                "select name from sqlite_master where type = 'table' and name not like 'sqlite_%'"
+            ).fetchall()
+        }
+        new_database = not existing_tables
+        previous_version = current_schema_version(con)
+        if previous_version > LATEST_SCHEMA_VERSION:
+            raise MigrationError(
+                "database schema is newer than this Baton version: "
+                f"schema={previous_version} latest={LATEST_SCHEMA_VERSION}"
+            )
         con.execute(
             """
             create table if not exists schema_migrations (
@@ -558,6 +698,31 @@ def migrate_schema(con: sqlite3.Connection) -> tuple[int, int, list[str]]:
         seed_roles(con)
         if previous_version == 0:
             seed_role_permissions(con)
+        if applied_names:
+            now = utc_now()
+            created_with = BATON_VERSION if new_database else "unknown"
+            con.execute(
+                """
+                insert into database_metadata(key, value, updated_at)
+                values ('created_with_baton_version', ?, ?)
+                on conflict(key) do nothing
+                """,
+                (created_with, now),
+            )
+            for key, value in (
+                ("last_migrated_with_baton_version", BATON_VERSION),
+                ("last_migrated_at", now),
+            ):
+                con.execute(
+                    """
+                    insert into database_metadata(key, value, updated_at)
+                    values (?, ?, ?)
+                    on conflict(key) do update set
+                      value = excluded.value,
+                      updated_at = excluded.updated_at
+                    """,
+                    (key, value, now),
+                )
         validate_database(con)
         con.commit()
     except BaseException as exc:
@@ -568,17 +733,94 @@ def migrate_schema(con: sqlite3.Connection) -> tuple[int, int, list[str]]:
     return previous_version, LATEST_SCHEMA_VERSION, applied_names
 
 
+def project_marker_path(root: Path) -> Path:
+    return root / ".baton" / PROJECT_MARKER_NAME
+
+
+def read_project_marker(root: Path) -> dict[str, object]:
+    marker = project_marker_path(root)
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise MigrationError(f"invalid Baton project marker: {marker}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise MigrationError(f"invalid Baton project marker object: {marker}")
+    if payload.get("format_version") != PROJECT_FORMAT_VERSION:
+        raise MigrationError(
+            f"unsupported Baton project marker version: {payload.get('format_version')} "
+            f"expected={PROJECT_FORMAT_VERSION} marker={marker}"
+        )
+    if payload.get("database") != "baton.sqlite3":
+        raise MigrationError(f"unsupported Baton project database setting in marker: {marker}")
+    return payload
+
+
+def find_project_root(start: Path | None = None) -> Path | None:
+    current = (start or Path.cwd()).expanduser().resolve()
+    for candidate in (current, *current.parents):
+        marker = project_marker_path(candidate)
+        if marker.is_file():
+            read_project_marker(candidate)
+            return candidate
+    return None
+
+
+def find_legacy_project_root(start: Path | None = None) -> Path | None:
+    current = (start or Path.cwd()).expanduser().resolve()
+    for candidate in (current, *current.parents):
+        if (candidate / ".baton" / "baton.sqlite3").is_file():
+            return candidate
+    return None
+
+
+def write_project_marker(root: Path) -> Path:
+    marker = project_marker_path(root)
+    if marker.exists():
+        read_project_marker(root)
+        return marker
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "format_version": PROJECT_FORMAT_VERSION,
+        "database": "baton.sqlite3",
+        "created_with_baton_version": BATON_VERSION,
+    }
+    temporary = marker.with_name(f".{marker.name}.baton-{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("x", encoding="utf-8") as output:
+            json.dump(payload, output, indent=2, sort_keys=True)
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, marker)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return marker
+
+
+def ensure_marker_for_database(database_path: Path) -> Path | None:
+    resolved = database_path.expanduser().resolve()
+    if resolved.name != "baton.sqlite3" or resolved.parent.name != ".baton":
+        return None
+    return write_project_marker(resolved.parent.parent)
+
+
+def validate_marker_for_database(database_path: Path) -> None:
+    resolved = database_path.expanduser().resolve()
+    if resolved.name != "baton.sqlite3" or resolved.parent.name != ".baton":
+        return
+    marker = project_marker_path(resolved.parent.parent)
+    if marker.exists():
+        read_project_marker(resolved.parent.parent)
+
+
 def project_root_path(explicit_root: str) -> Path:
     if explicit_root:
         root = Path(explicit_root).expanduser().resolve()
         if not root.is_dir():
             raise MigrationError(f"project root is not a directory: {root}")
         return root
-    current = Path.cwd().resolve()
-    for candidate in (current, *current.parents):
-        if (candidate / ".git").exists():
-            return candidate
-    return current
+    return find_project_root() or find_legacy_project_root() or Path.cwd().resolve()
 
 
 def project_database_paths(root: Path) -> tuple[Path, tuple[Path, ...]]:
@@ -589,6 +831,361 @@ def project_database_paths(root: Path) -> tuple[Path, tuple[Path, ...]]:
         (root / "tools" / "agents-baton" / ".baton" / "baton.sqlite3").resolve(),
     )
     return target, candidates
+
+
+def default_database_path() -> str:
+    return str(project_root_path("") / ".baton" / "baton.sqlite3")
+
+
+def connection_project_root(con: sqlite3.Connection) -> Path:
+    row = con.execute("PRAGMA database_list").fetchone()
+    database_path = Path(row[2]).resolve() if row and row[2] else None
+    if database_path and database_path.parent.name == ".baton":
+        return database_path.parent.parent
+    discovered_root = find_project_root()
+    if discovered_root:
+        expected_database = (discovered_root / ".baton" / "baton.sqlite3").resolve()
+        if database_path == expected_database:
+            return discovered_root
+    raise MigrationError(
+        "relative project file path cannot be resolved for an external --db; "
+        "use an absolute CR path or the project-local .baton/baton.sqlite3"
+    )
+
+
+def database_project_root(database_value: str) -> Path | None:
+    database = Path(database_value).expanduser().resolve()
+    if database.name == "baton.sqlite3" and database.parent.name == ".baton":
+        return database.parent.parent
+    discovered = find_project_root()
+    if discovered and database == (discovered / ".baton" / "baton.sqlite3").resolve():
+        return discovered
+    return None
+
+
+def decode_config_string(value: str, *, key: str, path: Path) -> str:
+    text = value.strip()
+    if len(text) >= 2 and text[0] == text[-1] == '"':
+        try:
+            decoded = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise MigrationError(f"invalid {key} string in {path}: {exc}") from exc
+        if not isinstance(decoded, str):
+            raise MigrationError(f"invalid {key} value in {path}: expected a string")
+        return decoded.strip()
+    if len(text) >= 2 and text[0] == text[-1] == "'":
+        return text[1:-1].strip()
+    return text
+
+
+def read_workspace_config(database_value: str) -> WorkspaceConfig:
+    root = database_project_root(database_value)
+    if root is None:
+        fallback = Path.cwd().resolve()
+        return WorkspaceConfig(fallback, fallback / PROJECT_CONFIG_NAME, "", "off", "")
+    path = root / PROJECT_CONFIG_NAME
+    if not path.is_file():
+        return WorkspaceConfig(root, path, "", "off", "")
+    parser = configparser.ConfigParser(
+        interpolation=None,
+        inline_comment_prefixes=("#",),
+    )
+    try:
+        with path.open(encoding="utf-8") as source:
+            parser.read_file(source)
+    except (OSError, configparser.Error) as exc:
+        raise MigrationError(f"invalid Baton project config: {path}: {exc}") from exc
+
+    provider = ""
+    configured_policy = ""
+    required_version = ""
+    if parser.has_option("vcs", "provider"):
+        provider = decode_config_string(
+            parser.get("vcs", "provider"), key="vcs.provider", path=path
+        ).lower()
+    if parser.has_option("vcs", "policy"):
+        configured_policy = decode_config_string(
+            parser.get("vcs", "policy"), key="vcs.policy", path=path
+        ).lower()
+    if parser.has_option("baton", "required_version"):
+        required_version = decode_config_string(
+            parser.get("baton", "required_version"),
+            key="baton.required_version",
+            path=path,
+        )
+
+    if provider not in {"", "git"}:
+        raise MigrationError(f"unsupported vcs.provider in {path}: {provider}")
+    policy = configured_policy or ("warn" if provider == "git" else "off")
+    if policy not in {"off", "warn", "strict"}:
+        raise MigrationError(f"unsupported vcs.policy in {path}: {policy}")
+    if policy != "off" and provider != "git":
+        raise MigrationError(f"vcs.policy={policy} requires vcs.provider=git in {path}")
+    if required_version:
+        version_requirement_matches(BATON_VERSION, required_version)
+    return WorkspaceConfig(root, path, provider, policy, required_version)
+
+
+def parsed_baton_version(value: str) -> tuple[int, int, int, int, int]:
+    text = value.strip().lower().removeprefix("v").split("+", 1)[0]
+    match = re.fullmatch(
+        r"(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:(?:\.)?(dev|a|b|rc)(\d+))?",
+        text,
+    )
+    if not match:
+        raise MigrationError(f"unsupported Baton version value: {value}")
+    major, minor, patch = (int(match.group(index) or 0) for index in (1, 2, 3))
+    phase = match.group(4) or "final"
+    phase_rank = {"dev": 0, "a": 1, "b": 2, "rc": 3, "final": 4}[phase]
+    phase_number = int(match.group(5) or 0)
+    return major, minor, patch, phase_rank, phase_number
+
+
+def version_requirement_matches(version: str, requirement: str) -> bool:
+    actual = parsed_baton_version(version)
+    for raw_specifier in requirement.split(","):
+        specifier = raw_specifier.strip()
+        if not specifier:
+            raise MigrationError(f"invalid empty Baton version specifier: {requirement}")
+        match = re.fullmatch(r"(<=|>=|==|!=|<|>)?\s*(.+)", specifier)
+        if not match:
+            raise MigrationError(f"invalid Baton version specifier: {specifier}")
+        operator = match.group(1) or "=="
+        expected = parsed_baton_version(match.group(2))
+        matches = {
+            "==": actual == expected,
+            "!=": actual != expected,
+            "<": actual < expected,
+            "<=": actual <= expected,
+            ">": actual > expected,
+            ">=": actual >= expected,
+        }[operator]
+        if not matches:
+            return False
+    return True
+
+
+def run_git(root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            ["git", "-C", str(root), *arguments],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except FileNotFoundError as exc:
+        raise MigrationError("Git workspace inspection failed: git command not found") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise MigrationError("Git workspace inspection timed out") from exc
+
+
+def git_result_value(result: subprocess.CompletedProcess[str], operation: str) -> str:
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit={result.returncode}"
+        raise MigrationError(f"Git workspace inspection failed during {operation}: {detail}")
+    return result.stdout.strip()
+
+
+def capture_git_snapshot(root: Path) -> WorkspaceSnapshot:
+    repository_root = Path(
+        git_result_value(run_git(root, "rev-parse", "--show-toplevel"), "repository discovery")
+    ).resolve()
+    head_commit = git_result_value(run_git(root, "rev-parse", "HEAD"), "HEAD resolution")
+    branch_result = run_git(root, "symbolic-ref", "--quiet", "--short", "HEAD")
+    if branch_result.returncode == 0:
+        branch = branch_result.stdout.strip()
+    elif branch_result.returncode == 1:
+        branch = "DETACHED"
+    else:
+        git_result_value(branch_result, "branch resolution")
+        branch = "DETACHED"
+    status = git_result_value(
+        run_git(root, "status", "--porcelain", "--untracked-files=normal"),
+        "working tree status",
+    )
+    return WorkspaceSnapshot(repository_root, head_commit, branch, bool(status))
+
+
+def git_commit_is_ancestor(root: Path, baseline: str, current: str) -> bool:
+    result = run_git(root, "merge-base", "--is-ancestor", baseline, current)
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    git_result_value(result, "commit ancestry check")
+    return False
+
+
+def latest_recorded_workspace_policy(database_value: str) -> str:
+    path = Path(database_value)
+    if not path.is_file():
+        return ""
+    try:
+        with closing(connect_readonly(database_value)) as con:
+            if "workspace_events" not in database_table_names(con):
+                return ""
+            row = con.execute(
+                "select policy from workspace_events order by id desc limit 1"
+            ).fetchone()
+    except (MigrationError, sqlite3.Error):
+        return ""
+    return str(row["policy"]) if row else ""
+
+
+def assess_workspace(database_value: str, baseline_commit: str = "") -> WorkspaceAssessment:
+    config = read_workspace_config(database_value)
+    issues: list[str] = []
+    if (
+        not config.path.is_file()
+        and database_project_root(database_value) is not None
+    ):
+        previous_policy = latest_recorded_workspace_policy(database_value)
+        if previous_policy in {"warn", "strict"}:
+            config = WorkspaceConfig(
+                config.root,
+                config.path,
+                "git",
+                previous_policy,
+                "",
+            )
+            issues.append(
+                f"tracked {PROJECT_CONFIG_NAME} is missing after Git workspace integration was enabled"
+            )
+    if config.required_version and not version_requirement_matches(BATON_VERSION, config.required_version):
+        issues.append(
+            f"Baton version {BATON_VERSION} does not satisfy {config.required_version}"
+        )
+    snapshot: WorkspaceSnapshot | None = None
+    if config.provider == "git" and config.policy != "off":
+        try:
+            snapshot = capture_git_snapshot(config.root)
+            if baseline_commit and not git_commit_is_ancestor(
+                config.root,
+                baseline_commit,
+                snapshot.head_commit,
+            ):
+                issues.append(
+                    f"current HEAD {snapshot.head_commit} does not descend from baseline {baseline_commit}"
+                )
+        except MigrationError as exc:
+            issues.append(str(exc))
+    return WorkspaceAssessment(config, snapshot, baseline_commit, tuple(issues))
+
+
+def latest_workspace_commit(database_value: str, job_id: str, operations: tuple[str, ...]) -> str:
+    with closing(connect_readonly(database_value)) as con:
+        check_schema(con)
+        placeholders = ",".join("?" for _ in operations)
+        row = con.execute(
+            f"""
+            select head_commit
+            from workspace_events
+            where entity_type = 'handoff'
+              and entity_id = ?
+              and operation in ({placeholders})
+              and head_commit is not null
+              and head_commit != ''
+            order by id desc
+            limit 1
+            """,
+            (job_id, *operations),
+        ).fetchone()
+    return str(row["head_commit"]) if row else ""
+
+
+def record_workspace_event(
+    con: sqlite3.Connection,
+    assessment: WorkspaceAssessment,
+    *,
+    entity_type: str,
+    entity_id: str,
+    operation: str,
+    actor_role: str,
+    outcome: str,
+    message: str,
+) -> None:
+    snapshot = assessment.snapshot
+    con.execute(
+        """
+        insert into workspace_events(
+          entity_type, entity_id, operation, policy, outcome, head_commit,
+          baseline_commit, branch, dirty, actor_role, message, created_at
+        )
+        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            entity_type,
+            entity_id or None,
+            operation,
+            assessment.config.policy,
+            outcome,
+            snapshot.head_commit if snapshot else None,
+            assessment.baseline_commit or None,
+            snapshot.branch if snapshot else None,
+            int(snapshot.dirty) if snapshot else 0,
+            actor_role or None,
+            message or None,
+            utc_now(),
+        ),
+    )
+
+
+def apply_workspace_policy(
+    con: sqlite3.Connection,
+    args: argparse.Namespace,
+    assessment: WorkspaceAssessment,
+    *,
+    entity_type: str,
+    entity_id: str,
+    operation: str,
+    actor_role: str,
+) -> None:
+    if assessment.config.policy == "off":
+        return
+    issues = "; ".join(assessment.issues)
+    if assessment.issues and assessment.config.policy == "strict":
+        if not getattr(args, "accept_workspace_change", False):
+            raise MigrationError(
+                f"workspace policy strict blocked {operation}: {issues}; "
+                "use an authorized workspace override only for an intentional transition"
+            )
+        reason = (getattr(args, "workspace_reason", "") or "").strip()
+        if not reason:
+            raise MigrationError("--workspace-reason is required with --accept-workspace-change")
+        authorized_by = (getattr(args, "workspace_authorized_by_role", "") or actor_role).strip()
+        authorized_role = require_permission(con, authorized_by, "workspace.override")
+        record_workspace_event(
+            con,
+            assessment,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            operation=operation,
+            actor_role=authorized_role,
+            outcome="override",
+            message=f"{issues}; override_reason={reason}",
+        )
+        return
+    outcome = "warning" if assessment.issues else "accepted"
+    if assessment.issues:
+        print(f"WARNING: workspace {operation}: {issues}", file=sys.stderr)
+    record_workspace_event(
+        con,
+        assessment,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        operation=operation,
+        actor_role=actor_role,
+        outcome=outcome,
+        message=issues,
+    )
+
+
+def project_file_path(con: sqlite3.Connection, value: str) -> Path:
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path
+    return connection_project_root(con) / path
 
 
 def resolve_migration_source(root: Path, source_value: str) -> tuple[Path, Path]:
@@ -603,7 +1200,7 @@ def resolve_migration_source(root: Path, source_value: str) -> tuple[Path, Path]
             raise MigrationError(f"source database does not exist: {source}")
         return source, target
 
-    found = tuple(path for path in candidates if path.is_file())
+    found = tuple(dict.fromkeys(path for path in candidates if path.is_file()))
     if not found:
         raise MigrationError(
             "no Baton database found in the project or legacy tools layout; "
@@ -650,7 +1247,25 @@ def active_waiter_count(con: sqlite3.Connection) -> int:
     return int(row[0])
 
 
+def in_progress_handoff_count(con: sqlite3.Connection) -> int:
+    if "handoff_jobs" not in database_table_names(con):
+        return 0
+    return int(con.execute("select count(*) from handoff_jobs where status = 'in_progress'").fetchone()[0])
+
+
+def global_stop_is_active(con: sqlite3.Connection) -> bool:
+    if "handoff_controls" not in database_table_names(con):
+        return False
+    row = con.execute(
+        "select stopped from handoff_controls where scope = 'all'",
+    ).fetchone()
+    return bool(row and row[0])
+
+
 def inspect_project_migration(root: Path, source: Path, target: Path) -> dict[str, object]:
+    marker_exists = project_marker_path(root).is_file()
+    if marker_exists:
+        read_project_marker(root)
     if target.is_file() and source.resolve() != target.resolve():
         raise MigrationError(
             "target database already exists and differs from the selected source; "
@@ -672,6 +1287,8 @@ def inspect_project_migration(root: Path, source: Path, target: Path) -> dict[st
             if migration_table_exists(source_con):
                 applied_migration_versions(source_con)
             waiters = active_waiter_count(source_con)
+            in_progress = in_progress_handoff_count(source_con)
+            globally_stopped = global_stop_is_active(source_con)
             probe = sqlite3.connect(":memory:")
             probe.row_factory = sqlite3.Row
             probe.execute("PRAGMA foreign_keys = ON")
@@ -706,6 +1323,9 @@ def inspect_project_migration(root: Path, source: Path, target: Path) -> dict[st
         "pending": pending,
         "layout_move": source.resolve() != target.resolve(),
         "active_waiters": waiters,
+        "in_progress_handoffs": in_progress,
+        "global_stop": globally_stopped,
+        "project_marker": marker_exists,
         "token": token,
         "signature": signature,
         "previous": previous,
@@ -723,6 +1343,9 @@ def print_project_migration_plan(plan: dict[str, object]) -> None:
     print(f"pending_migrations: {pending}")
     print(f"layout_move: {'yes' if plan['layout_move'] else 'no'}")
     print(f"active_waiters: {plan['active_waiters']}")
+    print(f"in_progress_handoffs: {plan['in_progress_handoffs']}")
+    print(f"global_stop: {'yes' if plan['global_stop'] else 'no'}")
+    print(f"project_marker: {'present' if plan['project_marker'] else 'missing'}")
     print(f"plan_token: {plan['token']}")
 
 
@@ -765,13 +1388,26 @@ def command_project_migrate(args: argparse.Namespace) -> int:
         raise MigrationError(
             f"cannot migrate while {plan['active_waiters']} Baton waiter(s) are active; stop agents and check again"
         )
+    if plan["in_progress_handoffs"]:
+        raise MigrationError(
+            f"cannot migrate while {plan['in_progress_handoffs']} handoff(s) are in progress; "
+            "finish or cancel them and check again"
+        )
+    if plan["layout_move"] and not plan["global_stop"]:
+        raise MigrationError(
+            "layout migration requires global maintenance stop; run 'baton stop --all', then rerun --check"
+        )
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     backup_path = root / ".baton" / "backups" / f"baton-before-{timestamp}-{uuid.uuid4().hex[:8]}.sqlite3"
     pending = list(plan["pending"])
 
     if source.resolve() == target.resolve() and not pending:
-        print(f"Migration not required source={source} schema={plan['source_schema']}")
+        marker = ensure_marker_for_database(target)
+        print(
+            f"Migration not required source={source} schema={plan['source_schema']} "
+            f"marker={marker or 'not-applicable'}"
+        )
         return 0
 
     backup_database(source, backup_path, str(plan["signature"]))
@@ -782,7 +1418,10 @@ def command_project_migrate(args: argparse.Namespace) -> int:
     else:
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary_target = target.parent / f".{target.name}.migrating-{uuid.uuid4().hex}"
+        redirect_path = source.parent / f".{source.name}.redirect-{uuid.uuid4().hex}"
+        redirect_target = os.path.relpath(target, source.parent)
         try:
+            os.symlink(redirect_target, redirect_path)
             backup_database(backup_path, temporary_target)
             with closing(connect(str(temporary_target))) as con:
                 previous, current, applied = migrate_schema(con)
@@ -794,24 +1433,154 @@ def command_project_migrate(args: argparse.Namespace) -> int:
                 raise MigrationError("source database changed during project migration; target was not installed")
             os.replace(temporary_target, target)
             target.chmod(0o600)
+            try:
+                os.replace(redirect_path, source)
+            except OSError:
+                target.unlink()
+                raise
+            for sidecar in (Path(f"{source}-wal"), Path(f"{source}-shm")):
+                if sidecar.exists():
+                    sidecar.unlink()
         finally:
             for temporary_file in (
                 temporary_target,
                 Path(f"{temporary_target}-wal"),
                 Path(f"{temporary_target}-shm"),
+                redirect_path,
             ):
                 if temporary_file.exists():
                     temporary_file.unlink()
 
     with closing(connect_readonly(str(target))) as con:
         check_schema(con)
+    marker = ensure_marker_for_database(target)
     applied_text = ",".join(applied) if applied else "none"
     print(
         f"Project migration complete source={source} target={target} "
-        f"schema={previous}->{current} applied={applied_text} backup={backup_path}"
+        f"schema={previous}->{current} applied={applied_text} backup={backup_path} "
+        f"marker={marker or 'not-applicable'}"
     )
-    if source.resolve() != target.resolve():
-        print(f"Source retained: {source}")
+    if plan["layout_move"]:
+        print(f"Legacy path redirected: {source} -> {redirect_target}")
+    return 0
+
+
+def command_project_info(args: argparse.Namespace) -> int:
+    database = Path(args.db).expanduser().resolve()
+    marker_root = None
+    if database.name == "baton.sqlite3" and database.parent.name == ".baton":
+        candidate_root = database.parent.parent
+        if project_marker_path(candidate_root).is_file():
+            read_project_marker(candidate_root)
+            marker_root = candidate_root
+    with closing(connect_readonly(str(database))) as con:
+        schema = check_schema(con)
+        metadata = {
+            row["key"]: row["value"]
+            for row in con.execute(
+                "select key, value from database_metadata order by key"
+            ).fetchall()
+        }
+    workspace_config = read_workspace_config(str(database))
+    payload = {
+        "project_root": str(marker_root) if marker_root else "",
+        "project_marker": str(project_marker_path(marker_root)) if marker_root else "",
+        "database": str(database),
+        "schema_version": schema,
+        "baton_cli_version": BATON_VERSION,
+        "workspace_config": str(workspace_config.path) if workspace_config.path.is_file() else "",
+        "vcs_provider": workspace_config.provider,
+        "vcs_policy": workspace_config.policy,
+        "required_baton_version": workspace_config.required_version,
+        **metadata,
+    }
+    if args.format == "json":
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0
+    for key, value in payload.items():
+        print(f"{key}: {value}")
+    return 0
+
+
+def command_workspace_check(args: argparse.Namespace) -> int:
+    baseline = ""
+    if args.job_id:
+        with closing(connect_readonly(args.db)) as con:
+            check_schema(con)
+            row = con.execute(
+                "select status from handoff_jobs where job_id = ?",
+                (args.job_id,),
+            ).fetchone()
+            if not row:
+                raise MigrationError(f"unknown job: {args.job_id}")
+        baseline = latest_workspace_commit(args.db, args.job_id, ("claimed", "registered"))
+    assessment = assess_workspace(args.db, baseline)
+    snapshot = assessment.snapshot
+    result = (
+        "off"
+        if assessment.config.policy == "off"
+        else ("mismatch" if assessment.issues else "compatible")
+    )
+    payload = {
+        "project_root": str(assessment.config.root),
+        "config": str(assessment.config.path) if assessment.config.path.is_file() else "",
+        "provider": assessment.config.provider,
+        "policy": assessment.config.policy,
+        "baton_version": BATON_VERSION,
+        "required_version": assessment.config.required_version,
+        "repository_root": str(snapshot.repository_root) if snapshot else "",
+        "head_commit": snapshot.head_commit if snapshot else "",
+        "baseline_commit": assessment.baseline_commit,
+        "branch": snapshot.branch if snapshot else "",
+        "dirty": snapshot.dirty if snapshot else False,
+        "result": result,
+        "issues": list(assessment.issues),
+    }
+    if args.format == "json":
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        for key, value in payload.items():
+            if key == "issues":
+                print(f"issues: {'; '.join(value)}")
+            else:
+                print(f"{key}: {str(value).lower() if isinstance(value, bool) else value}")
+    return 1 if assessment.config.policy == "strict" and assessment.issues else 0
+
+
+def command_workspace_events(args: argparse.Namespace) -> int:
+    conditions: list[str] = []
+    params: list[object] = []
+    if args.job_id:
+        conditions.extend(("entity_type = 'handoff'", "entity_id = ?"))
+        params.append(args.job_id)
+    where = f"where {' and '.join(conditions)}" if conditions else ""
+    with closing(connect_readonly(args.db)) as con:
+        check_schema(con)
+        rows = con.execute(
+            f"""
+            select entity_type, entity_id, operation, policy, outcome, head_commit,
+                   baseline_commit, branch, dirty, actor_role, message, created_at
+            from workspace_events
+            {where}
+            order by id desc
+            limit ?
+            """,
+            (*params, args.limit),
+        ).fetchall()
+    payload = [{key: row[key] for key in row.keys()} for row in rows]
+    if args.format == "json":
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0
+    if not rows:
+        print("No workspace events.")
+        return 0
+    for row in rows:
+        print(
+            f"{row['created_at']}\t{row['entity_type']}\t{row['entity_id'] or ''}\t"
+            f"{row['operation']}\t{row['policy']}\t{row['outcome']}\t"
+            f"{row['head_commit'] or ''}\t{row['branch'] or ''}\t"
+            f"dirty={row['dirty']}\t{row['message'] or ''}"
+        )
     return 0
 
 
@@ -834,8 +1603,7 @@ def command_help(args: argparse.Namespace) -> int:
 
 
 def init_schema(con: sqlite3.Connection) -> None:
-    if current_schema_version(con) != LATEST_SCHEMA_VERSION:
-        migrate_schema(con)
+    check_schema(con)
 
 
 def seed_roles(con: sqlite3.Connection) -> None:
@@ -1134,29 +1902,69 @@ def cr_frontmatter(row: sqlite3.Row) -> str:
     return f"---\n{body}\n---\n"
 
 
-def write_cr_markdown(path: Path, frontmatter: str, body: str) -> None:
+def cr_file_signature(path: Path) -> tuple[int, int, int, int, str]:
+    stat = path.stat()
+    content = path.read_bytes()
+    current_stat = path.stat()
+    signature = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+    current_signature = (
+        current_stat.st_dev,
+        current_stat.st_ino,
+        current_stat.st_size,
+        current_stat.st_mtime_ns,
+    )
+    if signature != current_signature:
+        raise MigrationError(f"CR document changed while it was being read: {path}")
+    return (*signature, hashlib.sha256(content).hexdigest())
+
+
+def write_cr_markdown(
+    path: Path,
+    frontmatter: str,
+    body: str,
+    *,
+    expected_signature: tuple[int, int, int, int, str] | None = None,
+    expect_missing: bool = False,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(frontmatter + "\n" + body.lstrip(), encoding="utf-8")
+    temporary_path = path.with_name(f".{path.name}.baton-{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary_path.open("x", encoding="utf-8") as temporary_file:
+            temporary_file.write(frontmatter + "\n" + body.lstrip())
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        if expect_missing:
+            if path.exists():
+                raise MigrationError(f"CR document was created concurrently; retry the command: {path}")
+        elif expected_signature is not None:
+            if not path.exists() or cr_file_signature(path) != expected_signature:
+                raise MigrationError(f"CR document changed concurrently; retry the command: {path}")
+            temporary_path.chmod(path.stat().st_mode & 0o777)
+        os.replace(temporary_path, path)
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
 
 
 def sync_cr_file(con: sqlite3.Connection, cr_id: str) -> None:
     row = con.execute("select * from change_requests where cr_id = ?", (cr_id,)).fetchone()
     if not row:
         raise SystemExit(f"ERROR: unknown CR: {cr_id}")
-    path = Path(row["file_path"])
+    path = project_file_path(con, row["file_path"])
     frontmatter = cr_frontmatter(row)
     if not path.exists():
         body = f"# {row['title']}\n\n## Background\n\n## Requirements\n\n## Acceptance Criteria\n"
-        write_cr_markdown(path, frontmatter, body)
+        write_cr_markdown(path, frontmatter, body, expect_missing=True)
         return
+    signature = cr_file_signature(path)
     text = path.read_text(encoding="utf-8")
     if text.startswith("---\n"):
         end = text.find("\n---\n", 4)
         if end != -1:
             body = text[end + len("\n---\n") :]
-            write_cr_markdown(path, frontmatter, body)
+            write_cr_markdown(path, frontmatter, body, expected_signature=signature)
             return
-    write_cr_markdown(path, frontmatter, text)
+    write_cr_markdown(path, frontmatter, text, expected_signature=signature)
 
 
 def control_scopes_for_role(role: str) -> tuple[str, str]:
@@ -1300,22 +2108,98 @@ def set_shift_until(con: sqlite3.Connection, scope: str, work_until: str, reason
 
 
 def command_init(args: argparse.Namespace) -> int:
-    with connect(args.db) as con:
+    if args.project_root:
+        root = Path(args.project_root).expanduser().resolve()
+        if not root.is_dir():
+            raise MigrationError(f"project root is not a directory: {root}")
+        expected_database = (root / ".baton" / "baton.sqlite3").resolve()
+        if args.db_explicit and Path(args.db).expanduser().resolve() != expected_database:
+            raise MigrationError(
+                "init --project-root cannot be combined with an external --db; "
+                f"expected database: {expected_database}"
+            )
+        args.db = str(expected_database)
+    path = Path(args.db)
+    validate_marker_for_database(path)
+    resolved_path = path.expanduser().resolve()
+    if (
+        not path.exists()
+        and resolved_path.name == "baton.sqlite3"
+        and resolved_path.parent.name == ".baton"
+        and project_marker_path(resolved_path.parent.parent).exists()
+    ):
+        raise MigrationError(
+            f"Baton project marker exists but its database is missing: {resolved_path}; "
+            "restore the database instead of reinitializing workflow history"
+        )
+    if path.exists() and path.stat().st_size:
+        with closing(connect_readonly(args.db)) as con:
+            tables = database_table_names(con)
+            if tables:
+                baton_tables = {"roles", "handoff_jobs", "handoff_controls", "change_requests"}
+                if not tables.intersection(baton_tables):
+                    raise MigrationError(f"database is not empty and is not a recognized Baton database: {args.db}")
+                check_schema(con)
+                marker = ensure_marker_for_database(path)
+                print(f"Already initialized {args.db}")
+                if marker:
+                    print(f"Project marker {marker}")
+                return 0
+    with connect(args.db, create=True) as con:
         migrate_schema(con)
+    marker = ensure_marker_for_database(path)
     print(f"Initialized {args.db}")
+    if marker:
+        print(f"Project marker {marker}")
     return 0
 
 
 def command_migrate(args: argparse.Namespace) -> int:
+    path = Path(args.db)
+    validate_marker_for_database(path)
+    output_verb = getattr(args, "output_verb", "Migrated")
     if args.check:
         with connect_readonly(args.db) as con:
             current = check_schema(con)
         print(f"Schema current {args.db} schema={current}")
         return 0
+
+    if not path.is_file():
+        raise MigrationError(f"database does not exist: {args.db}; run 'baton init' first")
+    with closing(connect_readonly(args.db)) as con:
+        tables = database_table_names(con)
+        baton_tables = {"roles", "handoff_jobs", "handoff_controls", "change_requests"}
+        if not tables.intersection(baton_tables):
+            raise MigrationError(f"database is not a recognized Baton database: {args.db}")
+        previous = current_schema_version(con)
+        if previous == LATEST_SCHEMA_VERSION:
+            current = check_schema(con)
+            marker = ensure_marker_for_database(path)
+            print(f"{output_verb} {args.db} schema={previous}->{current} applied=none")
+            if marker:
+                print(f"Project marker {marker}")
+            return 0
+        signature = database_content_signature(con)
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup_path = path.parent / "backups" / f"baton-before-{timestamp}-{uuid.uuid4().hex[:8]}.sqlite3"
+    backup_database(path, backup_path, signature)
     with connect(args.db) as con:
-        previous, current, applied = migrate_schema(con)
+        enable_wal(con)
+        con.execute("BEGIN IMMEDIATE")
+        if database_content_signature(con) != signature:
+            con.rollback()
+            backup_path.unlink()
+            raise MigrationError("database changed while migration was starting; rerun 'baton migrate'")
+        previous, current, applied = migrate_schema(con, transaction_started=True)
+    marker = ensure_marker_for_database(path)
     applied_text = ",".join(applied) if applied else "none"
-    print(f"Migrated {args.db} schema={previous}->{current} applied={applied_text}")
+    print(
+        f"{output_verb} {args.db} schema={previous}->{current} "
+        f"applied={applied_text} backup={backup_path}"
+    )
+    if marker:
+        print(f"Project marker {marker}")
     return 0
 
 
@@ -1324,11 +2208,9 @@ def command_update(args: argparse.Namespace) -> int:
         "WARNING: 'baton update' is a deprecated database migration alias; use 'baton migrate'.",
         file=sys.stderr,
     )
-    with connect(args.db) as con:
-        previous, current, applied = migrate_schema(con)
-    applied_text = ",".join(applied) if applied else "none"
-    print(f"Updated {args.db} schema={previous}->{current} applied={applied_text}")
-    return 0
+    args.check = False
+    args.output_verb = "Updated"
+    return command_migrate(args)
 
 
 def command_role_list(args: argparse.Namespace) -> int:
@@ -1537,9 +2419,11 @@ def create_handoff_job(
 
 def command_register(args: argparse.Namespace) -> int:
     depends_on = args.depends_on or []
+    assessment = assess_workspace(args.db)
     with connect(args.db) as con:
         init_schema(con)
         begin_immediate(con)
+        actor_role = normalize_role(args.actor_role)
         job_id, status, role = create_handoff_job(
             con,
             args.title,
@@ -1549,7 +2433,16 @@ def command_register(args: argparse.Namespace) -> int:
             args.exit_criteria,
             depends_on,
             args.depends_on_gate or [],
-            args.actor_role,
+            actor_role,
+        )
+        apply_workspace_policy(
+            con,
+            args,
+            assessment,
+            entity_type="handoff",
+            entity_id=job_id,
+            operation="registered",
+            actor_role=actor_role,
         )
         con.commit()
     print(f"{job_id}\t{status}\t{role}")
@@ -1780,7 +2673,7 @@ def command_cr_create(args: argparse.Namespace) -> int:
         file_path = args.file_path.strip()
         if not file_path:
             file_path = str(Path(args.dir) / f"{cr_id}-{slugify(args.title)}.md")
-        if Path(file_path).exists():
+        if project_file_path(con, file_path).exists():
             raise SystemExit(f"ERROR: CR file already exists: {file_path}")
         now = utc_now()
         con.execute(
@@ -1864,12 +2757,17 @@ def command_cr_request_revision(args: argparse.Namespace) -> int:
         if row["active_revision_job_id"]:
             raise SystemExit(f"ERROR: CR already has active revision handoff: {row['active_revision_job_id']}")
         assign_role = resolve_role(con, args.assign_back or row["author_role"])
+        if assign_role != row["author_role"]:
+            raise SystemExit(
+                f"ERROR: revision handoff must return to CR author role {row['author_role']}; "
+                f"delegated resubmission by {assign_role} is not supported"
+            )
         job_id, job_status, _ = create_handoff_job(
             con,
             args.title or f"Revise rejected CR: {row['title']}",
             assign_role,
             row["file_path"],
-            f"Address CR revision feedback and resubmit {args.cr_id}.",
+            f"Address CR revision feedback for {args.cr_id}: {reason}",
             "CR Markdown body is updated and baton cr resubmit is completed.",
             [],
             [],
@@ -2117,6 +3015,14 @@ def command_cr_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_cr_sync(args: argparse.Namespace) -> int:
+    with connect(args.db) as con:
+        init_schema(con)
+        sync_cr_file(con, args.cr_id)
+    print(f"{args.cr_id}\tsynced")
+    return 0
+
+
 def command_cr_events(args: argparse.Namespace) -> int:
     with connect(args.db) as con:
         init_schema(con)
@@ -2192,6 +3098,97 @@ def command_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_handoff_show(args: argparse.Namespace) -> int:
+    with connect(args.db) as con:
+        init_schema(con)
+        row = con.execute(
+            "select * from handoff_jobs where job_id = ?",
+            (args.job_id,),
+        ).fetchone()
+        if not row:
+            raise SystemExit(f"ERROR: unknown job: {args.job_id}")
+        dependencies = [
+            item["depends_on_job_id"]
+            for item in con.execute(
+                "select depends_on_job_id from handoff_dependencies where job_id = ? order by depends_on_job_id",
+                (args.job_id,),
+            ).fetchall()
+        ]
+        gates = [
+            item["gate_name"]
+            for item in con.execute(
+                "select gate_name from handoff_gate_dependencies where job_id = ? order by gate_name",
+                (args.job_id,),
+            ).fetchall()
+        ]
+    payload = {key: row[key] for key in row.keys()}
+    payload["depends_on"] = dependencies
+    payload["depends_on_gates"] = gates
+    if args.format == "json":
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0
+    ordered_keys = (
+        "job_id",
+        "status",
+        "title",
+        "target_role",
+        "claimed_by",
+        "source_ref",
+        "objective",
+        "exit_criteria",
+        "depends_on",
+        "depends_on_gates",
+        "created_at",
+        "started_at",
+        "finished_at",
+        "closure_evidence",
+        "related_commit",
+    )
+    for key in ordered_keys:
+        value = payload.get(key)
+        if isinstance(value, list):
+            value = ",".join(value)
+        print(f"{key}: {value or ''}")
+    return 0
+
+
+def command_handoff_list(args: argparse.Namespace) -> int:
+    if args.limit < 1:
+        raise SystemExit("ERROR: handoff list limit must be at least 1")
+    conditions: list[str] = []
+    params: list[object] = []
+    with connect(args.db) as con:
+        init_schema(con)
+        if args.role:
+            conditions.append("target_role = ?")
+            params.append(resolve_role(con, args.role))
+        if args.status:
+            conditions.append("status = ?")
+            params.append(args.status)
+        where = f"where {' and '.join(conditions)}" if conditions else ""
+        params.append(args.limit)
+        rows = con.execute(
+            f"""
+            select job_id, status, target_role, title, claimed_by, created_at
+            from handoff_jobs
+            {where}
+            order by created_at, job_id
+            limit ?
+            """,
+            params,
+        ).fetchall()
+    if args.format == "json":
+        print(json.dumps([{key: row[key] for key in row.keys()} for row in rows], indent=2, ensure_ascii=False))
+        return 0
+    if not rows:
+        print("No handoffs.")
+        return 0
+    for row in rows:
+        claimant = row["claimed_by"] or ""
+        print(f"{row['job_id']}\t{row['status']}\t{row['target_role']}\t{claimant}\t{row['title']}")
+    return 0
+
+
 def command_next(args: argparse.Namespace) -> int:
     with connect(args.db) as con:
         init_schema(con)
@@ -2215,6 +3212,8 @@ def command_next(args: argparse.Namespace) -> int:
 
 
 def command_claim(args: argparse.Namespace) -> int:
+    baseline = latest_workspace_commit(args.db, args.job_id, ("registered",))
+    assessment = assess_workspace(args.db, baseline)
     with connect(args.db) as con:
         init_schema(con)
         begin_immediate(con)
@@ -2231,6 +3230,15 @@ def command_claim(args: argparse.Namespace) -> int:
             reason = f" reason={stopped['reason']}" if stopped["reason"] else ""
             raise SystemExit(f"ERROR: role {role} is stopped by {stopped['scope']}.{reason}")
         claimant = claimed_by_value(args, role)
+        apply_workspace_policy(
+            con,
+            args,
+            assessment,
+            entity_type="handoff",
+            entity_id=args.job_id,
+            operation="claimed",
+            actor_role=role,
+        )
         changed = con.execute(
             """
             update handoff_jobs
@@ -2251,6 +3259,8 @@ def command_finish(args: argparse.Namespace) -> int:
     evidence = args.evidence.strip()
     if not evidence:
         raise SystemExit("ERROR: --evidence cannot be blank")
+    baseline = latest_workspace_commit(args.db, args.job_id, ("claimed", "registered"))
+    assessment = assess_workspace(args.db, baseline)
     with connect(args.db) as con:
         init_schema(con)
         begin_immediate(con)
@@ -2262,6 +3272,15 @@ def command_finish(args: argparse.Namespace) -> int:
             raise SystemExit(f"ERROR: job target role is {row['target_role']}, not {role}")
         if row["status"] != "in_progress":
             raise SystemExit(f"ERROR: job is not in_progress: {args.job_id} status={row['status']}")
+        apply_workspace_policy(
+            con,
+            args,
+            assessment,
+            entity_type="handoff",
+            entity_id=args.job_id,
+            operation="finished",
+            actor_role=role,
+        )
         con.execute(
             """
             update handoff_jobs
@@ -2647,16 +3666,38 @@ def command_wait(args: argparse.Namespace) -> int:
         unregister_waiter(args.db, waiter_id)
 
 
+def add_workspace_override_arguments(command: argparse.ArgumentParser) -> None:
+    command.add_argument(
+        "--accept-workspace-change",
+        action="store_true",
+        help="override a strict workspace mismatch with workspace.override authority",
+    )
+    command.add_argument(
+        "--workspace-reason",
+        default="",
+        help="audited reason required when accepting a strict workspace mismatch",
+    )
+    command.add_argument(
+        "--workspace-authorized-by-role",
+        default="",
+        help="role with workspace.override authorizing an intentional mismatch",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="SQLite-backed Baton CLI",
         epilog=(
             "Agent operating guides: run 'baton guide list', then "
-            "'baton guide show bootstrap|worker|planner'."
+            "'baton guide show bootstrap|worker|planner|git'."
         ),
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {BATON_VERSION}")
-    parser.add_argument("--db", default=".baton/baton.sqlite3", help="SQLite database path; default: .baton/baton.sqlite3")
+    parser.add_argument(
+        "--db",
+        default="",
+        help="SQLite database path; default: <nearest-baton-marker>/.baton/baton.sqlite3",
+    )
     parser.add_argument("--agent-id-file", default="", help="local non-shared agent identity file")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -2664,7 +3705,13 @@ def build_parser() -> argparse.ArgumentParser:
     help_command.add_argument("command_path", nargs="*", metavar="COMMAND")
     help_command.set_defaults(func=command_help, root_parser=parser)
 
-    sub.add_parser("init", help="initialize a new Baton database").set_defaults(func=command_init)
+    init = sub.add_parser("init", help="initialize or adopt a Baton project in the selected directory")
+    init.add_argument(
+        "--project-root",
+        default="",
+        help="project root to initialize; default: current directory or discovered Baton project",
+    )
+    init.set_defaults(func=command_init)
     migrate = sub.add_parser(
         "migrate",
         help="apply or verify database migrations",
@@ -2676,6 +3723,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     project = sub.add_parser("project", help="inspect or migrate project-local Baton state")
     project_sub = project.add_subparsers(dest="project_command", required=True)
+    project_info = project_sub.add_parser("info", help="show project marker, database, and version metadata")
+    project_info.add_argument("--format", choices=("text", "json"), default="text")
+    project_info.set_defaults(func=command_project_info)
     project_migrate = project_sub.add_parser(
         "migrate",
         help="check and apply a project database migration plan",
@@ -2692,7 +3742,7 @@ def build_parser() -> argparse.ArgumentParser:
     project_migrate.add_argument(
         "--project-root",
         default="",
-        help="project root; defaults to the nearest Git root or current directory",
+        help="project root; defaults to the nearest Baton marker, legacy database, or current directory",
     )
     project_migrate.add_argument(
         "--source-db",
@@ -2702,6 +3752,18 @@ def build_parser() -> argparse.ArgumentParser:
     project_migrate.add_argument("--plan-token", default="", help="token printed by --check; required with --apply")
     project_migrate.set_defaults(func=command_project_migrate)
 
+    workspace = sub.add_parser("workspace", help="inspect optional source-control provenance")
+    workspace_sub = workspace.add_subparsers(dest="workspace_command", required=True)
+    workspace_check = workspace_sub.add_parser("check", help="compare the current workspace with Baton provenance")
+    workspace_check.add_argument("--job", dest="job_id", default="", help="handoff whose latest baseline to check")
+    workspace_check.add_argument("--format", choices=("text", "json"), default="text")
+    workspace_check.set_defaults(func=command_workspace_check)
+    workspace_events = workspace_sub.add_parser("events", help="show recorded workspace provenance")
+    workspace_events.add_argument("--job", dest="job_id", default="")
+    workspace_events.add_argument("--limit", type=int, default=100)
+    workspace_events.add_argument("--format", choices=("text", "json"), default="text")
+    workspace_events.set_defaults(func=command_workspace_events)
+
     guide = sub.add_parser("guide", help="show agent instructions bundled with this Baton version")
     guide_sub = guide.add_subparsers(dest="guide_command", required=True)
     guide_sub.add_parser("list", help="list bundled agent guides").set_defaults(func=command_guide_list)
@@ -2710,6 +3772,18 @@ def build_parser() -> argparse.ArgumentParser:
     guide_show.set_defaults(func=command_guide_show)
 
     sub.add_parser("status", help="show handoff counts by status").set_defaults(func=command_status)
+    handoff = sub.add_parser("handoff", help="inspect handoff jobs")
+    handoff_sub = handoff.add_subparsers(dest="handoff_command", required=True)
+    handoff_show = handoff_sub.add_parser("show", help="show one handoff including its work payload")
+    handoff_show.add_argument("job_id")
+    handoff_show.add_argument("--format", choices=("text", "json"), default="text")
+    handoff_show.set_defaults(func=command_handoff_show)
+    handoff_list = handoff_sub.add_parser("list", help="list handoffs with optional role and status filters")
+    handoff_list.add_argument("--role", default="")
+    handoff_list.add_argument("--status", choices=tuple(sorted(STATUSES)), default="")
+    handoff_list.add_argument("--limit", type=int, default=100)
+    handoff_list.add_argument("--format", choices=("text", "json"), default="text")
+    handoff_list.set_defaults(func=command_handoff_list)
     sub.add_parser("promote-ready", help="promote dependency-ready handoffs").set_defaults(
         func=command_promote_ready,
         actor_role="sm",
@@ -2758,6 +3832,7 @@ def build_parser() -> argparse.ArgumentParser:
     register.add_argument("--depends-on", action="append", default=[])
     register.add_argument("--depends-on-gate", action="append", default=[])
     register.add_argument("--actor-role", default="sm")
+    add_workspace_override_arguments(register)
     register.set_defaults(func=command_register)
 
     gate = sub.add_parser("gate", help="manage named workflow gates")
@@ -2870,6 +3945,10 @@ def build_parser() -> argparse.ArgumentParser:
     cr_status.add_argument("cr_id")
     cr_status.set_defaults(func=command_cr_status)
 
+    cr_sync = cr_sub.add_parser("sync", help="reconcile managed Markdown frontmatter from SQLite state")
+    cr_sync.add_argument("cr_id")
+    cr_sync.set_defaults(func=command_cr_sync)
+
     cr_events = cr_sub.add_parser("events")
     cr_events.add_argument("cr_id")
     cr_events.set_defaults(func=command_cr_events)
@@ -2893,6 +3972,7 @@ def build_parser() -> argparse.ArgumentParser:
     claim.add_argument("job_id")
     claim.add_argument("--role", required=True)
     claim.add_argument("--claimed-by", default="")
+    add_workspace_override_arguments(claim)
     claim.set_defaults(func=command_claim)
 
     finish = sub.add_parser("finish", help="finish a claimed handoff")
@@ -2900,6 +3980,7 @@ def build_parser() -> argparse.ArgumentParser:
     finish.add_argument("--role", required=True)
     finish.add_argument("--evidence", required=True)
     finish.add_argument("--commit", default="")
+    add_workspace_override_arguments(finish)
     finish.set_defaults(func=command_finish)
 
     cancel = sub.add_parser("cancel", help="cancel one handoff and its blocked dependents")
@@ -2972,7 +4053,15 @@ def main() -> int:
     if argv and argv[0] == "help":
         argv = [*argv[1:], "--help"]
     args = parser.parse_args(argv)
+    args.db_explicit = any(token == "--db" or token.startswith("--db=") for token in argv)
     try:
+        needs_default_database = args.command not in {"help", "guide"} and not (
+            args.command == "project" and args.project_command == "migrate"
+        ) and not (
+            args.command == "init" and args.project_root
+        )
+        if needs_default_database and not args.db:
+            args.db = default_database_path()
         return args.func(args)
     except MigrationError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

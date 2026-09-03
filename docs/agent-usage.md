@@ -21,6 +21,7 @@ Do not use a test Baton database to operate a live repository handoff queue unle
 
 ```bash
 bin/baton --db /tmp/baton.sqlite3 init
+bin/baton --db /tmp/baton.sqlite3 shift status --role frontend
 bin/baton --db /tmp/baton.sqlite3 shift start --role frontend
 bin/baton --db /tmp/baton.sqlite3 wait --role frontend --timeout 900
 bin/baton --db /tmp/baton.sqlite3 next --role frontend
@@ -31,6 +32,18 @@ bin/baton --db /tmp/baton.sqlite3 wait --role frontend --timeout 900
 ```
 
 The final `wait` starts the next work cycle. A timeout is not completion; repeat bounded waits while the shift remains active.
+
+## Optional Git Workspace Checks
+
+When the tracked project `baton.toml` enables Git integration, inspect the current source context and handoff baseline with:
+
+```bash
+bin/baton workspace check
+bin/baton workspace check --job HO-YYYY-MM-DD-001
+bin/baton workspace events --job HO-YYYY-MM-DD-001
+```
+
+No config means `off`; `provider = "git"` defaults to `warn`. In `strict`, report a mismatch instead of bypassing it. Only a role with `workspace.override` may authorize an intentional transition, and the command must include a concrete `--workspace-reason`. See `docs/git-integration.md` for the full policy and checkout procedure.
 
 ## Creating Downstream Work
 
@@ -68,7 +81,7 @@ bin/baton --db /tmp/baton.sqlite3 role alias-add cd content-design
 bin/baton --db /tmp/baton.sqlite3 next --role cd
 ```
 
-Workflow authority is configured with role permissions. `sm` is seeded with all CR permissions, `handoff.cancel`, and emergency `gate.manage` authority.
+Workflow authority is configured with role permissions. `sm` is seeded with all CR permissions, `handoff.cancel`, emergency `gate.manage`, and `workspace.override` authority.
 
 ```bash
 bin/baton --db /tmp/baton.sqlite3 role permission-list sm
@@ -76,6 +89,7 @@ bin/baton --db /tmp/baton.sqlite3 role permission-add architecture cr.review
 bin/baton --db /tmp/baton.sqlite3 role permission-add architecture cr.approve
 bin/baton --db /tmp/baton.sqlite3 role permission-add architecture handoff.cancel
 bin/baton --db /tmp/baton.sqlite3 role permission-add architecture gate.manage
+bin/baton --db /tmp/baton.sqlite3 role permission-add architecture workspace.override
 bin/baton --db /tmp/baton.sqlite3 role permission-remove sm cr.approve
 ```
 
@@ -144,6 +158,7 @@ bin/baton --db /tmp/baton.sqlite3 cr submit CR-YYYY-MM-DD-001 --role planning
 When a reviewer requests revision, claim the generated handoff, edit the CR Markdown body, resubmit the CR, then finish the handoff.
 
 ```bash
+bin/baton --db /tmp/baton.sqlite3 handoff show HO-YYYY-MM-DD-001
 bin/baton --db /tmp/baton.sqlite3 claim HO-YYYY-MM-DD-001 --role planning
 bin/baton --db /tmp/baton.sqlite3 cr resubmit CR-YYYY-MM-DD-001 \
   --role planning \
@@ -154,6 +169,10 @@ bin/baton --db /tmp/baton.sqlite3 finish HO-YYYY-MM-DD-001 \
 ```
 
 `finish` does not resubmit a CR. The CR state transition must use `cr resubmit`.
+
+Revision handoffs always return to the CR author role. `cr request-revision --assign-back` may state that same role explicitly, but Baton rejects a different role because only the author may resubmit. The review reason is included in the handoff objective. Baton atomically replaces managed Markdown frontmatter and fails without overwriting the document when it detects a concurrent edit.
+
+If a process crash leaves Markdown frontmatter inconsistent with SQLite, use `cr sync CR-ID` to restore only the managed header from authoritative DB state. It preserves the request body.
 
 ## CR Reviewer Flow
 
@@ -263,15 +282,28 @@ If a required upstream handoff or Gate is cancelled, Baton recursively cancels b
 
 ## Shift Usage
 
-Set a maximum operating time before long-running worker loops:
+Inspect the applicable global and role controls before the first long-running worker loop:
 
 ```bash
+bin/baton --db /tmp/baton.sqlite3 shift status --role frontend
 bin/baton --db /tmp/baton.sqlite3 shift start --role frontend
 bin/baton --db /tmp/baton.sqlite3 shift extend --role frontend
-bin/baton --db /tmp/baton.sqlite3 shift status --role frontend
 ```
 
 `shift start` defaults to `4h`; `shift extend` defaults to `1h`.
+
+If no applicable shift deadline exists and no applicable scope is stopped or expired, start the default role shift. Preserve an existing active deadline. Do not restart, extend, or resume an expired or stopped scope without explicit user or SM authorization.
+
+Use the global scope for a shared project operating window:
+
+```bash
+bin/baton --db /tmp/baton.sqlite3 shift status
+bin/baton --db /tmp/baton.sqlite3 shift start --all
+bin/baton --db /tmp/baton.sqlite3 shift extend --all
+bin/baton --db /tmp/baton.sqlite3 shift end --all --reason "End of day"
+```
+
+Global and role scopes are cumulative: either can stop the role, and changing one does not clear the other.
 
 When a shift expires, Baton stops future waits and claims for that scope. Finish already-claimed work normally, then check `shift status` before re-entering a wait loop.
 

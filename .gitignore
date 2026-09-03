@@ -8,6 +8,7 @@ build/
 dist/
 
 # Baton local runtime state
+.baton/project.json
 .baton/agent-id
 .baton/backups/
 .baton/*.sqlite3

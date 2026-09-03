@@ -11,6 +11,7 @@ The SQLite database is the runtime authority for handoff state in this Baton wor
 Tables:
 
 - `schema_migrations`: ordered database migration history
+- `database_metadata`: diagnostic Baton package versions recorded at creation and migration
 - `roles`: canonical role definitions
 - `role_aliases`: alternate role names that resolve to canonical roles
 - `role_permissions`: workflow permissions granted to roles
@@ -23,11 +24,14 @@ Tables:
 - `handoff_events`: audit log of state changes and operational events
 - `handoff_controls`: stop/resume controls for wait loops
 - `waiter_leases`: short-lived handoff and CR waiter heartbeats for automatic polling intervals
+- `workspace_events`: optional Git commit provenance and policy outcomes for handoff transitions
 - `change_requests`: CR workflow state and Markdown file pointer
 - `cr_events`: audit log of CR state changes
 - `cr_handoffs`: links CRs to revision or implementation handoffs
 
 State-changing CLI commands use `BEGIN IMMEDIATE` transactions to serialize writes.
+
+New timestamps use `YYYY-MM-DD HH:MM:SS.ffffff UTC`. Readers also accept legacy second-precision values, and audit reports use source-local event IDs to produce a deterministic order when old events share one timestamp.
 
 ## `schema_migrations`
 
@@ -45,7 +49,7 @@ Columns:
 | `name` | `text` | yes | Stable migration name. |
 | `applied_at` | `text` | yes | UTC timestamp when the migration committed. |
 
-`baton migrate` runs pending migrations, applicable seed updates, `PRAGMA quick_check`, and `PRAGMA foreign_key_check` in one transaction. Any failure rolls back schema changes, seed changes, and migration records together. Full default permissions are seeded only for a new or unversioned database; later migrations add only permissions introduced by that migration, preserving project-specific revocations.
+`baton migrate` creates a validated SQLite backup before running pending migrations, applicable seed updates, `PRAGMA quick_check`, and `PRAGMA foreign_key_check` in one transaction. Any failure rolls back schema changes, seed changes, and migration records together. Normal workflow commands reject pending migrations. Full default permissions are seeded only for a new or unversioned database; later migrations add only permissions introduced by that migration, preserving project-specific revocations.
 
 Released migrations:
 
@@ -54,11 +58,59 @@ Released migrations:
 2 handoff_cancel_permission
 3 named_gates
 4 waiter_leases
+5 database_metadata
+6 workspace_provenance
 ```
 
 `baton migrate --check` performs a read-only check that the database is at the latest known schema version.
 
+## `database_metadata`
+
+Purpose:
+
+- Records the Baton package version that created a new versioned DB when known.
+- Records the package version and UTC time of the latest schema migration.
+- Supports diagnosis through `baton project info`; it does not decide compatibility.
+
+Columns:
+
+| Column | Type | Required | Purpose |
+| --- | --- | --- | --- |
+| `key` | `text primary key` | yes | Stable metadata key. |
+| `value` | `text` | yes | Diagnostic value. |
+| `updated_at` | `text` | yes | UTC timestamp of the metadata update. |
+
+Known keys are `created_with_baton_version`, `last_migrated_with_baton_version`, and `last_migrated_at`. A database first observed from an older unversioned layout records `unknown` for its creation version. Package-only upgrades do not rewrite this table when no schema migration is applied.
+
 Future schema changes must append a new migration and increment `LATEST_SCHEMA_VERSION`. Never change an already-released migration in place.
+
+## `workspace_events`
+
+Purpose:
+
+- Records optional Git provenance for handoff register, claim, and finish transitions.
+- Connects workflow events to immutable commit IDs without copying Git history, diffs, or source contents.
+- Records `warn` outcomes and authorized `strict` overrides for audit and reporting.
+
+Columns:
+
+| Column | Type | Required | Purpose |
+| --- | --- | --- | --- |
+| `id` | `integer primary key` | yes | Monotonic workspace event ID. |
+| `entity_type` | `text` | yes | `project`, `handoff`, or reserved `cr` provenance scope. |
+| `entity_id` | `text` | no | Handoff or CR identifier when applicable. |
+| `operation` | `text` | yes | State transition such as `registered`, `claimed`, or `finished`. |
+| `policy` | `text` | yes | Effective `warn` or `strict` policy. `off` creates no event. |
+| `outcome` | `text` | yes | `accepted`, `warning`, or authorized `override`. |
+| `head_commit` | `text` | no | HEAD commit observed at the transition. |
+| `baseline_commit` | `text` | no | Earlier Baton commit used for ancestry comparison. |
+| `branch` | `text` | no | Informational branch name or `DETACHED`. |
+| `dirty` | `integer` | yes | `1` when Git reported working-tree changes. |
+| `actor_role` | `text` | no | Role performing or authorizing the transition. |
+| `message` | `text` | no | Warning details or override reason. |
+| `created_at` | `text` | yes | UTC event timestamp. |
+
+Migration 6 also grants `workspace.override` to the default `sm` role. Existing project-specific permissions remain unchanged except for this newly introduced permission.
 
 ## `roles`
 
@@ -136,7 +188,7 @@ Primary key:
 
 Seed permissions:
 
-- `sm` receives all CR permissions, `handoff.cancel`, and `gate.manage` on `init` or the migration that introduces each permission.
+- `sm` receives all CR permissions, `handoff.cancel`, `gate.manage`, and `workspace.override` on `init` or the migration that introduces each permission.
 
 Known permissions:
 
@@ -150,6 +202,7 @@ cr.assign_implementation
 cr.mark_implemented
 handoff.cancel
 gate.manage
+workspace.override
 ```
 
 Use `role permission-add` and `role permission-remove` to manage grants. Removing a permission is an explicit project policy decision and repeated migrations do not restore the full default permission set.

@@ -12,7 +12,7 @@ BACKEND_UNTIL="$("$CLI" --db "$DB" shift status --role backend | awk -F 'until='
 python3 - "$BACKEND_UNTIL" <<'PY'
 from datetime import datetime, timezone
 import sys
-until = datetime.strptime(sys.argv[1], "%Y-%m-%d %H:%M:%S UTC").replace(tzinfo=timezone.utc)
+until = datetime.fromisoformat(sys.argv[1].removesuffix(" UTC") + "+00:00")
 delta = (until - datetime.now(timezone.utc)).total_seconds()
 if not 3.9 * 3600 <= delta <= 4.1 * 3600:
     raise SystemExit(f"unexpected default start duration seconds={delta}")
@@ -22,8 +22,8 @@ BACKEND_EXTENDED_UNTIL="$("$CLI" --db "$DB" shift status --role backend | awk -F
 python3 - "$BACKEND_UNTIL" "$BACKEND_EXTENDED_UNTIL" <<'PY'
 from datetime import datetime, timezone
 import sys
-before = datetime.strptime(sys.argv[1], "%Y-%m-%d %H:%M:%S UTC").replace(tzinfo=timezone.utc)
-after = datetime.strptime(sys.argv[2], "%Y-%m-%d %H:%M:%S UTC").replace(tzinfo=timezone.utc)
+before = datetime.fromisoformat(sys.argv[1].removesuffix(" UTC") + "+00:00")
+after = datetime.fromisoformat(sys.argv[2].removesuffix(" UTC") + "+00:00")
 delta = (after - before).total_seconds()
 if not 0.9 * 3600 <= delta <= 1.1 * 3600:
     raise SystemExit(f"unexpected default extend duration seconds={delta}")
