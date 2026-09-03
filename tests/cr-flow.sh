@@ -42,10 +42,19 @@ grep "status: draft" "$CR_FILE" >/dev/null
 "$CLI" --db "$DB" cr submit "$CR_ID" --role planning >/dev/null
 "$CLI" --db "$DB" cr wait-review --role sm --timeout 1 --interval 1 | grep "$CR_ID" >/dev/null
 
+if "$CLI" --db "$DB" cr request-revision "$CR_ID" \
+  --role sm \
+  --reason "Invalid delegated revision." \
+  --assign-back backend >/dev/null 2>&1; then
+  echo "ERROR: revision handoff was assigned to a non-author role" >&2
+  exit 1
+fi
+
 REVISION_LINE="$("$CLI" --db "$DB" cr request-revision "$CR_ID" \
   --role sm \
   --reason "Acceptance criteria is unclear.")"
 REVISION_JOB="$(awk '{print $3}' <<<"$REVISION_LINE")"
+"$CLI" --db "$DB" handoff show "$REVISION_JOB" | grep 'objective: Address CR revision feedback.*Acceptance criteria is unclear.' >/dev/null
 grep "status: revision_requested" "$CR_FILE" >/dev/null
 grep "active_revision_job_id: $REVISION_JOB" "$CR_FILE" >/dev/null
 
@@ -96,6 +105,17 @@ fi
 "$CLI" --db "$DB" cr mark-implemented "$CR_ID" --role sm --evidence "Implementation handoff finished." >/dev/null
 "$CLI" --db "$DB" cr events "$CR_ID" | grep implemented >/dev/null
 grep "status: implemented" "$CR_FILE" >/dev/null
+printf '\nRecovery body marker.\n' >>"$CR_FILE"
+python3 - "$CR_FILE" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+path.write_text(path.read_text(encoding="utf-8").replace("status: implemented", "status: stale"), encoding="utf-8")
+PY
+"$CLI" --db "$DB" cr sync "$CR_ID" | grep 'synced' >/dev/null
+grep "status: implemented" "$CR_FILE" >/dev/null
+grep "Recovery body marker." "$CR_FILE" >/dev/null
 
 ARCH_CR_LINE="$("$CLI" --db "$DB" cr create \
   --title "Architecture reviewed change" \
@@ -184,5 +204,29 @@ fi
 grep "Stopped waiting for CR review role sm" "$WAIT_OUT" >/dev/null
 "$CLI" --db "$WAIT_DB" resume --role sm >/dev/null
 "$CLI" --db "$WAIT_DB" control status | grep "role:sm" | grep "running" >/dev/null
+
+python3 - "$ROOT/src" "$TMP" <<'PY'
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+
+from agents_baton.cli import MigrationError, cr_file_signature, write_cr_markdown
+
+path = Path(sys.argv[2]) / "concurrent-cr.md"
+path.write_text("original\n", encoding="utf-8")
+signature = cr_file_signature(path)
+path.write_text("human edit\n", encoding="utf-8")
+try:
+    write_cr_markdown(path, "---\nstatus: approved\n---\n", "body\n", expected_signature=signature)
+except MigrationError:
+    pass
+else:
+    raise SystemExit("concurrent CR edit was overwritten")
+if path.read_text(encoding="utf-8") != "human edit\n":
+    raise SystemExit("concurrent CR edit was not preserved")
+if list(path.parent.glob(f".{path.name}.baton-*.tmp")):
+    raise SystemExit("temporary CR document was not cleaned up")
+PY
 
 echo "OK cr flow cr=$CR_ID revision_job=$REVISION_JOB implementation_job=$IMPLEMENT_JOB db=$DB"

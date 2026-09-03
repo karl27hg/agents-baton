@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Added optional tracked `baton.toml` Git workspace integration with backward-compatible `off`, default-on-enable `warn`, and enforced `strict` policies.
+- Added schema migration v6, `workspace check/events`, handoff register/claim/finish commit provenance, ancestry checks, read-only report integration, and audited `workspace.override` authority.
+- Required Baton agents and planners to delegate exclusively through registered handoffs instead of creating subagents, child tasks, parallel agent sessions, or delegated background agents, while documenting that host policy remains the enforcement layer.
+- Required workers to inspect shift controls before their first wait, create the default `4h` role shift only when no applicable control exists, preserve active deadlines, and require user or SM authority to restart expired or stopped role/global scopes.
+- Added read-only `handoff show` and `handoff list` commands so workers can inspect complete work contracts before claiming.
+- Added `.baton/project.json` as the Git-independent project boundary for databases, CR documents, agent identity, and nested command execution.
+- Anchored `baton-report` to the same nearest Baton marker as the main CLI.
+- Added schema migration v5 and `baton project info` for diagnostic creation and migration package versions while retaining schema history as the compatibility authority.
+- Added safe in-place marker adoption, move/copy behavior, and rejection of ambiguous relative CR paths with external databases.
+- Added bounded WAL-mode retry and transaction-time schema detection for concurrent project initialization.
+- Hardened checked layout migration with in-progress-work and global-stop checks, validated backups, and a legacy-path redirect to the canonical database.
+- Made schema migrations explicit and backed up; normal workflow commands now reject pending migrations instead of applying them implicitly.
+- Restricted CR revision handoffs to the author role, included reviewer feedback in their objective, and made Markdown synchronization atomic with concurrent-edit detection and explicit `cr sync` recovery.
+- Added microsecond UTC event timestamps and deterministic audit ordering for events with identical legacy timestamps.
+- Added multi-project isolation, project-root resolution, handoff inspection, migration race, CR edit-conflict, and audit-order regression coverage.
 - Added Python packaging with `baton` and `baton-report` console entry points for isolated pipx installation.
 - Added a temporary-home pipx lifecycle test that verifies install, executable update, command and environment removal, and project database preservation.
 - Added checked project database discovery and migration from legacy tool layouts, with explicit source paths, in-memory rehearsal, plan tokens, active-waiter protection, validated backups, and no implicit database merging.

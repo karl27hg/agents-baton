@@ -48,10 +48,13 @@ cd /path/to/your-project
 baton guide show bootstrap
 baton init
 baton migrate --check
+baton project info
 baton status
 ```
 
-기본 DB 경로 `.baton/baton.sqlite3`는 `baton`을 실행한 현재 프로젝트를 기준으로 결정됩니다. 사용자 단위의 빠른 설치에는 pipx가 적합하지만, 프로젝트 저장소가 Baton 버전을 직접 기록해야 하면 release tag에 고정한 submodule을 사용합니다. 자세한 내용은 [설치 가이드](docs/using-baton-in-projects.md)를 확인합니다.
+`baton init`은 선택한 디렉터리에 `.baton/project.json` marker와 `.baton/baton.sqlite3`를 만듭니다. 이후 하위 디렉터리에서는 가장 가까운 상위 marker를 찾아 동일한 DB를 사용하므로 Git 존재 여부와 무관하며, 프로젝트를 이동하거나 전체 복사해도 경로를 다시 등록할 필요가 없습니다. 다른 위치에서 초기화하려면 `baton init --project-root PATH`를 사용합니다.
+
+Marker는 있지만 DB가 없으면 workflow 이력 복구가 필요한 상태로 판단합니다. `init`은 이 경우 빈 DB를 만들어 기존 이력을 대체하지 않습니다.
 
 명령 문법과 옵션은 일반적인 `-h`, `--help` 또는 `help`로 확인합니다. `help`는 중첩된 하위 명령도 지정할 수 있습니다.
 
@@ -70,6 +73,7 @@ baton guide list
 baton guide show bootstrap
 baton guide show worker
 baton guide show planner
+baton guide show git
 ```
 
 `pipx` 명령이 없다면 Baton을 설치하기 전에 pipx를 먼저 설치합니다.
@@ -114,7 +118,7 @@ cd /path/to/project-b
 baton init
 ```
 
-두 프로젝트는 동일한 설치 실행파일을 사용하지만 각각 `project-a/.baton/baton.sqlite3`와 `project-b/.baton/baton.sqlite3`를 사용합니다. pipx 패키지는 실행파일과 현재 버전에 맞는 agent guide를 함께 설치하지만 프로젝트의 `AGENTS.md`는 자동으로 변경하지 않습니다. `AGENTS.md`에서 `baton guide show bootstrap`, `baton guide show worker`, `baton guide show planner`를 역할에 맞게 읽도록 요구해야 합니다.
+두 프로젝트는 동일한 stateless 설치 실행파일을 사용하지만 각각 독립된 marker, DB, waiter, control 및 실행 프로세스를 사용합니다. pipx 패키지는 실행파일과 현재 버전에 맞는 agent guide를 함께 설치하지만 프로젝트의 `AGENTS.md`는 자동으로 변경하지 않습니다. `AGENTS.md`에서 `baton guide show bootstrap`, `baton guide show worker`, `baton guide show planner`를 역할에 맞게 읽도록 요구해야 합니다.
 
 기존에 `tools/baton` 아래에서 Baton을 사용한 프로젝트라면 기본 DB가 보이지 않는다는 이유로 새 DB를 초기화하지 않습니다. 먼저 쓰기 없이 자동 탐색과 migration 가능 여부를 검사합니다.
 
@@ -145,9 +149,12 @@ baton --version
 cd /path/to/your-project
 baton migrate
 baton migrate --check
+baton project info
 ```
 
 이전 Baton이 새 schema를 지원하지 않을 수 있으므로 schema migration 후 임의로 downgrade하지 않습니다. 설치 버전을 고정하려면 `pipx pin agents-baton`, 다시 업그레이드를 허용하려면 `pipx unpin agents-baton`을 사용합니다.
+
+정식 배포된 schema migration은 append-only로 유지하므로 오래 사용하지 않은 프로젝트도 다음 사용 시 여러 tag를 건너뛰어 최신 schema로 올릴 수 있습니다. 지원 범위는 정식 Baton schema와 인식 가능한 과거 unversioned DB이며 임의의 개발 snapshot, 수동 변경 schema 및 downgrade는 포함하지 않습니다.
 
 ```bash
 pipx uninstall agents-baton
@@ -155,11 +162,13 @@ pipx uninstall agents-baton
 
 Uninstall은 `baton`, `baton-report` 명령과 pipx 가상환경만 제거합니다. 각 프로젝트의 `.baton/` DB와 감사 이력은 삭제하지 않습니다.
 
-기본 DB 경로는 `.baton/baton.sqlite3`입니다. 다른 DB를 사용하려면 모든 명령에 `--db`를 지정합니다.
+기본 DB 경로는 marker와 같은 `.baton/`에 있는 `.baton/baton.sqlite3`입니다. `--db`는 진단과 격리 테스트를 위한 고급 옵션입니다.
 
 ```bash
 bin/baton --db /tmp/baton.sqlite3 init
 ```
+
+외부 DB에는 암묵적인 project root가 없습니다. CR 파일 경로는 절대 경로를 사용해야 하며, Baton은 실행 디렉터리에 따라 다른 파일을 만드는 상대 경로를 거부합니다.
 
 ## 문서 구성
 
@@ -172,10 +181,13 @@ bin/baton --db /tmp/baton.sqlite3 init
 5. [Planner prompt](docs/planner-prompt.md): 병렬 작업의 독립성 판정과 의존성 등록 정책
 6. [Agent prompt](docs/agent-prompt.md): Baton worker agent에 추가할 영문 prompt
 7. [Agent 사용법](docs/agent-usage.md): role, CR, wait, shift 명령 예시
-8. [SQLite schema](docs/schema.md) 또는 [한국어 번역](docs/schema.ko.md): 테이블과 migration 명세
-9. [CHANGELOG.md](CHANGELOG.md): 버전별 변경 사항
+8. [선택적 Git workspace 연동](docs/git-integration.ko.md) 또는 [영문 원본](docs/git-integration.md): `off`, `warn`, `strict`, checkout 및 override 정책
+9. [SQLite schema](docs/schema.md) 또는 [한국어 번역](docs/schema.ko.md): 테이블과 migration 명세
+10. [CHANGELOG.md](CHANGELOG.md): 버전별 변경 사항
 
 `docs/agent-prompt.md`는 Codex role agent가 직접 따를 명령 규칙이므로 영문 원본을 agent 지시 사항에 연결하는 것을 권장합니다.
+
+Baton으로 작업하는 agent는 subagent, child task, 병렬 agent session 또는 위임용 background agent를 직접 생성하지 않아야 합니다. 모든 위임은 설정된 role을 대상으로 하는 Baton handoff로 등록합니다. 설치된 guide에도 이 정책이 포함되지만 Baton CLI가 host의 agent 도구를 비활성화할 수는 없으므로, 실제 강제 규칙은 사용하는 프로젝트의 `AGENTS.md` 또는 동등한 host 정책에도 명시해야 합니다.
 
 ## SM Agent 설정 순서
 
@@ -204,7 +216,7 @@ bin/baton role permission-add architecture cr.review
 bin/baton role permission-add architecture cr.approve
 ```
 
-`sm`은 기본적으로 CR 권한, `handoff.cancel`, 긴급 `gate.manage` 권한을 갖습니다. 사용자 수준 인증은 Baton의 범위가 아니므로 OS 계정, 저장소 권한 및 agent 운영 정책으로 별도 통제해야 합니다.
+`sm`은 기본적으로 CR 권한, `handoff.cancel`, 긴급 `gate.manage`, `workspace.override` 권한을 갖습니다. 사용자 수준 인증은 Baton의 범위가 아니므로 OS 계정, 저장소 권한 및 agent 운영 정책으로 별도 통제해야 합니다.
 
 ## 기본 Handoff 흐름
 
@@ -222,6 +234,7 @@ bin/baton register \
 
 bin/baton wait --role frontend --timeout 900
 bin/baton next --role frontend
+bin/baton handoff show HO-YYYY-MM-DD-001
 bin/baton claim HO-YYYY-MM-DD-001 --role frontend
 bin/baton finish HO-YYYY-MM-DD-001 \
   --role frontend \
@@ -229,6 +242,30 @@ bin/baton finish HO-YYYY-MM-DD-001 \
 ```
 
 `next`는 한 번만 확인하는 비대기 명령입니다. 작업이 없다는 이유로 agent가 종료되면 안 되며, shift가 활성 상태인 동안 제한된 `wait`를 반복해야 합니다.
+`next` 출력만으로 작업을 시작하지 말고 claim 전에 `handoff show`로 objective, source reference, dependency, Gate, exit criteria를 모두 확인해야 합니다. `handoff list`는 role과 status별 queue를 읽기 전용으로 조회합니다.
+
+### 선택적 Git workspace 연동
+
+Baton은 기본적으로 Git에 의존하지 않습니다. Git commit provenance와 checkout 불일치 경고가 필요한 프로젝트만 root의 `baton.toml`을 Git으로 추적합니다.
+
+```toml
+[baton]
+required_version = ">=0.6.0.dev0,<0.7"
+
+[vcs]
+provider = "git"
+policy = "warn"
+```
+
+설정이 없으면 `off`, Git provider만 설정하면 `warn`이 기본입니다. `strict`는 불일치한 claim과 finish를 차단하며 `workspace.override` 권한을 가진 role의 사유 있는 override만 허용합니다.
+
+```bash
+bin/baton workspace check
+bin/baton workspace check --job HO-YYYY-MM-DD-001
+bin/baton workspace events --job HO-YYYY-MM-DD-001
+```
+
+자세한 의미와 checkout 절차는 [선택적 Git workspace 연동 가이드](docs/git-integration.ko.md)를 따릅니다. Git 검사는 register, claim, finish와 명시적인 check에서만 실행되며 wait polling에는 영향을 주지 않습니다.
 
 ## CR 흐름
 
@@ -255,6 +292,9 @@ bin/baton cr resubmit CR-YYYY-MM-DD-001 \
   --role planning \
   --evidence "Acceptance criteria clarified."
 ```
+
+Revision handoff는 항상 CR 작성 role로 돌아갑니다. `--assign-back`으로 다른 role을 지정할 수 없으며, 심사 사유는 handoff objective에 포함됩니다. Baton이 frontmatter를 동기화하는 동안 Markdown이 변경되면 사람의 편집을 덮어쓰지 않고 명령을 실패시킵니다.
+SQLite와 파일시스템은 하나의 transaction이 아니므로 비정상 종료 후 frontmatter가 의심되면 `bin/baton cr sync CR-ID`로 DB 상태를 기준으로 managed header만 복구합니다. CR 본문은 보존됩니다.
 
 승인과 구현 handoff 생성은 별도 결정입니다. 자세한 명령과 심사 권한은 [영문 README의 Change Request Flow](README.md#change-request-flow)를 따릅니다.
 
@@ -289,13 +329,26 @@ bin/baton wait --role frontend --timeout 900 --interval auto
 ## Shift와 중지
 
 ```bash
+bin/baton shift status --role frontend
 bin/baton shift start --role frontend
 bin/baton shift extend --role frontend
-bin/baton shift status --role frontend
 bin/baton shift end --role frontend --reason "End of day"
 ```
 
 `shift start`의 기본 duration은 4시간, `shift extend`의 기본 duration은 1시간입니다. shift가 만료되면 새로운 wait와 claim은 중지되지만 이미 claim한 작업의 `finish` 보고는 허용됩니다.
+
+worker는 첫 wait 전에 적용되는 전역 및 role shift 상태를 확인합니다. 미래 deadline이 없고 중지되거나 만료된 scope도 없을 때만 기본 4시간 role shift를 시작합니다. 이미 활성 deadline이 있으면 유지하고, 만료 또는 중지된 scope는 사용자나 SM의 명시적인 승인 없이 다시 시작, 연장 또는 resume하지 않습니다.
+
+프로젝트의 모든 role에 같은 운영 시간을 적용하려면 전역 shift를 사용합니다.
+
+```bash
+bin/baton shift status
+bin/baton shift start --all
+bin/baton shift extend --all
+bin/baton shift end --all --reason "End of day"
+```
+
+전역과 role scope는 함께 적용됩니다. `all`이 중지 또는 만료되면 role shift가 활성이어도 모든 role이 멈추며, 특정 role scope가 중지 또는 만료되면 전역 shift가 활성이어도 해당 role은 멈춥니다. 한 scope의 시작, 연장 또는 resume은 다른 scope의 상태를 해제하지 않습니다.
 
 즉시 대기 제어를 변경하려면 다음 명령을 사용합니다.
 
@@ -321,7 +374,7 @@ git checkout vX.Y.Z
 
 `vX.Y.Z`는 사용할 검증된 Baton release tag로 바꿉니다.
 
-다른 프로젝트 루트에서 `tools/baton/bin/baton`을 실행하면 해당 프로젝트의 `.baton/`에 runtime DB가 생성됩니다. 자세한 `.gitignore`, `AGENTS.md`, prompt 설정은 [설치 가이드](docs/using-baton-in-projects.md)를 확인합니다.
+다른 프로젝트 루트에서 `tools/baton/bin/baton init`을 실행하면 해당 위치의 `.baton/`에 marker와 runtime DB가 생성됩니다. 자세한 `.gitignore`, `AGENTS.md`, prompt 설정은 [설치 가이드](docs/using-baton-in-projects.md)를 확인합니다.
 
 ## 버전 변경과 DB 보존
 
@@ -334,9 +387,11 @@ bin/baton migrate --check
 
 Migration은 version이 지정되어 있고 transaction 단위로 실행되며 반복 실행할 수 있습니다. 기존 handoff, CR, event, control, role, permission 데이터는 보존되고 실패한 migration은 rollback됩니다. DB보다 오래된 Baton binary는 더 새로운 schema를 수정할 수 없습니다.
 
+일반 workflow 명령은 pending migration을 자동 적용하지 않습니다. `baton migrate`가 변경 전에 검증된 backup을 만들며, migration이 필요한 DB에 일반 명령을 실행하면 명시적으로 실패합니다. Schema migration 5는 생성 및 최근 migration에 사용된 Baton 버전을 진단 정보로 기록하지만 호환성은 계속 `schema_migrations`로 판단합니다.
+
 ## 감사와 요약
 
-`bin/baton-report`는 DB를 읽기 전용으로 엽니다.
+`bin/baton-report`는 현재 프로젝트 marker가 가리키는 DB를 읽기 전용으로 엽니다. 여러 프로젝트를 합산하는 전역 보고서는 아닙니다.
 
 ```bash
 bin/baton-report summary
@@ -351,6 +406,9 @@ bin/baton-report audit --format csv
 - Markdown handoff 파일 자체의 import/export는 제공하지 않습니다.
 - Handoff claim/finish 권한은 대상 role 기준이며 사용자 인증은 외부 정책에 맡깁니다.
 - CR 심사는 role 권한을 사용하지만 Baton만으로 실제 사용자를 인증하지 않습니다.
+- pipx 실행 파일은 OS 사용자 범위에서 공유되지만 DB와 stop/wait 상태는 Baton marker별로 분리됩니다. 여러 프로젝트가 같은 명시적 `--db`를 공유하도록 구성하면 ID, CR 경로, control까지 하나의 workflow로 합쳐지므로 피해야 합니다.
+- Baton은 파일시스템 전체 검색, 전역 프로젝트 registry 또는 일괄 migration을 제공하지 않습니다. 각 프로젝트는 다음 사용 시 독립적으로 검사하고 migration합니다.
+- 활성 DB는 local filesystem에 두어야 합니다. Network mount, cloud 동기화 폴더 또는 여러 PC가 공유하는 DB는 SQLite lock 전제를 보장하지 않으므로 agent 조정 용도로 사용하지 않습니다.
 - 이 저장소의 Baton DB는 다른 프로젝트의 활성 workflow 상태가 아닙니다.
 
 ## 라이선스

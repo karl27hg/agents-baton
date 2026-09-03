@@ -58,10 +58,13 @@ cd /path/to/your-project
 baton guide show bootstrap
 baton init
 baton migrate --check
+baton project info
 baton status
 ```
 
-The current directory determines the default `.baton/baton.sqlite3` location.
+`baton init` creates `.baton/project.json` and `.baton/baton.sqlite3` in the selected directory. Later commands walk upward to the nearest Baton marker, so nested-directory execution, project moves, and full directory copies do not depend on Git. Use `baton init --project-root PATH` when initialization is launched from another directory.
+
+A marker without its database is treated as recovery-required state. `init` refuses to create a replacement DB that would silently discard workflow history.
 
 ## Command Help And Agent Guides
 
@@ -82,6 +85,7 @@ baton guide list
 baton guide show bootstrap
 baton guide show worker
 baton guide show planner
+baton guide show git
 ```
 
 Both interfaces are included in a pipx installation. Help answers “what arguments does this command accept?”; guides answer “how should an agent operate Baton safely?”
@@ -148,7 +152,7 @@ baton init
 baton migrate --check
 ```
 
-Both projects use the same installed `baton` executable, while `project-a/.baton/baton.sqlite3` and `project-b/.baton/baton.sqlite3` remain separate. Always run Baton from the intended project root unless an explicit `--db` path is supplied.
+Both projects use the same stateless installed `baton` executable, while their markers, databases, waiters, controls, and command processes remain separate. After initialization, commands may run from any descendant of that project marker.
 
 Verify the managed installation with:
 
@@ -185,9 +189,12 @@ After changing the installed Baton version, enter every active consuming project
 cd /path/to/your-project
 baton migrate
 baton migrate --check
+baton project info
 ```
 
-Baton migrations are transactional and preserve existing workflow data. Avoid downgrading to an older Baton after a schema migration because an older executable may not support the newer database schema. Back up the project `.baton/` directory before a planned rollback or high-risk upgrade.
+Only `baton migrate`, its deprecated `update` alias, and the checked project migration flow may change the schema. Normal workflow commands reject a pending migration. `baton migrate` writes a validated backup under the database's `backups/` directory before applying pending migrations, then performs the migration transactionally. Avoid downgrading to an older Baton after a schema migration because an older executable may not support the newer database schema.
+
+Released schema migrations are append-only and retained so a dormant project can upgrade directly across multiple tagged Baton versions when it is next used. Compatibility covers released Baton schemas and recognized unversioned legacy databases, not arbitrary development snapshots, manually edited schemas, or downgrade operations.
 
 If the project used Baton from a nested `tools/baton` checkout and the expected project-root database is missing, do not initialize a new empty database. Discover and rehearse a layout/schema migration first:
 
@@ -201,13 +208,15 @@ Baton checks the project-root database and supported legacy `tools/baton` or `to
 baton project migrate --check --source-db /path/to/existing/baton.sqlite3
 ```
 
-Review the printed source, target, schema versions, pending migrations, layout move, and active waiter count. Stop active agents, then apply the same plan with its token:
+Review the printed source, target, schema versions, pending migrations, layout move, active waiter count, in-progress handoff count, and global stop state. Finish or cancel in-progress handoffs, stop all Baton waiters, and enable the project-local maintenance stop before applying a layout move:
 
 ```bash
+baton stop --all --reason "Baton migration"
+baton project migrate --check
 baton project migrate --apply --plan-token <token>
 ```
 
-Repeat `--source-db` and `--project-root` on apply when they were used during check. Baton rechecks the source and refuses stale tokens, active waiters, incompatible databases, ambiguous discovery, or a distinct existing target. Before a schema or layout change, it writes a validated backup under `.baton/backups/`; a migrated legacy source is retained.
+Use the token from the second check. Repeat `--source-db` and `--project-root` on apply when they were used during check. Baton rechecks the source and refuses stale tokens, active waiters, in-progress handoffs, missing maintenance stop for a layout move, incompatible databases, ambiguous discovery, or a distinct existing target. It writes a validated backup under `.baton/backups/`, installs the canonical database and marker, and atomically replaces the legacy database path with a relative symlink to the canonical file. This redirect prevents old wrappers from continuing on a second database; the original database remains in the backup directory. Resume workers only after verification.
 
 Pin or unpin a pipx environment when automatic upgrades must be controlled:
 
@@ -233,9 +242,12 @@ baton guide list
 baton guide show bootstrap
 baton guide show worker
 baton guide show planner
+baton guide show git
 ```
 
 Complete the project setup in `docs/using-baton-in-projects.md`, including `.gitignore`, role configuration, and `AGENTS.md` rules that require the appropriate installed guide. Files under `docs/` are the canonical sources for the bundled guides; packaging tests require their installed copies to remain identical.
+
+While an agent is operating under Baton, it must not create subagents, child tasks, parallel agent sessions, or delegated background agents. All delegation goes through Baton handoffs assigned to configured roles. The bundled guides state this policy, but Baton cannot disable host-provided agent tools; repeat the rule in the consuming project's `AGENTS.md` or equivalent host policy.
 
 ## SM Agent Reading Path
 
@@ -248,7 +260,8 @@ An SM/system-manager agent should read these documents in order before configuri
 5. `docs/planner-prompt.md`: parallel-safety and dependency policy for agents that decompose or register work.
 6. `docs/agent-prompt.md`: prompt content to attach to Codex role agents that wait for handoff or CR review work.
 7. `docs/agent-usage.md`: command examples for role setup, CR review, waits, shifts, and stop/resume operations.
-8. `docs/schema.md` or its Korean translation, `docs/schema.ko.md`: database schema and audit table reference when troubleshooting or reviewing workflow state.
+8. `docs/git-integration.md` or its Korean translation, `docs/git-integration.ko.md`: optional Git provenance, `off`/`warn`/`strict` policy, checkout, and override rules.
+9. `docs/schema.md` or its Korean translation, `docs/schema.ko.md`: database schema and audit table reference when troubleshooting or reviewing workflow state.
 
 For a new database:
 
@@ -276,6 +289,7 @@ Then:
 
 - Map the project's actual role names to Baton roles. Add missing roles with `role add` or aliases with `role alias-add`.
 - Decide which roles may review CRs. Grant `cr.review` plus action-specific permissions with `role permission-add`.
+- Require agents to delegate exclusively through Baton handoffs and prohibit direct subagent or child-task creation in the project `AGENTS.md`.
 - Add `docs/agent-prompt.md` to each Codex role agent's instructions, adjusted for that role and command path.
 - Add `docs/planner-prompt.md` to planning agents that decompose or register concurrent work.
 - Configure shifts and bounded waits using the rules in the Wait and Shift Controls sections below.
@@ -317,11 +331,21 @@ The default database is:
 .baton/baton.sqlite3
 ```
 
-Use a different database with `--db`:
+The project boundary is identified by:
+
+```text
+.baton/project.json
+```
+
+Inspect resolved paths and version metadata with `bin/baton project info`.
+
+Use a different database with `--db` for diagnostics or isolated testing:
 
 ```bash
 bin/baton --db /tmp/baton.sqlite3 init
 ```
+
+An external DB has no implicit project root. CR paths used with it must be absolute; Baton rejects relative project files rather than resolving them differently from each caller's working directory.
 
 ## Role Management
 
@@ -352,7 +376,7 @@ bin/baton role alias-add fe frontend
 bin/baton next --role fe
 ```
 
-Workflow permissions are stored separately from role membership. `sm` is seeded with all CR permissions, `handoff.cancel`, and emergency `gate.manage` authority.
+Workflow permissions are stored separately from role membership. `sm` is seeded with all CR permissions, `handoff.cancel`, emergency `gate.manage`, and `workspace.override` authority.
 
 ```bash
 bin/baton role permission-list sm
@@ -361,6 +385,7 @@ bin/baton role permission-add architecture cr.approve
 bin/baton role permission-add architecture cr.admin
 bin/baton role permission-add architecture handoff.cancel
 bin/baton role permission-add architecture gate.manage
+bin/baton role permission-add architecture workspace.override
 bin/baton role permission-remove sm cr.approve
 ```
 
@@ -372,11 +397,13 @@ bin/baton migrate --check
 bin/baton role permission-list sm
 ```
 
-Every database-backed `baton` command also applies pending migrations before its own operation. The explicit command is still recommended so migration failure is detected before agents start. Project-specific permission removals made with `role permission-remove` are preserved: a later migration adds only permissions introduced by that migration and does not restore the full default set. `baton-report` is read-only and does not migrate the database.
+Normal database-backed commands never apply pending migrations. They fail with `database migration required` until an operator runs `baton migrate`; this prevents an ordinary worker from changing shared schema unexpectedly. Project-specific permission removals made with `role permission-remove` are preserved: a later migration adds only permissions introduced by that migration and does not restore the full default set. `baton-report` is read-only and does not migrate the database.
 
 `baton update` remains a deprecated alias for database migration for compatibility with v0.1.6. Use `migrate`; the `update` name is reserved for a future Baton binary update workflow.
 
 Use `bin/baton --version` to inspect the installed CLI version. `migrate --check` performs a read-only compatibility check and exits unsuccessfully when migrations are pending or the database is incompatible.
+
+Schema migration 5 stores diagnostic `created_with_baton_version`, `last_migrated_with_baton_version`, and `last_migrated_at` values. Package versions explain which binary created or migrated a DB; `schema_migrations` remains the sole compatibility authority.
 
 ## Agent Identity
 
@@ -424,6 +451,32 @@ The default identity file is ignored by git:
 
 If multiple agents share one workspace, do not let them share the same default identity file unless they intentionally represent the same profile. In that case, use `--claimed-by` or `BATON_AGENT_ID` with the assigned profile name for each agent.
 
+## Optional Git Workspace Integration
+
+Baton remains Git-independent. Add a tracked `baton.toml` only when the project should record commit provenance and detect likely checkout mismatches:
+
+```toml
+[baton]
+required_version = ">=0.6.0.dev0,<0.7"
+
+[vcs]
+provider = "git"
+policy = "warn"
+```
+
+Without this file the effective policy is `off` and Baton does not run Git. With `provider = "git"` and no explicit policy, the default is `warn`. Use `strict` only after validating the project's branch workflow.
+
+```bash
+bin/baton workspace check
+bin/baton workspace check --job HO-YYYY-MM-DD-001
+bin/baton workspace events --job HO-YYYY-MM-DD-001
+bin/baton-report audit --job HO-YYYY-MM-DD-001
+```
+
+Configured projects record HEAD, branch, dirty state, and the ancestry baseline at handoff registration, claim, and finish. `warn` allows a mismatch and audits one warning; `strict` blocks it unless a role with `workspace.override` supplies `--accept-workspace-change`, a reason, and its authorizing role. Git checks never run in wait polling loops, and Baton never stores Git history, diffs, or source contents.
+
+See [Optional Git Workspace Integration](docs/git-integration.md) for policy semantics, version constraints, strict override syntax, checkout procedure, limits, and the [Korean guide](docs/git-integration.ko.md).
+
 ## Handoff Flow
 
 Before registering concurrent handoffs, the planning agent must follow `docs/planner-prompt.md`. Work is parallel only when inputs, write sets, contracts, shared state, and accepted completion order are independent. Otherwise, register the upstream work first and use `--depends-on`, or use a named Gate when the predecessor is not known yet. Baton enforces declared edges and atomic claims but cannot infer missing dependencies or source-level conflicts.
@@ -460,8 +513,16 @@ Claim and finish:
 
 ```bash
 bin/baton next --role frontend
+bin/baton handoff show HO-YYYY-MM-DD-001
 bin/baton claim HO-YYYY-MM-DD-001 --role frontend
 bin/baton finish HO-YYYY-MM-DD-001 --role frontend --evidence "Manual verification passed."
+```
+
+`next` is a queue hint, not the full work contract. Before claiming, use `handoff show` to read the objective, source reference, dependencies, Gates, and exit criteria. Use `handoff list` for read-only queue inspection:
+
+```bash
+bin/baton handoff list --role frontend --status open
+bin/baton handoff show HO-YYYY-MM-DD-001 --format json
 ```
 
 Inspect events:
@@ -552,7 +613,7 @@ Reviewer roles can wait for submitted CRs:
 bin/baton cr wait-review --role sm --timeout 900
 ```
 
-If the CR needs more work, request a revision. Baton creates a revision handoff for the author role, and another revision cannot be requested until the CR is resubmitted.
+If the CR needs more work, request a revision. Baton creates a revision handoff for the CR author role, includes the review reason in its objective, and prevents another revision request until the CR is resubmitted. `--assign-back` may only name that author role; delegated resubmission is not supported.
 
 ```bash
 bin/baton cr request-revision CR-YYYY-MM-DD-001 \
@@ -570,6 +631,14 @@ bin/baton cr resubmit CR-YYYY-MM-DD-001 \
 bin/baton finish HO-YYYY-MM-DD-001 \
   --role planning \
   --evidence "CR resubmitted."
+```
+
+Baton owns CR workflow state in SQLite and rewrites only managed Markdown frontmatter. Markdown replacement is atomic; if the file changes during synchronization, the command fails and preserves the concurrent human edit instead of silently overwriting it.
+
+SQLite and the filesystem cannot share one transaction. After a process crash or suspected frontmatter mismatch, reconcile the managed header from authoritative DB state without changing the body:
+
+```bash
+bin/baton cr sync CR-YYYY-MM-DD-001
 ```
 
 Approval and implementation assignment are separate decisions:
@@ -653,13 +722,19 @@ Read-only commands do not claim ownership:
 - `migrate --check`
 - `status`
 - `next`
+- `handoff list`
+- `handoff show`
 - `events`
 - `gate status`
 - `gate events`
 - `control status`
 - `shift status`
+- `workspace check`
+- `workspace events`
 - `cr status`
 - `cr events`
+
+`cr sync` reads SQLite without changing workflow state, but it does replace the CR Markdown frontmatter on disk.
 
 Read-only reporting is handled by `bin/baton-report`:
 
@@ -682,11 +757,15 @@ tests/handoff-cancel.sh
 tests/handoff-dependencies.sh
 tests/migrate.sh
 tests/project-migrate.sh
+tests/project-root.sh
+tests/multi-project.sh
+tests/handoff-inspect.sh
 tests/guides.sh
 tests/help.sh
 tests/shift.sh
 tests/report.sh
 tests/update.sh
+tests/workspace-vcs.sh
 ```
 
 Run the isolated installation test when `pipx` is available:
@@ -699,9 +778,12 @@ It installs the current checkout into a temporary pipx home, operates separate t
 
 The concurrent claim test starts two separate CLI processes against the same open job and expects exactly one claim to succeed.
 
+The multi-project test runs independent waiters and identically numbered handoffs under two Baton markers. It verifies that database files, queues, and global stop controls remain project-local. The project-root test covers Git-independent initialization, nested discovery, moves, copies, legacy adoption, report lookup, and external-DB path rejection.
+
 ## Reports
 
 `bin/baton-report` is a read-only reporting CLI for audit and summary output. It opens the SQLite database in read-only mode and must not change workflow state.
+It resolves the same nearest Baton marker as `baton`; it is not a cross-project or global report.
 
 Audit history:
 
@@ -752,7 +834,7 @@ Exit behavior:
 
 Required agent loop:
 
-1. Start or extend the role shift.
+1. Inspect the applicable shift controls. Start the default role shift only when no deadline or stopped/expired scope exists.
 2. Run a bounded `wait`.
 3. On exit `0`, run `next`, claim the returned job, complete it, and report it with `finish`.
 4. On exit `2`, check the shift and immediately start another bounded wait without reporting while the shift remains active.
@@ -793,14 +875,28 @@ See [Baton v0.5.0 idle wait resource check](docs/benchmarks/v0.5.0-idle-wait-res
 
 Shift controls define how long a role agent should keep starting new waits or claims. They do not block completion reports for work that was already in progress.
 
-Start or extend a role shift:
+Inspect a role shift, then start or extend it when policy allows:
 
 ```bash
+bin/baton shift status --role frontend
 bin/baton shift start --role frontend
 bin/baton shift extend --role frontend
 ```
 
 `shift start` defaults to `4h`. `shift extend` defaults to `1h`. Use `--duration` to override either default.
+
+Before its first wait, a worker checks the applicable global and role controls. If neither has a future deadline and neither is stopped or expired, it starts the default `4h` role shift. It preserves an existing active deadline. It must not restart, extend, or resume an expired or stopped scope without explicit user or SM authorization.
+
+Use the global scope when the same operating window applies to every role in this project:
+
+```bash
+bin/baton shift status
+bin/baton shift start --all
+bin/baton shift extend --all
+bin/baton shift end --all --reason "End of day"
+```
+
+Global and role scopes are cumulative. An expired or stopped `all` scope blocks every role even if its role shift is active, and an expired or stopped role scope blocks that role even if the global shift is active. Starting, extending, or resuming one scope does not clear the other scope.
 
 End a shift explicitly:
 
@@ -881,6 +977,10 @@ Token and auth files are stored under `.baton/gh/config/`, which is ignored by g
 - It does not import or export Markdown handoff files.
 - Handoff claim/finish authorization remains target-role based; administrative cancellation uses the separate `handoff.cancel` permission.
 - CR review actions use role permissions, but user-level authentication is outside Baton.
+- A pipx executable is user-global, but workflow state is project-local. Updating the pipx installation changes the executable used by every project, so migrate and verify each project separately before resuming agents.
+- Do not point unrelated projects at one explicit `--db` path. SQLite serializes transactions within that shared file, but project-relative CR paths, IDs, controls, and workflow ownership would also become shared.
+- Baton does not scan the filesystem, maintain a global project registry, or migrate every project after an executable update. Each project is checked when it is next used.
+- Keep active Baton databases on a local filesystem. Network mounts and file-synchronization tools may not preserve SQLite locking semantics and must not be used to coordinate agents across machines.
 - It is not the active repository handoff workflow.
 
 ## License

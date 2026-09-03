@@ -22,7 +22,9 @@ cmp "$TMP/migrate-short.txt" "$TMP/migrate-command.txt"
 grep -- '--source-db SOURCE_DB' "$TMP/migrate-command.txt" >/dev/null
 grep -- '--plan-token PLAN_TOKEN' "$TMP/migrate-command.txt" >/dev/null
 
-"$CLI" help guide show | grep '{bootstrap,worker,planner}' >/dev/null
+"$CLI" help guide show | grep '{bootstrap,worker,planner,git}' >/dev/null
+"$CLI" help workspace check | grep -- '--job JOB_ID' >/dev/null
+"$CLI" help workspace events | grep -- '--limit LIMIT' >/dev/null
 if "$CLI" help unknown-command >/dev/null 2>&1; then
   echo "ERROR: help accepted an unknown command" >&2
   exit 1
