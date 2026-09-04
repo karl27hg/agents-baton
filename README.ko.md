@@ -280,6 +280,23 @@ bin/baton retry HO-YYYY-MM-DD-001 \
 
 `in_progress` 작업을 취소하면 즉시 최종 취소되지 않고 `cancel_requested`가 됩니다. 원래 claimant는 먼저 작업을 멈추고 `events`에서 취소 요청 사유를 확인합니다. 검토 결과 기존 작업에 문제가 없다면 `handoff.cancel` 권한이 있는 planner/SM이 `cancel-withdraw HO-... --role sm --reason "..."`로 요청을 철회할 수 있습니다. 기존 claimant와 시작 시각은 유지되며, claimant는 `handoff show`에서 다시 `in_progress`가 된 것을 확인한 후 재claim 없이 이어서 작업합니다. 취소 또는 대체된 CR에 연결된 구현 작업은 원 설계가 폐기되었으므로 철회할 수 없습니다. 취소가 확정된 경우에만 claimant가 중단 내용과 남은 변경을 evidence로 기록해 `cancel-ack`를 실행합니다. claimant가 유실된 경우에만 SM이 사유와 함께 `cancel --force`를 사용합니다.
 
+### Codex peer 알림 선택 사용
+
+Baton이 Codex 메시지를 직접 보내지는 않습니다. 기존 Codex task가 `agent session-set --role <role> --agent-id <profile> --host codex --thread-id <id> --model <model>`로 자신의 런타임 주소와 모델을 등록하면 해당 프로젝트가 알림 방식을 선택한 것으로 봅니다. 안정적인 profile이 claim identity이고 thread ID와 모델명은 로컬 진단·라우팅 메타데이터일 뿐 권한을 부여하지 않습니다.
+
+선행 작업을 `finish`한 agent는 `notify targets <finished-job> --role <role> --from-agent <profile>`로 모든 의존성과 Gate가 충족된 직접 후속 작업 및 현재 다른 active handoff를 소유하지 않은 peer task 후보를 확인합니다. 후보 하나에 handoff ID와 `handoff show`·`claim` 지시를 메시지로 보낸 뒤 실제 결과를 다음처럼 기록합니다.
+
+```bash
+baton notify record HO-READY \
+  --role frontend \
+  --from-agent frontend-main \
+  --to-agent backend-main \
+  --status sent \
+  --detail "Codex가 follow-up을 수락함"
+```
+
+실패하면 `--status failed --detail <사유>`를 기록하고 다음 후보를 시도하거나 기존 `wait`/`watch`로 복구합니다. 성공 알림은 handoff마다 하나만 기록되어 반복 메시지를 막습니다. 메시지는 claim이 아니며 새 task나 subagent를 만들거나 Baton에 없는 작업을 지시해서는 안 됩니다. 성공적으로 후속 task를 깨웠다면 송신자가 그 목적만으로 계속 기다릴 필요는 없지만, CR 심사·미지정 role 작업·전송 실패에는 polling이 계속 필요합니다.
+
 `next`는 한 번만 확인하는 비대기 명령입니다. 작업이 없다는 이유로 agent가 종료되면 안 되며, shift가 활성 상태인 동안 제한된 `wait`를 반복해야 합니다.
 `next` 출력만으로 작업을 시작하지 말고 claim 전에 `handoff show`로 objective, source reference, dependency, Gate, exit criteria를 모두 확인해야 합니다. `handoff list`는 role과 status별 queue를 읽기 전용으로 조회합니다.
 

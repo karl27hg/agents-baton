@@ -88,7 +88,7 @@ FAILURE_REVIEW_PERMISSIONS = {
 KNOWN_PERMISSIONS = (
     REVIEW_PERMISSIONS | HANDOFF_PERMISSIONS | GATE_PERMISSIONS | WORKSPACE_PERMISSIONS
 )
-LATEST_SCHEMA_VERSION = 9
+LATEST_SCHEMA_VERSION = 10
 PROJECT_FORMAT_VERSION = 1
 PROJECT_MARKER_NAME = "project.json"
 PROJECT_CONFIG_NAME = "baton.toml"
@@ -312,6 +312,17 @@ def claimed_by_value(args: argparse.Namespace, role: str) -> str:
         return explicit.strip()
     stored = read_agent_id(args)
     return stored or role
+
+
+def agent_id_value(args: argparse.Namespace, option_name: str = "agent_id") -> str:
+    explicit = getattr(args, option_name, "") or ""
+    agent_id = explicit.strip() or read_agent_id(args)
+    if not agent_id:
+        raise SystemExit(
+            "ERROR: agent identity is required; use --agent-id, BATON_AGENT_ID, "
+            "or 'baton agent init'"
+        )
+    return agent_id
 
 
 SCHEMA_V1_SQL = """
@@ -780,6 +791,57 @@ def migration_v9_plan_revision_controls(con: sqlite3.Connection) -> None:
         con.execute("PRAGMA legacy_alter_table = OFF")
 
 
+def migration_v10_opt_in_thread_notifications(con: sqlite3.Connection) -> None:
+    execute_sql_script(
+        con,
+        """
+        create table if not exists agent_sessions (
+          session_id text primary key,
+          agent_id text not null,
+          role_id text not null references roles(role_id),
+          host text not null,
+          thread_id text not null,
+          model text not null,
+          status text not null check (status in ('active', 'inactive')),
+          created_at text not null,
+          updated_at text not null,
+          ended_at text,
+          end_reason text,
+          unique(host, thread_id)
+        );
+
+        create unique index if not exists idx_agent_sessions_active_agent
+          on agent_sessions(agent_id) where status = 'active';
+        create index if not exists idx_agent_sessions_role_status
+          on agent_sessions(role_id, status, updated_at);
+
+        create table if not exists handoff_notifications (
+          id integer primary key autoincrement,
+          job_id text not null references handoff_jobs(job_id) on delete cascade,
+          sender_session_id text not null references agent_sessions(session_id),
+          recipient_session_id text not null references agent_sessions(session_id),
+          sender_agent_id text not null,
+          sender_model text not null,
+          recipient_agent_id text not null,
+          recipient_thread_id text not null,
+          recipient_model text not null,
+          transport text not null,
+          delivery_status text not null check (delivery_status in ('sent', 'failed')),
+          message_ref text,
+          detail text,
+          created_at text not null
+        );
+
+        create index if not exists idx_handoff_notifications_job
+          on handoff_notifications(job_id, id);
+        create unique index if not exists idx_handoff_notifications_sent_job
+          on handoff_notifications(job_id) where delivery_status = 'sent';
+        create index if not exists idx_handoff_notifications_recipient
+          on handoff_notifications(recipient_agent_id, created_at);
+        """,
+    )
+
+
 MIGRATIONS = (
     (1, "initial_schema", migration_v1_initial_schema),
     (2, "handoff_cancel_permission", migration_v2_handoff_cancel_permission),
@@ -790,6 +852,7 @@ MIGRATIONS = (
     (7, "handoff_failures", migration_v7_handoff_failures),
     (8, "cr_body_integrity", migration_v8_cr_body_integrity),
     (9, "plan_revision_controls", migration_v9_plan_revision_controls),
+    (10, "opt_in_thread_notifications", migration_v10_opt_in_thread_notifications),
 )
 
 
@@ -2839,6 +2902,170 @@ def command_agent_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def active_agent_session(con: sqlite3.Connection, agent_id: str) -> sqlite3.Row | None:
+    return con.execute(
+        """
+        select *
+        from agent_sessions
+        where agent_id = ? and status = 'active'
+        order by updated_at desc
+        limit 1
+        """,
+        (agent_id,),
+    ).fetchone()
+
+
+def command_agent_session_set(args: argparse.Namespace) -> int:
+    agent_id = agent_id_value(args)
+    host = args.host.strip()
+    thread_id = args.thread_id.strip()
+    model = args.model.strip()
+    if not host or not thread_id or not model:
+        raise SystemExit("ERROR: --host, --thread-id, and --model cannot be blank")
+    with connect(args.db) as con:
+        init_schema(con)
+        begin_immediate(con)
+        role = resolve_role(con, args.role)
+        endpoint = con.execute(
+            "select * from agent_sessions where host = ? and thread_id = ?",
+            (host, thread_id),
+        ).fetchone()
+        if endpoint and endpoint["agent_id"] != agent_id:
+            raise SystemExit(
+                f"ERROR: {host} thread {thread_id} is already bound to agent {endpoint['agent_id']}"
+            )
+        active = active_agent_session(con, agent_id)
+        same_endpoint = bool(active and active["host"] == host and active["thread_id"] == thread_id)
+        if active and not same_endpoint and not args.replace:
+            raise SystemExit(
+                f"ERROR: agent {agent_id} already has active session {active['session_id']} "
+                f"at {active['host']}:{active['thread_id']}; use --replace after verifying the new thread"
+            )
+        now = utc_now()
+        if active and not same_endpoint:
+            con.execute(
+                """
+                update agent_sessions
+                set status = 'inactive', updated_at = ?, ended_at = ?, end_reason = ?
+                where session_id = ?
+                """,
+                (now, now, f"replaced by {host}:{thread_id}", active["session_id"]),
+            )
+            event(
+                con,
+                "agent_session_replaced",
+                actor_role=role,
+                actor_id=agent_id,
+                message=f"{active['session_id']} -> {host}:{thread_id}",
+            )
+        if endpoint:
+            session_id = endpoint["session_id"]
+            con.execute(
+                """
+                update agent_sessions
+                set role_id = ?, model = ?, status = 'active', updated_at = ?,
+                    ended_at = null, end_reason = null
+                where session_id = ?
+                """,
+                (role, model, now, session_id),
+            )
+        else:
+            session_id = str(uuid.uuid4())
+            con.execute(
+                """
+                insert into agent_sessions(
+                  session_id, agent_id, role_id, host, thread_id, model,
+                  status, created_at, updated_at
+                ) values (?, ?, ?, ?, ?, ?, 'active', ?, ?)
+                """,
+                (session_id, agent_id, role, host, thread_id, model, now, now),
+            )
+        event(
+            con,
+            "agent_session_active",
+            actor_role=role,
+            actor_id=agent_id,
+            message=f"session={session_id} host={host} thread={thread_id} model={model}",
+        )
+        con.commit()
+    print(
+        f"{session_id}\tactive\t{agent_id}\t{role}\t{host}\t{thread_id}\t{model}"
+    )
+    return 0
+
+
+def command_agent_session_end(args: argparse.Namespace) -> int:
+    agent_id = agent_id_value(args)
+    reason = args.reason.strip()
+    if not reason:
+        raise SystemExit("ERROR: --reason cannot be blank")
+    with connect(args.db) as con:
+        init_schema(con)
+        begin_immediate(con)
+        session = active_agent_session(con, agent_id)
+        if not session:
+            raise SystemExit(f"ERROR: no active session for agent {agent_id}")
+        now = utc_now()
+        con.execute(
+            """
+            update agent_sessions
+            set status = 'inactive', updated_at = ?, ended_at = ?, end_reason = ?
+            where session_id = ?
+            """,
+            (now, now, reason, session["session_id"]),
+        )
+        event(
+            con,
+            "agent_session_inactive",
+            actor_role=session["role_id"],
+            actor_id=agent_id,
+            message=f"session={session['session_id']} reason={reason}",
+        )
+        con.commit()
+    print(f"{session['session_id']}\tinactive\t{agent_id}")
+    return 0
+
+
+def command_agent_session_list(args: argparse.Namespace) -> int:
+    conditions: list[str] = []
+    params: list[object] = []
+    with connect(args.db) as con:
+        init_schema(con)
+        if args.role:
+            conditions.append("role_id = ?")
+            params.append(resolve_role(con, args.role))
+        if args.status:
+            conditions.append("status = ?")
+            params.append(args.status)
+        if args.agent_id:
+            conditions.append("agent_id = ?")
+            params.append(args.agent_id.strip())
+        where = f"where {' and '.join(conditions)}" if conditions else ""
+        rows = con.execute(
+            f"""
+            select session_id, status, agent_id, role_id, host, thread_id, model,
+                   created_at, updated_at, ended_at, end_reason
+            from agent_sessions
+            {where}
+            order by case status when 'active' then 0 else 1 end, updated_at desc, session_id
+            """,
+            params,
+        ).fetchall()
+    payload = [{key: row[key] for key in row.keys()} for row in rows]
+    if args.format == "json":
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0
+    if not rows:
+        print("No agent sessions.")
+        return 0
+    for row in rows:
+        print(
+            f"{row['session_id']}\t{row['status']}\t{row['agent_id']}\t{row['role_id']}\t"
+            f"{row['host']}\t{row['thread_id']}\t{row['model']}\t{row['updated_at']}"
+        )
+    return 0
+
+
 def create_handoff_job(
     con: sqlite3.Connection,
     title: str,
@@ -4524,6 +4751,327 @@ def command_cancel_withdraw(args: argparse.Namespace) -> int:
     return 0
 
 
+def promote_ready_direct_dependents(
+    con: sqlite3.Connection,
+    source_job_id: str,
+    actor_role: str,
+) -> list[str]:
+    rows = con.execute(
+        """
+        select distinct job.job_id
+        from handoff_jobs job
+        join handoff_dependencies direct on direct.job_id = job.job_id
+        where direct.depends_on_job_id = ?
+          and job.status = 'blocked'
+          and not exists (
+            select 1
+            from handoff_dependencies dependency
+            join handoff_jobs upstream on upstream.job_id = dependency.depends_on_job_id
+            where dependency.job_id = job.job_id and upstream.status != 'finished'
+          )
+          and not exists (
+            select 1
+            from handoff_gate_dependencies gate_dependency
+            join workflow_gates gate on gate.gate_name = gate_dependency.gate_name
+            where gate_dependency.job_id = job.job_id and gate.status != 'released'
+          )
+        order by job.job_id
+        """,
+        (source_job_id,),
+    ).fetchall()
+    promoted: list[str] = []
+    for row in rows:
+        changed = con.execute(
+            "update handoff_jobs set status = 'open' where job_id = ? and status = 'blocked'",
+            (row["job_id"],),
+        ).rowcount
+        if not changed:
+            continue
+        event(
+            con,
+            "promoted",
+            job_id=row["job_id"],
+            actor_role=actor_role,
+            from_status="blocked",
+            to_status="open",
+            message=f"Ready after {source_job_id}; opt-in notification planning.",
+        )
+        promoted.append(row["job_id"])
+    return promoted
+
+
+def command_notify_targets(args: argparse.Namespace) -> int:
+    sender_agent_id = agent_id_value(args, "from_agent")
+    with connect(args.db) as con:
+        init_schema(con)
+        begin_immediate(con)
+        actor_role = resolve_role(con, args.role)
+        sender = active_agent_session(con, sender_agent_id)
+        if not sender:
+            raise SystemExit(
+                f"ERROR: no active session for sender {sender_agent_id}; "
+                "run 'baton agent session-set' first"
+            )
+        if sender["role_id"] != actor_role:
+            raise SystemExit(
+                f"ERROR: sender {sender_agent_id} session role is {sender['role_id']}, not {actor_role}"
+            )
+        source = con.execute(
+            "select status, target_role from handoff_jobs where job_id = ?",
+            (args.job_id,),
+        ).fetchone()
+        if not source:
+            raise SystemExit(f"ERROR: unknown job: {args.job_id}")
+        if source["status"] != "finished":
+            raise SystemExit(
+                f"ERROR: notification source is not finished: {args.job_id} status={source['status']}"
+            )
+        if source["target_role"] != actor_role:
+            can_register = con.execute(
+                "select 1 from role_permissions where role_id = ? and permission = 'handoff.register'",
+                (actor_role,),
+            ).fetchone()
+            if not can_register:
+                raise SystemExit(
+                    f"ERROR: source role is {source['target_role']}; {actor_role} lacks handoff.register"
+                )
+        promote_ready_direct_dependents(con, args.job_id, actor_role)
+        jobs = con.execute(
+            """
+            select distinct job.job_id, job.target_role, job.title
+            from handoff_jobs job
+            join handoff_dependencies direct on direct.job_id = job.job_id
+            where direct.depends_on_job_id = ? and job.status = 'open'
+            order by job.created_at, job.job_id
+            """,
+            (args.job_id,),
+        ).fetchall()
+        payload: list[dict[str, object]] = []
+        for job in jobs:
+            notified = con.execute(
+                """
+                select recipient_agent_id, recipient_thread_id, recipient_model, transport, created_at
+                from handoff_notifications
+                where job_id = ? and delivery_status = 'sent'
+                order by id desc
+                limit 1
+                """,
+                (job["job_id"],),
+            ).fetchone()
+            if notified:
+                payload.append(
+                    {
+                        "job_id": job["job_id"],
+                        "target_role": job["target_role"],
+                        "title": job["title"],
+                        "state": "already_notified",
+                        "agent_id": notified["recipient_agent_id"],
+                        "host": notified["transport"],
+                        "thread_id": notified["recipient_thread_id"],
+                        "model": notified["recipient_model"],
+                    }
+                )
+                continue
+            sessions = con.execute(
+                """
+                select agent_id, host, thread_id, model
+                from agent_sessions session
+                where role_id = ? and status = 'active' and agent_id != ?
+                  and not exists (
+                    select 1
+                    from handoff_jobs busy
+                    where busy.claimed_by = session.agent_id
+                      and busy.status in ('in_progress', 'cancel_requested')
+                  )
+                order by updated_at desc, agent_id
+                """,
+                (job["target_role"], sender_agent_id),
+            ).fetchall()
+            if not sessions:
+                payload.append(
+                    {
+                        "job_id": job["job_id"],
+                        "target_role": job["target_role"],
+                        "title": job["title"],
+                        "state": "no_active_peer_session",
+                        "agent_id": "",
+                        "host": "",
+                        "thread_id": "",
+                        "model": "",
+                    }
+                )
+                continue
+            for session in sessions:
+                payload.append(
+                    {
+                        "job_id": job["job_id"],
+                        "target_role": job["target_role"],
+                        "title": job["title"],
+                        "state": "candidate",
+                        "agent_id": session["agent_id"],
+                        "host": session["host"],
+                        "thread_id": session["thread_id"],
+                        "model": session["model"],
+                    }
+                )
+        con.commit()
+    if args.format == "json":
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    elif not payload:
+        print("No ready direct dependent handoffs.")
+    else:
+        for item in payload:
+            print(
+                f"{item['job_id']}\t{item['target_role']}\t{item['state']}\t"
+                f"{item['agent_id']}\t{item['host']}\t{item['thread_id']}\t"
+                f"{item['model']}\t{item['title']}"
+            )
+    return 0 if payload else 1
+
+
+def command_notify_record(args: argparse.Namespace) -> int:
+    sender_agent_id = agent_id_value(args, "from_agent")
+    recipient_agent_id = args.to_agent.strip()
+    detail = args.detail.strip()
+    message_ref = args.message_ref.strip()
+    if not recipient_agent_id:
+        raise SystemExit("ERROR: --to-agent cannot be blank")
+    if args.status == "failed" and not detail:
+        raise SystemExit("ERROR: --detail is required for a failed notification")
+    with connect(args.db) as con:
+        init_schema(con)
+        begin_immediate(con)
+        actor_role = resolve_role(con, args.role)
+        job = con.execute(
+            "select status, target_role, claimed_by from handoff_jobs where job_id = ?",
+            (args.job_id,),
+        ).fetchone()
+        if not job:
+            raise SystemExit(f"ERROR: unknown job: {args.job_id}")
+        sender = active_agent_session(con, sender_agent_id)
+        if not sender:
+            raise SystemExit(f"ERROR: no active session for sender {sender_agent_id}")
+        if sender["role_id"] != actor_role:
+            raise SystemExit(
+                f"ERROR: sender {sender_agent_id} session role is {sender['role_id']}, not {actor_role}"
+            )
+        recipient = active_agent_session(con, recipient_agent_id)
+        if not recipient:
+            raise SystemExit(f"ERROR: no active session for recipient {recipient_agent_id}")
+        if recipient["role_id"] != job["target_role"]:
+            raise SystemExit(
+                f"ERROR: recipient role is {recipient['role_id']}, "
+                f"but handoff target role is {job['target_role']}"
+            )
+        if sender["session_id"] == recipient["session_id"]:
+            raise SystemExit("ERROR: opt-in notification requires a different recipient session")
+        if args.status == "sent":
+            if job["status"] not in {"open", "in_progress"}:
+                raise SystemExit(
+                    f"ERROR: cannot record a sent notification for {args.job_id} status={job['status']}"
+                )
+            if job["status"] == "in_progress" and job["claimed_by"] != recipient_agent_id:
+                raise SystemExit(
+                    f"ERROR: handoff is already claimed by {job['claimed_by']}, not {recipient_agent_id}"
+                )
+            existing = con.execute(
+                "select recipient_agent_id from handoff_notifications "
+                "where job_id = ? and delivery_status = 'sent'",
+                (args.job_id,),
+            ).fetchone()
+            if existing:
+                raise SystemExit(
+                    f"ERROR: handoff was already notified successfully to {existing['recipient_agent_id']}"
+                )
+        cursor = con.execute(
+            """
+            insert into handoff_notifications(
+              job_id, sender_session_id, recipient_session_id,
+              sender_agent_id, sender_model, recipient_agent_id,
+              recipient_thread_id, recipient_model, transport,
+              delivery_status, message_ref, detail, created_at
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                args.job_id,
+                sender["session_id"],
+                recipient["session_id"],
+                sender_agent_id,
+                sender["model"],
+                recipient_agent_id,
+                recipient["thread_id"],
+                recipient["model"],
+                recipient["host"],
+                args.status,
+                message_ref,
+                detail,
+                utc_now(),
+            ),
+        )
+        event_message = (
+            f"recipient={recipient_agent_id} host={recipient['host']} "
+            f"thread={recipient['thread_id']} model={recipient['model']}"
+        )
+        if message_ref:
+            event_message += f" message_ref={message_ref}"
+        if detail:
+            event_message += f" detail={detail}"
+        event(
+            con,
+            f"notification_{args.status}",
+            job_id=args.job_id,
+            actor_role=actor_role,
+            actor_id=sender_agent_id,
+            from_status=job["status"],
+            to_status=job["status"],
+            message=event_message,
+        )
+        notification_id = cursor.lastrowid
+        con.commit()
+    print(f"notification={notification_id}\t{args.status}\t{args.job_id}\t{recipient_agent_id}")
+    return 0
+
+
+def command_notify_list(args: argparse.Namespace) -> int:
+    conditions: list[str] = []
+    params: list[object] = []
+    if args.job_id:
+        conditions.append("job_id = ?")
+        params.append(args.job_id)
+    if args.status:
+        conditions.append("delivery_status = ?")
+        params.append(args.status)
+    where = f"where {' and '.join(conditions)}" if conditions else ""
+    with connect(args.db) as con:
+        init_schema(con)
+        rows = con.execute(
+            f"""
+            select id, job_id, delivery_status, sender_agent_id, sender_model,
+                   recipient_agent_id, recipient_thread_id, recipient_model,
+                   transport, message_ref, detail, created_at
+            from handoff_notifications
+            {where}
+            order by id
+            """,
+            params,
+        ).fetchall()
+    payload = [{key: row[key] for key in row.keys()} for row in rows]
+    if args.format == "json":
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0
+    if not rows:
+        print("No notifications.")
+        return 0
+    for row in rows:
+        print(
+            f"{row['id']}\t{row['job_id']}\t{row['delivery_status']}\t"
+            f"{row['sender_agent_id']}\t{row['recipient_agent_id']}\t"
+            f"{row['transport']}\t{row['recipient_thread_id']}\t"
+            f"{row['recipient_model']}\t{row['created_at']}\t{row['detail'] or ''}"
+        )
+    return 0
+
+
 def promote_ready_handoffs_for_gate(
     con: sqlite3.Connection,
     gate_name: str,
@@ -5033,6 +5581,37 @@ def build_parser() -> argparse.ArgumentParser:
     agent_init.add_argument("--force", action="store_true")
     agent_init.set_defaults(func=command_agent_init)
     agent_sub.add_parser("show").set_defaults(func=command_agent_show)
+    agent_session_set = agent_sub.add_parser(
+        "session-set",
+        help="register this agent's opt-in host thread and model",
+    )
+    agent_session_set.add_argument("--role", required=True)
+    agent_session_set.add_argument("--agent-id", default="")
+    agent_session_set.add_argument("--host", default="codex")
+    agent_session_set.add_argument("--thread-id", required=True)
+    agent_session_set.add_argument("--model", required=True)
+    agent_session_set.add_argument(
+        "--replace",
+        action="store_true",
+        help="deactivate this agent's previous active session after verifying the new thread",
+    )
+    agent_session_set.set_defaults(func=command_agent_session_set)
+    agent_session_end = agent_sub.add_parser(
+        "session-end",
+        help="deactivate this agent's current notification endpoint",
+    )
+    agent_session_end.add_argument("--agent-id", default="")
+    agent_session_end.add_argument("--reason", required=True)
+    agent_session_end.set_defaults(func=command_agent_session_end)
+    agent_session_list = agent_sub.add_parser(
+        "session-list",
+        help="list recorded runtime sessions and model metadata",
+    )
+    agent_session_list.add_argument("--role", default="")
+    agent_session_list.add_argument("--agent-id", default="")
+    agent_session_list.add_argument("--status", choices=("active", "inactive"), default="")
+    agent_session_list.add_argument("--format", choices=("text", "json"), default="text")
+    agent_session_list.set_defaults(func=command_agent_session_list)
 
     register = sub.add_parser("register", help="register a handoff job")
     register.add_argument("--title", required=True)
@@ -5289,6 +5868,38 @@ def build_parser() -> argparse.ArgumentParser:
     cancel_withdraw.add_argument("--role", required=True)
     cancel_withdraw.add_argument("--reason", required=True)
     cancel_withdraw.set_defaults(func=command_cancel_withdraw)
+
+    notify = sub.add_parser(
+        "notify",
+        help="plan and record opt-in peer-thread notifications",
+    )
+    notify_sub = notify.add_subparsers(dest="notify_command", required=True)
+    notify_targets = notify_sub.add_parser(
+        "targets",
+        help="show ready direct dependents and ranked active peer sessions",
+    )
+    notify_targets.add_argument("job_id", help="finished source handoff")
+    notify_targets.add_argument("--role", required=True, help="role planning the notification")
+    notify_targets.add_argument("--from-agent", default="")
+    notify_targets.add_argument("--format", choices=("text", "json"), default="text")
+    notify_targets.set_defaults(func=command_notify_targets)
+    notify_record = notify_sub.add_parser(
+        "record",
+        help="record the result after the agent attempts a host message",
+    )
+    notify_record.add_argument("job_id", help="ready handoff named in the message")
+    notify_record.add_argument("--role", required=True, help="sender role")
+    notify_record.add_argument("--from-agent", default="")
+    notify_record.add_argument("--to-agent", required=True)
+    notify_record.add_argument("--status", choices=("sent", "failed"), required=True)
+    notify_record.add_argument("--message-ref", default="")
+    notify_record.add_argument("--detail", default="")
+    notify_record.set_defaults(func=command_notify_record)
+    notify_list = notify_sub.add_parser("list", help="list notification delivery audit records")
+    notify_list.add_argument("--job", dest="job_id", default="")
+    notify_list.add_argument("--status", choices=("sent", "failed"), default="")
+    notify_list.add_argument("--format", choices=("text", "json"), default="text")
+    notify_list.set_defaults(func=command_notify_list)
 
     events = sub.add_parser("events", help="show one handoff audit history")
     events.add_argument("job_id")

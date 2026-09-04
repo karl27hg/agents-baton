@@ -12,9 +12,11 @@ Use this guide when an agent must verify or initialize a project that uses a pip
 ## Delegation Policy
 
 - While operating under Baton, do not create subagents, child tasks, parallel agent sessions, or delegated background agents.
-- Do not use multi-agent or thread-creation tools to delegate Baton work.
+- Do not use thread-creation tools to delegate Baton work.
 - Delegate work only by registering Baton handoffs for configured project roles.
 - A planner may register independent handoffs for parallel execution, but must not create or invoke the agents that execute them.
+- When the project explicitly enables opt-in Codex peer notification, an agent may send a follow-up to an existing task recorded by `agent session-set`. The message must name a ready Baton handoff, and the receiver must inspect and claim it; notification is not permission or delegation state.
+- Record each attempted host message with `notify record`. A failed or unavailable endpoint falls back to `wait`/`watch`.
 - If no eligible role is available, wait or report the blocker to the SM or user. Do not bypass Baton by creating a subagent.
 
 Baton cannot disable tools provided by the agent host. The project `AGENTS.md` or equivalent host policy must repeat this rule when technical enforcement is required.
@@ -143,6 +145,6 @@ baton guide show planner
 
 Before a worker's first wait, require it to inspect `shift status --role <role>`. A worker may create the default `4h` role shift only when no applicable deadline or stopped/expired scope exists. Existing active deadlines are preserved, and expired or stopped role/global scopes require explicit user or SM authorization before restart, extension, or resume.
 
-Require planner/SM roles that receive both CR reviews and handoffs to use `watch` rather than alternating long independent waits. Require every active claimant to inspect its handoff before commit, integration, and completion. On `cancel_requested`, the claimant pauses and inspects the reason; it resumes only after an authorized `cancel-withdraw` restores `in_progress`, or uses `cancel-ack` after cancellation is confirmed. It must not report `finish` or `fail` while cancellation is requested.
+Require planner/SM roles that receive both CR reviews and handoffs to use `watch` rather than alternating long independent waits unless every applicable successor has a recorded successful opt-in notification. CR monitoring, unassigned role work, and notification failures retain the polling fallback. Require every active claimant to inspect its handoff before commit, integration, and completion. On `cancel_requested`, the claimant pauses and inspects the reason; it resumes only after an authorized `cancel-withdraw` restores `in_progress`, or uses `cancel-ack` after cancellation is confirmed. It must not report `finish` or `fail` while cancellation is requested.
 
 Project `AGENTS.md` should require these guides and define the assigned role. If a command, version, path, migration plan, or authority decision is unclear, stop and ask the user or SM instead of guessing.

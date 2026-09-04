@@ -25,6 +25,8 @@ Tables:
 - `handoff_failure_reviews`: failed handoff links to decision CRs and their resolution
 - `handoff_controls`: stop/resume controls for wait loops
 - `waiter_leases`: short-lived handoff and CR waiter heartbeats for automatic polling intervals
+- `agent_sessions`: opt-in runtime host thread and model metadata for stable agent profiles
+- `handoff_notifications`: audited peer-thread message delivery results
 - `workspace_events`: optional Git commit provenance and policy outcomes for handoff transitions
 - `change_requests`: CR workflow state and Markdown file pointer
 - `cr_events`: audit log of CR state changes
@@ -64,6 +66,7 @@ Known migrations:
 7 handoff_failures
 8 cr_body_integrity
 9 plan_revision_controls
+10 opt_in_thread_notifications
 ```
 
 `baton migrate --check` performs a read-only check that the database is at the latest known schema version.
@@ -398,6 +401,9 @@ role_added
 role_alias_added
 role_permission_added
 role_permission_removed
+agent_session_active
+agent_session_replaced
+agent_session_inactive
 registered
 claimed
 finished
@@ -414,6 +420,8 @@ control_resumed
 shift_started
 shift_extended
 shift_ended
+notification_sent
+notification_failed
 ```
 
 Claim event example:
@@ -497,6 +505,61 @@ Behavior:
 - A numeric `--interval` remains fixed for that process, but its lease is included in the count used by automatic waiters.
 - A fixed interval over 25 seconds uses a lease of `interval + 5` seconds so a healthy sleeping process is not removed as stale.
 - Lease rows are not included in `baton-report` audit or workflow summaries.
+
+## `agent_sessions`
+
+Purpose:
+
+- Maps a stable Baton agent profile to one active runtime endpoint when peer notification is explicitly used.
+- Records the host, thread ID, role, and model needed for an agent to select an existing Codex task.
+- Keeps inactive endpoint history without treating runtime IDs as authorization or durable identity.
+
+Columns:
+
+| Column | Type | Required | Purpose |
+| --- | --- | --- | --- |
+| `session_id` | `text primary key` | yes | Baton-generated runtime-session UUID. |
+| `agent_id` | `text` | yes | Stable profile identity also used by `claimed_by`. |
+| `role_id` | `text` | yes | Canonical role advertised by the session. |
+| `host` | `text` | yes | Messaging host, initially `codex`. |
+| `thread_id` | `text` | yes | Host-specific existing task identifier. |
+| `model` | `text` | yes | Exact model metadata supplied at registration. |
+| `status` | `text` | yes | `active` or `inactive`. |
+| `created_at` | `text` | yes | Initial registration time. |
+| `updated_at` | `text` | yes | Latest registration or lifecycle update. |
+| `ended_at` | `text` | no | Time an endpoint was deactivated. |
+| `end_reason` | `text` | no | Audited reason for deactivation or replacement. |
+
+`unique(host, thread_id)` prevents one host thread from representing two profiles, and a partial unique index permits only one active endpoint per `agent_id`. Replacing a session requires explicit `--replace`. `active` means addressable by a future follow-up, not currently executing.
+
+## `handoff_notifications`
+
+Purpose:
+
+- Records the result after an agent attempts to notify an existing peer thread.
+- Snapshots sender and recipient profile/model metadata for audit.
+- Prevents repeated successful wake-up messages without changing handoff ownership.
+
+Columns:
+
+| Column | Type | Required | Purpose |
+| --- | --- | --- | --- |
+| `id` | `integer primary key autoincrement` | yes | Delivery-attempt sequence. |
+| `job_id` | `text` | yes | Ready receiving handoff named in the message. |
+| `sender_session_id` | `text` | yes | Sending runtime session. |
+| `recipient_session_id` | `text` | yes | Selected existing peer runtime session. |
+| `sender_agent_id` | `text` | yes | Stable sender profile snapshot. |
+| `sender_model` | `text` | yes | Sender model snapshot. |
+| `recipient_agent_id` | `text` | yes | Stable recipient profile snapshot. |
+| `recipient_thread_id` | `text` | yes | Host task that received the attempt. |
+| `recipient_model` | `text` | yes | Recipient model snapshot. |
+| `transport` | `text` | yes | Runtime host used for delivery. |
+| `delivery_status` | `text` | yes | `sent` or `failed`. |
+| `message_ref` | `text` | no | Optional host delivery/message reference. |
+| `detail` | `text` | no | Result detail; required by CLI for failures. |
+| `created_at` | `text` | yes | Attempt time. |
+
+A partial unique index permits at most one `sent` row per handoff. Failed attempts remain available for fallback diagnosis. `notify targets` may promote only ready direct dependents of its finished source and returns active peer candidates that do not currently own an `in_progress` or `cancel_requested` handoff; it does not send a message. `notify record` records what the agent reports after using a host messaging tool. Neither operation claims the handoff. Authentication tokens and message bodies are not stored.
 
 ## `change_requests`
 
@@ -628,6 +691,11 @@ idx_handoff_events_job on handoff_events(job_id)
 idx_handoff_gate_dependencies_job on handoff_gate_dependencies(job_id)
 idx_handoff_gate_dependencies_gate on handoff_gate_dependencies(gate_name)
 idx_gate_events_gate on gate_events(gate_name)
+idx_agent_sessions_active_agent on agent_sessions(agent_id) where status = 'active'
+idx_agent_sessions_role_status on agent_sessions(role_id, status, updated_at)
+idx_handoff_notifications_job on handoff_notifications(job_id, id)
+idx_handoff_notifications_sent_job on handoff_notifications(job_id) where delivery_status = 'sent'
+idx_handoff_notifications_recipient on handoff_notifications(recipient_agent_id, created_at)
 idx_cr_status_reviewer on change_requests(status, reviewer_role)
 idx_cr_handoffs_cr on cr_handoffs(cr_id)
 ```
@@ -640,18 +708,21 @@ Purpose:
 - `events.job_id`: Fast event history lookup.
 - `handoff_gate_dependencies`: Fast Gate checks by job and dependent-job lookup by Gate.
 - `gate_events.gate_name`: Fast Gate audit history lookup.
+- `agent_sessions`: Unique active profile endpoints and fast role candidate lookup.
+- `handoff_notifications`: Fast job/recipient audit lookup and one successful delivery per job.
 - `cr.status, reviewer_role`: Fast `cr wait-review` lookup.
 - `cr_handoffs.cr_id`: Fast implementation completion checks.
 
 ## Identity Model
 
-The database records `claimed_by` on `handoff_jobs` and `actor_id` on `handoff_events`.
+The database records `claimed_by` on `handoff_jobs`, `actor_id` on `handoff_events`, and opt-in runtime/model metadata in `agent_sessions` and `handoff_notifications`.
 
 Policy:
 
 - Use a stable profile name as the long-lived identity.
 - Examples: `frontend-main`, `qa-regression`, `sm`.
 - Do not rely on Codex thread IDs, turn IDs, or temporary files as the only long-lived identity.
+- Thread IDs and model names are notification metadata, not routing authority or permission inputs.
 
 CLI identity resolution order:
 

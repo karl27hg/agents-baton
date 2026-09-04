@@ -47,9 +47,11 @@ If several agents share the same workspace, do not let them unintentionally shar
 ## Delegation Rules
 
 - Do not create subagents, child tasks, parallel agent sessions, or delegated background agents while operating under Baton.
-- Do not use multi-agent or thread-creation tools to delegate claimed work.
+- Do not use thread-creation tools to delegate claimed work.
 - Do not ask another agent to act under your Baton identity.
 - When work must move to another role, report the required handoff to the planner, SM, or user so it can be registered in Baton.
+- In a project that explicitly enables opt-in peer notification, you may send a follow-up message to an existing registered Codex thread after the receiving handoff is ready. This is a wake-up notification, not delegation authority: include the handoff ID and require the receiver to inspect and claim it in Baton.
+- Never create a new thread for notification, send unregistered work, or treat successful message delivery as a claim.
 - If no eligible role is available, report the blocker and wait. Do not bypass Baton delegation.
 
 Baton records and authorizes workflow operations, but cannot disable tools supplied by the agent host. Treat the project `AGENTS.md` or equivalent host policy as the enforcement layer for this rule.
@@ -107,8 +109,52 @@ Shift handling:
 - If the shift is expired or stopped, do not re-enter wait.
 - If work was already claimed, finish or report failure even if the shift expires before the report is submitted, unless the handoff changed to `cancel_requested`.
 - After a successful `finish`, `fail`, or CR review action, report the transition once, check shift status, and re-enter the appropriate bounded wait only if the shift is still active.
+- In opt-in Codex peer-notification mode, a successful notification of ready successor work removes the need for the sender to wait solely to wake that successor. Keep waiting only for the sender's own remaining role obligations, CR monitoring, or notification fallback.
 
 A global shift uses `shift start --all`, `shift extend --all`, and `shift end --all`. Global and role scopes are cumulative controls: either scope can stop a role. Changing one scope does not clear an expired or stopped state on the other scope.
+
+## Opt-In Codex Peer Notification
+
+Use this only when the project explicitly enables it and the host can send a follow-up to an existing Codex task. Register the stable profile's current runtime endpoint and exact model when known:
+
+```bash
+baton agent session-set \
+  --role <role> \
+  --agent-id <profile-name> \
+  --host codex \
+  --thread-id <codex-thread-id> \
+  --model <model-id>
+```
+
+The profile name remains the durable identity. The thread ID and model are runtime metadata only. `active` means the thread may receive a future follow-up; it does not mean the model is currently executing. Use `--replace` only after verifying a replacement thread, and use `agent session-end --reason ...` when the endpoint must no longer receive work.
+
+After finishing a handoff, find ready direct dependents and ranked peer candidates:
+
+```bash
+baton notify targets <finished-job-id> \
+  --role <role> \
+  --from-agent <profile-name>
+```
+
+`notify targets` promotes only eligible direct dependents of the finished job and excludes peer profiles that already own active work. It never bypasses unfinished dependencies or pending Gates. Send one existing peer task a concise message such as:
+
+```text
+Baton handoff HO-... is ready. Run `baton handoff show HO-...`, verify the source and dependencies, then claim it before editing.
+```
+
+After the host message attempt, record the actual result:
+
+```bash
+baton notify record HO-... \
+  --role <sender-role> \
+  --from-agent <sender-profile> \
+  --to-agent <recipient-profile> \
+  --status sent \
+  --message-ref <host-message-id> \
+  --detail "Codex accepted the follow-up."
+```
+
+For an error, use `--status failed --detail <reason>`, then try the next listed candidate or fall back to the receiver's normal `wait`/`watch` loop. Baton permits only one successful notification record per handoff to suppress duplicate wake-ups. A delivered message never changes the handoff to `in_progress`; only `claim` does that.
 
 ## Claim Rules
 

@@ -466,6 +466,52 @@ The default identity file is ignored by git:
 
 If multiple agents share one workspace, do not let them share the same default identity file unless they intentionally represent the same profile. In that case, use `--claimed-by` or `BATON_AGENT_ID` with the assigned profile name for each agent.
 
+## Opt-In Codex Peer Notifications
+
+Baton remains a persistent queue and does not call Codex itself. A project opts in when its existing Codex tasks register runtime endpoints. The agent sends the host message, then records the delivery result in Baton.
+
+Register the stable profile's current Codex task and model:
+
+```bash
+bin/baton agent session-set \
+  --role frontend \
+  --agent-id frontend-main \
+  --host codex \
+  --thread-id <codex-thread-id> \
+  --model <model-id>
+```
+
+`agent_id` remains the durable identity used by claims. Thread IDs and model names are local runtime metadata; they do not grant role permissions. One profile has one active endpoint. Use `--replace` only after verifying a new thread, and deactivate an unreachable endpoint with `agent session-end --reason ...`. An active endpoint may be idle or completed in the UI as long as the host can still deliver a follow-up to it.
+
+After finishing a handoff, inspect its ready direct successors:
+
+```bash
+bin/baton notify targets HO-FINISHED \
+  --role frontend \
+  --from-agent frontend-main
+```
+
+This promotes only direct dependents whose job dependencies are finished and whose Gates are released. Candidates with no active claim are ranked by their most recent session update. Send the handoff ID to one existing candidate Codex task, requiring it to run `handoff show` and `claim`. Then record the real host result:
+
+```bash
+bin/baton notify record HO-READY \
+  --role frontend \
+  --from-agent frontend-main \
+  --to-agent backend-main \
+  --status sent \
+  --message-ref <host-message-id> \
+  --detail "Codex accepted the follow-up."
+```
+
+Use `--status failed --detail <reason>` when delivery fails, then try the next candidate or retain the receiver's `wait`/`watch` fallback. Baton records at most one successful notification for each handoff to avoid repeated wake-up messages. Delivery does not claim work, and no Baton agent may create a new task or send work that is not registered in Baton.
+
+```bash
+bin/baton agent session-list --status active
+bin/baton notify list --job HO-READY
+```
+
+Successful delivery means the sender does not need to wait solely to wake that successor. Polling remains required for CR monitoring, unassigned role work, unavailable endpoints, delivery failures, and non-Codex hosts.
+
 ## Optional Git Workspace Integration
 
 Baton remains Git-independent. Add a shared `baton.toml` only when the project should record commit provenance and detect likely checkout mismatches. In a worktree layout, keep this file beside the common control DB rather than maintaining branch-specific copies:
@@ -791,10 +837,14 @@ State-changing commands run inside `BEGIN IMMEDIATE` transactions:
 - `role alias-add`
 - `role permission-add`
 - `role permission-remove`
+- `agent session-set`
+- `agent session-end`
 - `migrate`
 - `cancel`
 - `cancel-ack`
 - `cancel-withdraw`
+- `notify targets`
+- `notify record`
 - `register`
 - `gate create`
 - `gate release`
