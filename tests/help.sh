@@ -27,11 +27,18 @@ grep -- '--plan-token PLAN_TOKEN' "$TMP/migrate-command.txt" >/dev/null
 "$CLI" help guide show | grep '{bootstrap,worker,planner,git}' >/dev/null
 "$CLI" help workspace check | grep -- '--job JOB_ID' >/dev/null
 "$CLI" help workspace events | grep -- '--limit LIMIT' >/dev/null
+"$CLI" help agent session-set | grep -- '--thread-id THREAD_ID' >/dev/null
+"$CLI" help agent session-set | grep -- '--model MODEL' >/dev/null
+"$CLI" help agent session-end | grep -- '--reason REASON' >/dev/null
+"$CLI" help agent session-list | grep -- '--status {active,inactive}' >/dev/null
 "$CLI" help fail | grep -- '--reviewer-role REVIEWER_ROLE' >/dev/null
 "$CLI" help retry | grep -- '--cr-id CR_ID' >/dev/null
 "$CLI" help cancel | grep -- '--force' >/dev/null
 "$CLI" help cancel-ack | grep -- '--evidence EVIDENCE' >/dev/null
 "$CLI" help cancel-withdraw | grep -- '--reason REASON' >/dev/null
+"$CLI" help notify targets | grep -- '--from-agent FROM_AGENT' >/dev/null
+"$CLI" help notify record | grep -- '--status {sent,failed}' >/dev/null
+"$CLI" help notify list | grep -- '--job JOB_ID' >/dev/null
 "$CLI" help watch | grep 'CR review first' >/dev/null
 "$CLI" help cr show | grep 'CR_ID' >/dev/null
 "$CLI" help cr seal | grep -- '--evidence EVIDENCE' >/dev/null

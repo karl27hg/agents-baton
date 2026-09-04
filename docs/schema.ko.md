@@ -25,6 +25,8 @@
 - `handoff_failure_reviews`: 실패 handoff와 결정 CR 및 처리 결과의 연결
 - `handoff_controls`: wait loop 중지/재개 제어
 - `waiter_leases`: polling interval 자동 조절을 위한 handoff 및 CR waiter heartbeat
+- `agent_sessions`: stable agent profile의 opt-in runtime host thread 및 model metadata
+- `handoff_notifications`: peer thread message 전달 결과 감사 기록
 - `workspace_events`: handoff 전환의 선택적 Git commit provenance와 정책 결과
 - `change_requests`: CR workflow 상태와 Markdown 파일 참조
 - `cr_events`: CR 상태 변경 감사 로그
@@ -64,6 +66,7 @@
 7 handoff_failures
 8 cr_body_integrity
 9 plan_revision_controls
+10 opt_in_thread_notifications
 ```
 
 `baton migrate --check`는 DB가 현재 binary가 아는 최신 schema version인지 읽기 전용으로 확인합니다.
@@ -398,6 +401,9 @@ role_added
 role_alias_added
 role_permission_added
 role_permission_removed
+agent_session_active
+agent_session_replaced
+agent_session_inactive
 registered
 claimed
 finished
@@ -414,6 +420,8 @@ control_resumed
 shift_started
 shift_extended
 shift_ended
+notification_sent
+notification_failed
 ```
 
 Claim event 예:
@@ -497,6 +505,61 @@ Claim 동작:
 - 숫자 `--interval`은 해당 process에 고정 적용되지만, 그 lease도 자동 waiter가 사용하는 활성 수에 포함됩니다.
 - 25초를 초과하는 고정 interval은 정상 sleep 중인 process가 stale로 제거되지 않도록 `interval + 5초` lease를 사용합니다.
 - Lease record는 `baton-report` 감사 또는 workflow summary에 포함되지 않습니다.
+
+## `agent_sessions`
+
+용도:
+
+- peer 알림을 명시적으로 사용할 때 stable Baton agent profile을 하나의 active runtime endpoint와 연결합니다.
+- 기존 Codex task를 선택하는 데 필요한 host, thread ID, role, model을 기록합니다.
+- runtime ID를 권한 또는 영속 identity로 취급하지 않으면서 inactive endpoint 이력을 보존합니다.
+
+컬럼:
+
+| 컬럼 | 타입 | 필수 | 용도 |
+| --- | --- | --- | --- |
+| `session_id` | `text primary key` | 예 | Baton이 생성한 runtime session UUID입니다. |
+| `agent_id` | `text` | 예 | `claimed_by`에도 사용하는 stable profile identity입니다. |
+| `role_id` | `text` | 예 | session이 표시하는 canonical role입니다. |
+| `host` | `text` | 예 | message host이며 초기 사용 값은 `codex`입니다. |
+| `thread_id` | `text` | 예 | host별 기존 task 식별자입니다. |
+| `model` | `text` | 예 | 등록 시 제공한 정확한 model metadata입니다. |
+| `status` | `text` | 예 | `active` 또는 `inactive`입니다. |
+| `created_at` | `text` | 예 | 최초 등록 시각입니다. |
+| `updated_at` | `text` | 예 | 최근 등록 또는 lifecycle 변경 시각입니다. |
+| `ended_at` | `text` | 아니오 | endpoint 비활성화 시각입니다. |
+| `end_reason` | `text` | 아니오 | 비활성화 또는 교체 사유입니다. |
+
+`unique(host, thread_id)`는 한 host thread가 두 profile을 나타내는 것을 방지하고 partial unique index는 `agent_id`마다 하나의 active endpoint만 허용합니다. session 교체에는 명시적 `--replace`가 필요합니다. `active`는 현재 실행 중이라는 뜻이 아니라 이후 follow-up을 받을 수 있다는 뜻입니다.
+
+## `handoff_notifications`
+
+용도:
+
+- agent가 기존 peer thread에 알림을 시도한 이후 실제 결과를 기록합니다.
+- 감사용 sender/recipient profile 및 model metadata snapshot을 남깁니다.
+- handoff ownership을 바꾸지 않으면서 성공 wake-up message의 반복을 막습니다.
+
+컬럼:
+
+| 컬럼 | 타입 | 필수 | 용도 |
+| --- | --- | --- | --- |
+| `id` | `integer primary key autoincrement` | 예 | 전달 시도 순서입니다. |
+| `job_id` | `text` | 예 | message에 포함된 ready handoff입니다. |
+| `sender_session_id` | `text` | 예 | 발신 runtime session입니다. |
+| `recipient_session_id` | `text` | 예 | 선택한 기존 peer runtime session입니다. |
+| `sender_agent_id` | `text` | 예 | stable sender profile snapshot입니다. |
+| `sender_model` | `text` | 예 | sender model snapshot입니다. |
+| `recipient_agent_id` | `text` | 예 | stable recipient profile snapshot입니다. |
+| `recipient_thread_id` | `text` | 예 | 전달을 시도한 host task입니다. |
+| `recipient_model` | `text` | 예 | recipient model snapshot입니다. |
+| `transport` | `text` | 예 | 전달에 사용한 runtime host입니다. |
+| `delivery_status` | `text` | 예 | `sent` 또는 `failed`입니다. |
+| `message_ref` | `text` | 아니오 | 선택적 host delivery/message reference입니다. |
+| `detail` | `text` | 아니오 | 결과 상세이며 CLI는 실패 시 필수로 요구합니다. |
+| `created_at` | `text` | 예 | 전달 시도 시각입니다. |
+
+partial unique index는 handoff마다 최대 하나의 `sent` row만 허용합니다. 실패 시도는 fallback 진단을 위해 보존합니다. `notify targets`는 finished source의 ready 직접 하위 작업만 promote하고 현재 `in_progress` 또는 `cancel_requested` handoff를 소유하지 않은 active peer 후보를 반환하며 message를 보내지 않습니다. `notify record`는 agent가 host messaging tool을 사용한 후 보고한 결과를 기록합니다. 어느 명령도 handoff를 claim하지 않습니다. 인증 token과 message 본문은 저장하지 않습니다.
 
 ## `change_requests`
 
@@ -628,6 +691,11 @@ idx_handoff_events_job on handoff_events(job_id)
 idx_handoff_gate_dependencies_job on handoff_gate_dependencies(job_id)
 idx_handoff_gate_dependencies_gate on handoff_gate_dependencies(gate_name)
 idx_gate_events_gate on gate_events(gate_name)
+idx_agent_sessions_active_agent on agent_sessions(agent_id) where status = 'active'
+idx_agent_sessions_role_status on agent_sessions(role_id, status, updated_at)
+idx_handoff_notifications_job on handoff_notifications(job_id, id)
+idx_handoff_notifications_sent_job on handoff_notifications(job_id) where delivery_status = 'sent'
+idx_handoff_notifications_recipient on handoff_notifications(recipient_agent_id, created_at)
 idx_cr_status_reviewer on change_requests(status, reviewer_role)
 idx_cr_handoffs_cr on cr_handoffs(cr_id)
 ```
@@ -640,18 +708,21 @@ idx_cr_handoffs_cr on cr_handoffs(cr_id)
 - `events.job_id`: 특정 job의 event history 조회를 빠르게 처리합니다.
 - `handoff_gate_dependencies`: job별 Gate 확인과 Gate별 dependent job 조회를 빠르게 처리합니다.
 - `gate_events.gate_name`: Gate 감사 이력 조회를 빠르게 처리합니다.
+- `agent_sessions`: profile별 active endpoint uniqueness와 role별 후보 조회를 처리합니다.
+- `handoff_notifications`: job/recipient별 감사 조회와 job별 단일 성공 전달을 처리합니다.
 - `cr.status, reviewer_role`: `cr wait-review` 조회를 빠르게 처리합니다.
 - `cr_handoffs.cr_id`: implementation 완료 검사를 빠르게 처리합니다.
 
 ## Identity Model
 
-DB는 `handoff_jobs.claimed_by`와 `handoff_events.actor_id`에 identity를 기록합니다.
+DB는 `handoff_jobs.claimed_by`, `handoff_events.actor_id`, 그리고 opt-in `agent_sessions`와 `handoff_notifications`에 runtime/model metadata를 기록합니다.
 
 정책:
 
 - long-lived identity로 stable profile name을 사용합니다.
 - 예: `frontend-main`, `qa-regression`, `sm`.
 - Codex thread ID, turn ID, 임시 파일만을 long-lived identity로 의존하지 않습니다.
+- thread ID와 model name은 알림 metadata이며 routing 권한 또는 permission 판단 입력이 아닙니다.
 
 CLI identity 결정 순서:
 

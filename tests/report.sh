@@ -68,7 +68,9 @@ import sys
 with sqlite3.connect(sys.argv[1]) as source, sqlite3.connect(sys.argv[2]) as target:
     source.backup(target)
 with sqlite3.connect(sys.argv[2]) as con:
-    con.execute("delete from schema_migrations where version in (7, 8, 9)")
+    con.execute("delete from schema_migrations where version in (7, 8, 9, 10)")
+    con.execute("drop table handoff_notifications")
+    con.execute("drop table agent_sessions")
     con.execute("drop table handoff_failure_reviews")
 PY
 if "$REPORT" --db "$PENDING_DB" summary >/dev/null 2>&1; then

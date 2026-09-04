@@ -345,6 +345,20 @@ The CLI uses identity in this order when claiming:
 
 If multiple agents share one workspace, prefer explicit `--claimed-by <profile-name>` or `BATON_AGENT_ID=<profile-name>` so they do not accidentally share one local identity file.
 
+## Opt-In Codex Peer Notification
+
+Register an existing Codex task only when the project chooses peer notification:
+
+```bash
+bin/baton --db /tmp/baton.sqlite3 agent session-set \
+  --role frontend \
+  --agent-id frontend-main \
+  --thread-id <codex-thread-id> \
+  --model <model-id>
+```
+
+After `finish`, inspect ready direct successors with `notify targets <finished-job> --role <role> --from-agent <profile>`. Send one candidate task the handoff ID and instructions to run `handoff show` and `claim`, then record `notify record <ready-job> --status sent|failed`. A successful message is not a claim. Failed or unavailable delivery falls back to the recipient's normal wait loop. Do not create a new task for notification.
+
 ## Wait Usage
 
 Use bounded waits by default:
@@ -357,11 +371,11 @@ bin/baton --db /tmp/baton.sqlite3 watch --role planning --timeout 900
 
 Use `watch` for planner/SM roles that receive both kinds of work. It checks assigned CR reviews first and then ready handoffs; a role without `cr.review` uses it as a handoff-only wait.
 
-`next` checks the queue once and exits immediately; it does not wait. If no ready handoff exists, run `wait`. A blocked handoff becomes visible after all required upstream handoffs finish and `wait` promotes it to `open`.
+`next` checks the queue once and exits immediately; it does not wait. If no ready handoff exists, run `wait`. A blocked handoff becomes visible after all required upstream handoffs finish and either `wait`/`watch`, `promote-ready`, or opt-in `notify targets` promotes it to `open`.
 
 No-op polling is silent. CLI output is produced for a ready job, an actual promotion or cancellation, timeout, or stop result. A worker must not relay an ordinary timeout as a user-facing update while its shift remains active.
 
-Avoid `--timeout 0` unless the user explicitly asks for a forever-wait experiment. For normal worker operation, repeat bounded waits while the role shift is active. Exit code `2` is only an internal loop boundary: check the shift and enter another bounded wait without reporting when the state is unchanged. Report once for ready work, claim/finish transitions, stop or shift expiry, errors requiring intervention, or an explicit status request. After finishing a claimed job, re-enter the same wait loop while the shift remains active.
+Avoid `--timeout 0` unless the user explicitly asks for a forever-wait experiment. For normal polling operation, repeat bounded waits while the role shift is active. Exit code `2` is only an internal loop boundary: check the shift and enter another bounded wait without reporting when the state is unchanged. Report once for ready work, claim/finish transitions, stop or shift expiry, errors requiring intervention, or an explicit status request. After finishing a claimed job, re-enter the same wait loop while the shift remains active unless a successful opt-in notification has transferred the only successor wake-up responsibility; CR monitoring, unassigned work, and failures still require polling.
 
 If a required upstream handoff or Gate is cancelled, Baton recursively cancels blocked dependent handoffs in that dependency branch. Independent queue branches remain available. Cancelled handoffs do not become ready and must not be reopened by agents.
 

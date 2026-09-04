@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added schema migration v10 with opt-in Codex peer session/model metadata, direct-successor notification planning, audited delivery results, duplicate-success suppression, and polling fallback guidance.
 - Added audited `cancel-withdraw` recovery from `cancel_requested` to the existing claim while preventing retired CR implementation work from being resumed.
 - Added schema migration v9 with cooperative `cancel_requested` handoff cancellation, claimant `cancel-ack`, audited emergency force cancellation, CR supersession, and linked implementation retirement.
 - Blocked in-place schema migration while waiters, in-progress handoffs, or cancellation acknowledgements remain active.

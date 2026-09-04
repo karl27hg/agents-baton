@@ -545,6 +545,14 @@ baton migrate --check
 
 Automatic discovery recognizes `.baton/baton.sqlite3`, `tools/baton/.baton/baton.sqlite3`, and `tools/agents-baton/.baton/baton.sqlite3` under the selected Baton project root. Use `--project-root PATH` when no marker exists yet or the command runs outside the intended project, or `--source-db PATH` when the existing database is elsewhere. Check mode performs the real migration logic only on an in-memory clone. Apply mode rechecks the source signature, blocks active waiters and in-progress or cancel-requested handoffs, requires `stop --all` for a layout move, backs up the source, installs the marker, and refuses to overwrite or merge a different existing target database. A successful layout move replaces the legacy path with a symlink to the canonical database to prevent old wrappers from creating a split workflow.
 
+## Opt-In Codex Peer Notification
+
+The installed CLI does not call Codex or hold Codex credentials. Existing Codex tasks opt in by recording their stable profile, role, thread ID, and model with `agent session-set`. The thread and model are runtime metadata only; Baton permissions and claims continue to use role and stable `agent_id`.
+
+After a handoff finishes, its agent can run `notify targets <finished-job> --role <role> --from-agent <profile>`. Baton promotes only ready direct dependents and lists existing peer candidates, ranked by recent session update. The agent sends one candidate a host follow-up containing the receiving handoff ID, then records the actual result with `notify record --status sent|failed`. The receiver must inspect and claim the handoff before editing.
+
+Registration itself is the opt-in switch; projects that do not register sessions retain the existing polling behavior. Keep `wait`/`watch` for CR monitoring, unassigned role queues, inaccessible or stale tasks, failed messages, and non-Codex environments. Do not create new Codex tasks as part of this flow. End stale endpoints explicitly, and use `--replace` only after verifying the replacement task. Baton stores no host token or message body.
+
 ## When To Avoid Sharing One Database
 
 Do not share one `.baton/baton.sqlite3` across unrelated repositories. Baton's IDs, CR file paths, and handoff source references are repository-local.

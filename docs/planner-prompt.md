@@ -7,7 +7,7 @@ Examples use the pipx-installed `baton` command from `PATH`. From a Baton source
 ## Planning Rules
 
 - Do not create subagents, child tasks, parallel agent sessions, or delegated background agents while operating under Baton.
-- Delegate execution only by registering Baton handoffs for configured project roles. Parallel Baton handoffs are allowed when they satisfy the safety rules below; directly invoking their workers is not.
+- Delegate execution only by registering Baton handoffs for configured project roles. Parallel Baton handoffs are allowed when they satisfy the safety rules below. In explicitly enabled opt-in mode, an agent may notify an existing registered Codex peer task only after the receiving handoff is ready; the message does not replace Baton registration or claim.
 - If no eligible role is available, report the blocker to the SM or user instead of bypassing Baton with a subagent.
 - If the project enables Git workspace policy, run `workspace check` before registration and do not bypass a `strict` mismatch without an authorized, audited reason.
 - For isolated Git worktrees, verify that every agent reports the same `baton project info` database path. Never initialize one Baton database per worktree.
@@ -34,7 +34,17 @@ baton watch --role planning --timeout 900
 
 `watch` checks submitted CRs assigned to the role first, then ready handoffs. Exit `2` is only a bounded-loop timeout: check `shift status` and re-enter `watch` silently while the shift remains active. After each CR decision or completed handoff, return to `watch`. Exit `3`, shift expiry, an unrecoverable error, or explicit user direction ends the loop.
 
-Do not send a final response merely because the current planning action completed while the shift remains active. Baton cannot create a new Codex host turn after the agent ends one; continuous circulation requires the agent to keep the current turn active through repeated bounded `watch` calls.
+Do not send a final response merely because the current planning action completed while the shift remains active. Baton cannot create a new Codex host turn after the agent ends one. In polling mode, continuous circulation requires repeated bounded `watch` calls. In explicitly enabled Codex peer-notification mode, a planner may end after its own obligations are complete and every ready successor was successfully notified, but it must retain `watch` for CR monitoring, unassigned role work, and notification fallback.
+
+## Opt-In Peer Dispatch Policy
+
+- Every reachable Codex task registers a stable agent profile, runtime thread ID, role, host, and model with `agent session-set`. Runtime metadata never grants permissions.
+- After finishing a predecessor, use `notify targets <finished-job>` to promote and inspect only its eligible direct dependents.
+- Send the Baton handoff ID to one existing candidate thread. Do not send the full job as an unaudited replacement contract and do not create a new thread.
+- Record the actual host result with `notify record --status sent|failed`. After failure, try another candidate or preserve the receiver's `wait`/`watch` fallback.
+- Do not notify work that is blocked, cancelled, failed, or waiting on a Gate. The receiver must run `handoff show` and win `claim` before editing.
+- One successful delivery record per handoff is the default duplicate-suppression boundary. Additional agents discover the job through Baton rather than repeated broadcast messages.
+- Keep a session active while its existing Codex task remains addressable by follow-up messages, even when it is not currently executing. End or replace stale endpoints explicitly.
 
 ## Parallel-Safety Decision
 
