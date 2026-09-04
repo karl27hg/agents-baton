@@ -278,7 +278,7 @@ bin/baton retry HO-YYYY-MM-DD-001 \
 
 대상 role은 다시 열린 job을 새로 claim해야 합니다. 재시도하지 않기로 결정하면 실패 CR을 거절한 뒤 `cancel`을 실행하며, 이때 해당 blocked dependency branch만 연쇄 취소됩니다.
 
-`in_progress` 작업을 취소하면 즉시 최종 취소되지 않고 `cancel_requested`가 됩니다. 원래 claimant는 commit·통합·완료 보고 전에 상태를 다시 확인하고, 중단한 내용과 남은 변경을 evidence로 기록해 `cancel-ack`를 실행해야 합니다. claimant가 유실된 경우에만 SM이 사유와 함께 `cancel --force`를 사용합니다.
+`in_progress` 작업을 취소하면 즉시 최종 취소되지 않고 `cancel_requested`가 됩니다. 원래 claimant는 먼저 작업을 멈추고 `events`에서 취소 요청 사유를 확인합니다. 검토 결과 기존 작업에 문제가 없다면 `handoff.cancel` 권한이 있는 planner/SM이 `cancel-withdraw HO-... --role sm --reason "..."`로 요청을 철회할 수 있습니다. 기존 claimant와 시작 시각은 유지되며, claimant는 `handoff show`에서 다시 `in_progress`가 된 것을 확인한 후 재claim 없이 이어서 작업합니다. 취소 또는 대체된 CR에 연결된 구현 작업은 원 설계가 폐기되었으므로 철회할 수 없습니다. 취소가 확정된 경우에만 claimant가 중단 내용과 남은 변경을 evidence로 기록해 `cancel-ack`를 실행합니다. claimant가 유실된 경우에만 SM이 사유와 함께 `cancel --force`를 사용합니다.
 
 `next`는 한 번만 확인하는 비대기 명령입니다. 작업이 없다는 이유로 agent가 종료되면 안 되며, shift가 활성 상태인 동안 제한된 `wait`를 반복해야 합니다.
 `next` 출력만으로 작업을 시작하지 말고 claim 전에 `handoff show`로 objective, source reference, dependency, Gate, exit criteria를 모두 확인해야 합니다. `handoff list`는 role과 status별 queue를 읽기 전용으로 조회합니다.
@@ -388,7 +388,7 @@ bin/baton shift extend --role frontend
 bin/baton shift end --role frontend --reason "End of day"
 ```
 
-`shift start`의 기본 duration은 4시간, `shift extend`의 기본 duration은 1시간입니다. shift가 만료되면 새로운 wait, watch, claim은 중지되지만 이미 claim한 작업의 완료 보고는 허용됩니다. 단, 작업이 `cancel_requested`이면 `finish`나 `fail` 대신 `cancel-ack`로 중단을 확인해야 합니다.
+`shift start`의 기본 duration은 4시간, `shift extend`의 기본 duration은 1시간입니다. shift가 만료되면 새로운 wait, watch, claim은 중지되지만 이미 claim한 작업의 완료 보고는 허용됩니다. 단, 작업이 `cancel_requested`이면 `finish`나 `fail`을 실행하지 말고 검토 결과에 따라 `cancel-withdraw` 이후 작업을 재개하거나 `cancel-ack`로 중단을 확인해야 합니다.
 
 worker는 첫 wait 전에 적용되는 전역 및 role shift 상태를 확인합니다. 미래 deadline이 없고 중지되거나 만료된 scope도 없을 때만 기본 4시간 role shift를 시작합니다. 이미 활성 deadline이 있으면 유지하고, 만료 또는 중지된 scope는 사용자나 SM의 명시적인 승인 없이 다시 시작, 연장 또는 resume하지 않습니다.
 

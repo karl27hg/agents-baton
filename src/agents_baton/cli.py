@@ -4470,6 +4470,60 @@ def command_cancel_ack(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_cancel_withdraw(args: argparse.Namespace) -> int:
+    reason = args.reason.strip()
+    if not reason:
+        raise SystemExit("ERROR: --reason cannot be blank")
+    with connect(args.db) as con:
+        init_schema(con)
+        begin_immediate(con)
+        actor_role = require_permission(con, args.role, "handoff.cancel")
+        row = con.execute(
+            "select status, claimed_by from handoff_jobs where job_id = ?",
+            (args.job_id,),
+        ).fetchone()
+        if not row:
+            raise SystemExit(f"ERROR: unknown job: {args.job_id}")
+        if row["status"] != "cancel_requested":
+            raise SystemExit(
+                f"ERROR: job is not cancel_requested: {args.job_id} status={row['status']}"
+            )
+        retired_crs = con.execute(
+            """
+            select c.cr_id, c.status
+            from cr_handoffs ch
+            join change_requests c on c.cr_id = ch.cr_id
+            where ch.job_id = ?
+              and ch.kind = 'implementation'
+              and c.status in ('cancelled', 'superseded')
+            order by c.cr_id
+            """,
+            (args.job_id,),
+        ).fetchall()
+        if retired_crs:
+            details = ", ".join(f"{item['cr_id']}={item['status']}" for item in retired_crs)
+            raise SystemExit(
+                "ERROR: cancellation cannot be withdrawn because the implementation source "
+                f"is retired: {details}; register a replacement handoff"
+            )
+        con.execute(
+            "update handoff_jobs set status = 'in_progress' where job_id = ?",
+            (args.job_id,),
+        )
+        event(
+            con,
+            "cancellation_withdrawn",
+            job_id=args.job_id,
+            actor_role=actor_role,
+            from_status="cancel_requested",
+            to_status="in_progress",
+            message=f"claimant={row['claimed_by'] or ''}; {reason}",
+        )
+        con.commit()
+    print(f"Cancellation withdrawn {args.job_id} claimant={row['claimed_by'] or ''}")
+    return 0
+
+
 def promote_ready_handoffs_for_gate(
     con: sqlite3.Connection,
     gate_name: str,
@@ -5226,6 +5280,15 @@ def build_parser() -> argparse.ArgumentParser:
     cancel_ack.add_argument("--claimed-by", default="")
     cancel_ack.add_argument("--evidence", required=True)
     cancel_ack.set_defaults(func=command_cancel_ack)
+
+    cancel_withdraw = sub.add_parser(
+        "cancel-withdraw",
+        help="withdraw a cancellation request and resume the existing claim",
+    )
+    cancel_withdraw.add_argument("job_id")
+    cancel_withdraw.add_argument("--role", required=True)
+    cancel_withdraw.add_argument("--reason", required=True)
+    cancel_withdraw.set_defaults(func=command_cancel_withdraw)
 
     events = sub.add_parser("events", help="show one handoff audit history")
     events.add_argument("job_id")

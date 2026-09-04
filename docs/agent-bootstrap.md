@@ -143,6 +143,6 @@ baton guide show planner
 
 Before a worker's first wait, require it to inspect `shift status --role <role>`. A worker may create the default `4h` role shift only when no applicable deadline or stopped/expired scope exists. Existing active deadlines are preserved, and expired or stopped role/global scopes require explicit user or SM authorization before restart, extension, or resume.
 
-Require planner/SM roles that receive both CR reviews and handoffs to use `watch` rather than alternating long independent waits. Require every active claimant to inspect its handoff before commit, integration, and completion; `cancel_requested` must be acknowledged with `cancel-ack`, not reported with `finish` or `fail`.
+Require planner/SM roles that receive both CR reviews and handoffs to use `watch` rather than alternating long independent waits. Require every active claimant to inspect its handoff before commit, integration, and completion. On `cancel_requested`, the claimant pauses and inspects the reason; it resumes only after an authorized `cancel-withdraw` restores `in_progress`, or uses `cancel-ack` after cancellation is confirmed. It must not report `finish` or `fail` while cancellation is requested.
 
 Project `AGENTS.md` should require these guides and define the assigned role. If a command, version, path, migration plan, or authority decision is unclear, stop and ask the user or SM instead of guessing.

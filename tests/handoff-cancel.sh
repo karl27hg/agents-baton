@@ -33,6 +33,7 @@ UNRELATED_JOB="$("$CLI" --db "$DB" register \
   --exit-criteria "Independent work is preserved." | awk '{print $1}')"
 
 "$CLI" --db "$DB" claim "$ROOT_JOB" --role backend --claimed-by cancel-test >/dev/null
+STARTED_AT="$("$CLI" --db "$DB" handoff show "$ROOT_JOB" | awk -F ': ' '$1 == "started_at" { print $2 }')"
 if "$CLI" --db "$DB" cancel "$ROOT_JOB" --role frontend --reason "Unauthorized." >/dev/null 2>&1; then
   echo "ERROR: role without handoff.cancel cancelled a job" >&2
   exit 1
@@ -41,6 +42,20 @@ fi
 "$CLI" --db "$DB" cancel "$ROOT_JOB" --role sm --reason "No longer required." | grep "Cancellation requested $ROOT_JOB" >/dev/null
 "$CLI" --db "$DB" status | grep '^cancel_requested: 1$' >/dev/null
 "$CLI" --db "$DB" status | grep '^blocked: 2$' >/dev/null
+if "$CLI" --db "$DB" cancel-withdraw "$ROOT_JOB" --role backend \
+  --reason "Worker cannot withdraw its own cancellation." >/dev/null 2>&1; then
+  echo "ERROR: role without handoff.cancel withdrew cancellation" >&2
+  exit 1
+fi
+"$CLI" --db "$DB" cancel-withdraw "$ROOT_JOB" --role sm \
+  --reason "Review confirmed that the original work remains valid." \
+  | grep "Cancellation withdrawn $ROOT_JOB claimant=cancel-test" >/dev/null
+"$CLI" --db "$DB" handoff show "$ROOT_JOB" | grep 'status: in_progress' >/dev/null
+"$CLI" --db "$DB" handoff show "$ROOT_JOB" | grep 'claimed_by: cancel-test' >/dev/null
+test "$("$CLI" --db "$DB" handoff show "$ROOT_JOB" | awk -F ': ' '$1 == "started_at" { print $2 }')" = "$STARTED_AT"
+"$CLI" --db "$DB" events "$ROOT_JOB" | awk -F '\t' '$2 == "cancellation_withdrawn" && $5 ~ /original work remains valid/ { found=1 } END { exit !found }'
+"$CLI" --db "$DB" cancel "$ROOT_JOB" --role sm --reason "Cancellation confirmed after another review." \
+  | grep "Cancellation requested $ROOT_JOB" >/dev/null
 if "$CLI" --db "$DB" finish "$ROOT_JOB" --role backend --evidence "Stale completion." >/dev/null 2>&1; then
   echo "ERROR: cancel-requested handoff was finished" >&2
   exit 1

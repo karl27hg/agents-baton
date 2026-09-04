@@ -119,12 +119,12 @@ Do not edit an approved CR body. Classify the impact and preserve unrelated work
 - Compatible or additive changes keep existing handoffs and add only the required work.
 - Breaking changes use `cr supersede OLD_CR --by NEW_CR --role <admin-role> --reason <reason>`, or `--by-source-ref <immutable-ref>` when the acting planner/SM has direct design authority and no replacement review is required.
 - Supersession immediately cancels linked `blocked` and `open` implementation handoffs and their blocked dependency descendants.
-- A linked `in_progress` handoff becomes `cancel_requested`. Its claimant must stop before commit or integration and run `cancel-ack` with concrete evidence. Do not register replacement work that depends on the old result.
+- A linked `in_progress` handoff becomes `cancel_requested`. Its claimant pauses before commit or integration while the reason is reviewed. If the work remains valid and its linked CR was not cancelled or superseded, use `cancel-withdraw --reason <review-result>` to preserve the original claim; otherwise direct the claimant to run `cancel-ack` with concrete evidence. Do not register replacement work that depends on an unacknowledged old result.
 - Finished handoffs remain immutable audit evidence. Register explicit remediation handoffs under the replacement CR when their output must change.
 - A failed linked implementation must complete its failure-CR decision before its parent CR can be cancelled or superseded.
 - Use `cancel --force` only when the claimant cannot acknowledge cancellation. Record why cooperative cancellation was impossible.
 
-While a potentially breaking CR is still under review, do not silently reinterpret existing handoffs. Use a Gate for work that was designed to await the decision. If immediate containment is required, explicitly stop the affected role and inspect every affected `open`, `blocked`, `in_progress`, and `cancel_requested` job before resuming it.
+While a potentially breaking CR is still under review, do not silently reinterpret existing handoffs. Use a Gate for work that was designed to await the decision. If immediate containment is required, explicitly stop the affected role and inspect every affected `open`, `blocked`, `in_progress`, and `cancel_requested` job before resuming it. Review the recorded cancellation reason before using `cancel-withdraw`; it cannot restore work whose implementation CR is already cancelled or superseded.
 
 ## Runtime Guarantees And Limits
 

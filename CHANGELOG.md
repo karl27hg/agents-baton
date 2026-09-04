@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added audited `cancel-withdraw` recovery from `cancel_requested` to the existing claim while preventing retired CR implementation work from being resumed.
 - Added schema migration v9 with cooperative `cancel_requested` handoff cancellation, claimant `cancel-ack`, audited emergency force cancellation, CR supersession, and linked implementation retirement.
 - Blocked in-place schema migration while waiters, in-progress handoffs, or cancellation acknowledgements remain active.
 - Added combined `watch` polling for planner/SM roles, prioritizing assigned CR reviews before ready handoffs while retaining bounded shift and automatic interval behavior.
