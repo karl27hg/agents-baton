@@ -52,7 +52,7 @@ Columns:
 
 `baton migrate` creates a validated SQLite backup before running pending migrations, applicable seed updates, `PRAGMA quick_check`, and `PRAGMA foreign_key_check` in one transaction. Any failure rolls back schema changes, seed changes, and migration records together. Normal workflow commands reject pending migrations. Full default permissions are seeded only for a new or unversioned database; later migrations add only permissions introduced by that migration, preserving project-specific revocations.
 
-Released migrations:
+Known migrations:
 
 ```text
 1 initial_schema
@@ -62,6 +62,8 @@ Released migrations:
 5 database_metadata
 6 workspace_provenance
 7 handoff_failures
+8 cr_body_integrity
+9 plan_revision_controls
 ```
 
 `baton migrate --check` performs a read-only check that the database is at the latest known schema version.
@@ -245,6 +247,7 @@ Allowed `status` values:
 blocked
 open
 in_progress
+cancel_requested
 failed
 finished
 cancelled
@@ -255,11 +258,12 @@ Status meaning:
 - `blocked`: Waiting for required upstream jobs to finish.
 - `open`: Ready to be claimed by `target_role`.
 - `in_progress`: Claimed by an agent profile.
+- `cancel_requested`: An authorized role requested cancellation; the original claimant must stop and acknowledge it.
 - `failed`: The claimed work did not meet its exit criteria. Its failure CR awaits or records a planning decision.
 - `finished`: Completed with closure evidence.
 - `cancelled`: Intentionally stopped as a job, not merely paused.
 
-An authorized `cancel` operation changes a selected `blocked`, `open`, `in_progress`, or reviewed `failed` job to `cancelled`. It then recursively cancels only blocked dependency descendants. A failed job must have its failure CR rejected or cancelled first. Unrelated queue branches are unchanged. `finished` and already-`cancelled` jobs are terminal for this operation.
+An authorized `cancel` operation immediately changes a selected `blocked`, `open`, or reviewed `failed` job to `cancelled`, then recursively cancels blocked dependency descendants. An `in_progress` job changes to `cancel_requested`; only `cancel-ack` by its claimant finalizes cancellation and descendant propagation. `cancel --force` is the audited recovery path when acknowledgement is impossible. A failed job must have its failure CR rejected or cancelled first. Unrelated queue branches are unchanged.
 
 `fail` changes only an `in_progress` job to `failed`, creates and submits a linked failure CR, and leaves dependency descendants `blocked`. An approved failure CR allows its reviewer to use `retry`, which returns the original job to `open`. A rejected failure CR allows an authorized cancellation. Dependents become ready only after the retried original job reaches `finished`.
 
@@ -399,6 +403,9 @@ claimed
 finished
 promoted
 cancelled
+cancellation_requested
+cancellation_acknowledged
+cancellation_forced
 dependency_cancelled
 gate_cancelled
 control_stopped
@@ -460,13 +467,13 @@ Wait behavior:
 Claim behavior:
 
 - `claim` checks the same controls before starting new work.
-- `finish` does not check shift controls, so already-claimed work can be reported after shift expiry.
+- `finish` does not check shift controls, so already-claimed work can be reported after shift expiry. It rejects `cancel_requested`; the claimant must use `cancel-ack` instead.
 
 ## `waiter_leases`
 
 Purpose:
 
-- Tracks active `wait` and `cr wait-review` processes sharing one Baton database.
+- Tracks active `wait`, `cr wait-review`, and combined `watch` processes sharing one Baton database.
 - Provides the active waiter count used by the default automatic polling interval.
 - Stores ephemeral coordination state, not workflow history or audit evidence.
 
@@ -475,7 +482,7 @@ Columns:
 | Column | Type | Required | Purpose |
 | --- | --- | --- | --- |
 | `waiter_id` | `text primary key` | yes | Process-local UUID generated when a wait command starts. |
-| `wait_kind` | `text` | yes | `handoff` or `cr_review`. |
+| `wait_kind` | `text` | yes | `handoff`, `cr_review`, or `watch`. |
 | `role_id` | `text` | yes | Canonical role associated with the waiter. |
 | `started_at` | `text` | yes | UTC timestamp when this wait command registered. |
 | `heartbeat_at` | `text` | yes | UTC timestamp of its latest polling heartbeat. |
@@ -518,6 +525,8 @@ Columns:
 | `active_revision_job_id` | `text` | no | Open revision handoff, if any. |
 | `submitted_body_hash` | `text` | no | SHA-256 of the Markdown body captured by the latest submit or resubmit. |
 | `approved_body_hash` | `text` | no | SHA-256 of the immutable body approved by the reviewer. Null identifies a legacy unsealed approval. |
+| `superseded_by_cr_id` | `text` | no | Approved replacement CR when this approval is retired by `cr supersede`. |
+| `superseded_by_ref` | `text` | no | Immutable authoritative design reference used instead of a replacement CR. |
 
 Allowed `status` values:
 
@@ -528,6 +537,7 @@ revision_requested
 approved
 rejected
 implemented
+superseded
 cancelled
 ```
 
@@ -540,7 +550,8 @@ State rules:
 - Implementation handoff creation, claim, finish, and final implementation marking require the approved body hash to remain unchanged.
 - Existing approved CRs migrated without a hash require an explicit reviewer `cr seal` before new implementation work.
 - `approved -> implemented` requires at least one linked implementation handoff and all linked implementation handoffs must be `finished`.
-- `cancelled` is performed by a role with `cr.admin` and records an audit event.
+- `approved -> superseded` requires `cr.admin` and either an approved replacement CR or an immutable authoritative design reference from a role with `handoff.register`. Linked queued implementation handoffs are cancelled, linked active handoffs receive `cancel_requested`, and finished handoffs are preserved.
+- `cancelled` is performed by a role with `cr.admin`, retires linked unfinished implementation work using the same cancellation rules, and records an audit event.
 - `reviewer_role` can be reassigned before terminal review by a role with `cr.admin`.
 
 ## `cr_events`
@@ -575,6 +586,8 @@ body_sealed
 rejected
 reviewer_reassigned
 cancelled
+superseded
+supersedes
 implementation_handoff_created
 implemented
 ```

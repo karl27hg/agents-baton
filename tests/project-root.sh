@@ -18,7 +18,7 @@ mkdir -p "$PROJECT_A/nested/work"
   cd "$PROJECT_A/nested/work"
   "$CLI" status >/dev/null
   "$CLI" project info | grep "project_root: $PROJECT_A" >/dev/null
-  "$CLI" project info | grep 'schema_version: 8' >/dev/null
+  "$CLI" project info | grep 'schema_version: 9' >/dev/null
   "$CLI" project info | grep 'last_migrated_with_baton_version:' >/dev/null
   "$REPORT" summary | grep 'Handoffs:' >/dev/null
   "$CLI" agent init --role planning --agent-id planning-root-test >/dev/null
@@ -97,7 +97,7 @@ import sqlite3
 import sys
 
 with sqlite3.connect(sys.argv[1]) as con:
-    con.execute("delete from schema_migrations where version in (5, 6, 7, 8)")
+    con.execute("delete from schema_migrations where version in (5, 6, 7, 8, 9)")
     con.execute("drop table handoff_failure_reviews")
     con.execute("drop table workspace_events")
     con.execute("drop table database_metadata")

@@ -234,6 +234,10 @@ bin/baton role permission-add architecture handoff.register
 
 Planning agent는 병렬 handoff를 등록하기 전에 [Planner prompt](docs/planner-prompt.md)를 따라야 합니다. 입력, 수정 대상, contract, 공유 상태와 완료 순서가 모두 독립적인 작업만 병렬로 열고, 하나라도 불확실하면 `--depends-on` 또는 named Gate로 순서를 명시합니다. Baton은 선언된 의존성과 claim 원자성을 보장하지만 소스 파일 충돌이나 누락된 의존성을 추론하지는 않습니다.
 
+worker 결과를 planner가 다시 통합·검토해야 하면 모든 필수 worker job을 `--depends-on`으로 연결한 planning handoff를 마지막에 등록합니다. 이 작업은 최초 planner 개인이 아니라 planning role queue로 돌아가므로 다른 planner도 수행할 수 있도록 계약과 판단 근거를 완결되게 기록해야 합니다. planner/SM이 CR 심사와 handoff를 겸하면 `baton watch --role planning --timeout 900`으로 CR을 우선 확인한 뒤 handoff를 확인하고, shift가 활성인 동안 처리 후 다시 `watch`로 진입합니다.
+
+Baton은 agent가 최종 응답을 보낸 뒤 새로운 Codex 턴을 스스로 만들 수 없습니다. 지속 순환하려면 agent가 shift가 활성인 동안 최종 응답으로 작업을 끝내지 않고 같은 턴에서 bounded `watch`를 반복해야 합니다.
+
 ```bash
 bin/baton register \
   --title "Frontend follow-up" \
@@ -273,6 +277,8 @@ bin/baton retry HO-YYYY-MM-DD-001 \
 ```
 
 대상 role은 다시 열린 job을 새로 claim해야 합니다. 재시도하지 않기로 결정하면 실패 CR을 거절한 뒤 `cancel`을 실행하며, 이때 해당 blocked dependency branch만 연쇄 취소됩니다.
+
+`in_progress` 작업을 취소하면 즉시 최종 취소되지 않고 `cancel_requested`가 됩니다. 원래 claimant는 commit·통합·완료 보고 전에 상태를 다시 확인하고, 중단한 내용과 남은 변경을 evidence로 기록해 `cancel-ack`를 실행해야 합니다. claimant가 유실된 경우에만 SM이 사유와 함께 `cancel --force`를 사용합니다.
 
 `next`는 한 번만 확인하는 비대기 명령입니다. 작업이 없다는 이유로 agent가 종료되면 안 되며, shift가 활성 상태인 동안 제한된 `wait`를 반복해야 합니다.
 `next` 출력만으로 작업을 시작하지 말고 claim 전에 `handoff show`로 objective, source reference, dependency, Gate, exit criteria를 모두 확인해야 합니다. `handoff list`는 role과 status별 queue를 읽기 전용으로 조회합니다.
@@ -332,6 +338,8 @@ SQLite와 파일시스템은 하나의 transaction이 아니므로 비정상 종
 
 `submit`과 `resubmit`은 본문 hash를 기록하고 `approve`는 같은 본문인지 확인한 뒤 승인 hash를 고정합니다. 승인 후 본문이 바뀌면 implementation handoff 생성·claim·finish·최종 구현 완료 처리가 차단됩니다. 승인 후 요구 변경은 기존 본문을 고치지 않고 새 CR로 진행합니다.
 
+호환되지 않는 새 CR이 승인되면 `cr supersede OLD_CR --by NEW_CR --role sm --reason "..."`로 이전 승인을 대체합니다. planner/SM에게 직접 설계 권한이 있고 독립 심사가 필요하지 않다면 자기 심사용 CR을 만들지 않고 `--by-source-ref <불변-설계-참조>`를 사용합니다. 이전 CR은 `superseded` 상태와 승인 본문을 보존하고, 연결된 queued 구현 작업은 취소되며 active 구현 작업은 `cancel_requested`가 됩니다. 이미 finished인 결과는 보존하고 새 설계에 필요한 보강 handoff를 별도로 등록합니다. 단순 `cr cancel`도 연결된 미완료 구현 작업을 같은 규칙으로 정리합니다.
+
 Schema migration 후 과거 approved CR이 `legacy-unsealed`로 표시되면 지정 reviewer가 본문을 확인하고 새 구현 전에 명시적으로 봉인합니다.
 
 ```bash
@@ -344,7 +352,7 @@ bin/baton cr seal CR-YYYY-MM-DD-001 \
 
 ## Wait와 자원 사용
 
-`wait`와 `cr wait-review`는 작업이 없을 때 `time.sleep()`으로 대기하므로 busy loop로 CPU를 계속 점유하지 않습니다.
+`wait`, `cr wait-review`, 통합 `watch`는 작업이 없을 때 `time.sleep()`으로 대기하므로 busy loop로 CPU를 계속 점유하지 않습니다. `watch`는 해당 role에 배정된 submitted CR을 먼저 확인하고 그 다음 ready handoff를 확인합니다.
 
 - 기본 timeout: 900초
 - 기본 polling interval: `auto`
@@ -362,9 +370,10 @@ bin/baton cr seal CR-YYYY-MM-DD-001 \
 ```bash
 bin/baton wait --role frontend --timeout 900
 bin/baton wait --role frontend --timeout 900 --interval auto
+bin/baton watch --role planning --timeout 900
 ```
 
-일반 `wait`는 주기마다 stop/shift 확인, 의존성 및 Gate 조정, role queue 조회를 수행합니다. Baton은 handoff와 CR waiter를 같은 `waiter_leases` table에 heartbeat로 등록하고 활성 수에 비례해 interval을 자동으로 늘립니다. 한 명은 3초, 두 명은 각각 6초, 열 명 이상은 각각 최대 30초를 목표로 하며 동시 polling을 줄이는 작은 jitter가 적용됩니다.
+일반 `wait`는 주기마다 stop/shift 확인, 의존성 및 Gate 조정, role queue 조회를 수행합니다. Baton은 handoff, CR, 통합 watcher를 같은 `waiter_leases` table에 heartbeat로 등록하고 활성 수에 비례해 interval을 자동으로 늘립니다. 한 명은 3초, 두 명은 각각 6초, 열 명 이상은 각각 최대 30초를 목표로 하며 동시 polling을 줄이는 작은 jitter가 적용됩니다.
 
 정상 종료 시 lease는 즉시 제거됩니다. 자동 waiter의 process 연결이 끊기면 30초 lease가 만료되고 이후 heartbeat가 stale record를 정리합니다. 25초를 초과하는 고정 interval은 정상 sleep을 보호하기 위해 `interval + 5초` lease를 사용합니다. 숫자 interval을 명시한 waiter도 활성 수에는 포함되지만 자신의 sleep은 지정된 값으로 고정됩니다.
 
@@ -379,7 +388,7 @@ bin/baton shift extend --role frontend
 bin/baton shift end --role frontend --reason "End of day"
 ```
 
-`shift start`의 기본 duration은 4시간, `shift extend`의 기본 duration은 1시간입니다. shift가 만료되면 새로운 wait와 claim은 중지되지만 이미 claim한 작업의 `finish` 또는 `fail` 보고는 허용됩니다.
+`shift start`의 기본 duration은 4시간, `shift extend`의 기본 duration은 1시간입니다. shift가 만료되면 새로운 wait, watch, claim은 중지되지만 이미 claim한 작업의 완료 보고는 허용됩니다. 단, 작업이 `cancel_requested`이면 `finish`나 `fail` 대신 `cancel-ack`로 중단을 확인해야 합니다.
 
 worker는 첫 wait 전에 적용되는 전역 및 role shift 상태를 확인합니다. 미래 deadline이 없고 중지되거나 만료된 scope도 없을 때만 기본 4시간 role shift를 시작합니다. 이미 활성 deadline이 있으면 유지하고, 만료 또는 중지된 scope는 사용자나 SM의 명시적인 승인 없이 다시 시작, 연장 또는 resume하지 않습니다.
 

@@ -35,8 +35,25 @@ DEFAULT_ROLES = (
     ("backend-design", "Backend Design"),
 )
 
-STATUSES = {"blocked", "open", "in_progress", "failed", "finished", "cancelled"}
-CR_STATUSES = {"draft", "submitted", "revision_requested", "approved", "rejected", "implemented", "cancelled"}
+STATUSES = {
+    "blocked",
+    "open",
+    "in_progress",
+    "cancel_requested",
+    "failed",
+    "finished",
+    "cancelled",
+}
+CR_STATUSES = {
+    "draft",
+    "submitted",
+    "revision_requested",
+    "approved",
+    "rejected",
+    "implemented",
+    "superseded",
+    "cancelled",
+}
 BATON_VERSION = __version__
 AUTO_INTERVAL_BASE_SECONDS = 3
 AUTO_INTERVAL_MAX_SECONDS = 30
@@ -71,7 +88,7 @@ FAILURE_REVIEW_PERMISSIONS = {
 KNOWN_PERMISSIONS = (
     REVIEW_PERMISSIONS | HANDOFF_PERMISSIONS | GATE_PERMISSIONS | WORKSPACE_PERMISSIONS
 )
-LATEST_SCHEMA_VERSION = 8
+LATEST_SCHEMA_VERSION = 9
 PROJECT_FORMAT_VERSION = 1
 PROJECT_MARKER_NAME = "project.json"
 PROJECT_CONFIG_NAME = "baton.toml"
@@ -656,6 +673,113 @@ def migration_v8_cr_body_integrity(con: sqlite3.Connection) -> None:
         con.execute("alter table change_requests add column approved_body_hash text")
 
 
+def migration_v9_plan_revision_controls(con: sqlite3.Connection) -> None:
+    con.execute("PRAGMA legacy_alter_table = ON")
+    try:
+        con.execute("alter table handoff_jobs rename to handoff_jobs_v8")
+        execute_sql_script(
+            con,
+            """
+            create table handoff_jobs (
+              job_id text primary key,
+              title text not null,
+              status text not null check (status in ('blocked', 'open', 'in_progress', 'cancel_requested', 'failed', 'finished', 'cancelled')),
+              target_role text not null references roles(role_id),
+              source_ref text,
+              objective text not null,
+              exit_criteria text not null,
+              created_at text not null,
+              claimed_by text,
+              started_at text,
+              finished_at text,
+              closure_evidence text,
+              related_commit text
+            );
+
+            insert into handoff_jobs(
+              job_id, title, status, target_role, source_ref, objective, exit_criteria,
+              created_at, claimed_by, started_at, finished_at, closure_evidence, related_commit
+            )
+            select
+              job_id, title, status, target_role, source_ref, objective, exit_criteria,
+              created_at, claimed_by, started_at, finished_at, closure_evidence, related_commit
+            from handoff_jobs_v8;
+
+            drop table handoff_jobs_v8;
+            create index if not exists idx_handoff_jobs_status_role on handoff_jobs(status, target_role);
+            """,
+        )
+
+        con.execute("alter table change_requests rename to change_requests_v8")
+        execute_sql_script(
+            con,
+            """
+            create table change_requests (
+              cr_id text primary key,
+              title text not null,
+              status text not null check (status in ('draft', 'submitted', 'revision_requested', 'approved', 'rejected', 'implemented', 'superseded', 'cancelled')),
+              author_role text not null references roles(role_id),
+              reviewer_role text not null references roles(role_id),
+              file_path text not null unique,
+              created_at text not null,
+              updated_at text not null,
+              submitted_at text,
+              approved_at text,
+              rejected_at text,
+              implemented_at text,
+              revision_count integer not null default 0,
+              active_revision_job_id text references handoff_jobs(job_id),
+              submitted_body_hash text,
+              approved_body_hash text,
+              superseded_by_cr_id text references change_requests(cr_id),
+              superseded_by_ref text
+            );
+
+            insert into change_requests(
+              cr_id, title, status, author_role, reviewer_role, file_path,
+              created_at, updated_at, submitted_at, approved_at, rejected_at,
+              implemented_at, revision_count, active_revision_job_id,
+              submitted_body_hash, approved_body_hash
+            )
+            select
+              cr_id, title, status, author_role, reviewer_role, file_path,
+              created_at, updated_at, submitted_at, approved_at, rejected_at,
+              implemented_at, revision_count, active_revision_job_id,
+              submitted_body_hash, approved_body_hash
+            from change_requests_v8;
+
+            drop table change_requests_v8;
+            create index if not exists idx_cr_status_reviewer on change_requests(status, reviewer_role);
+            """,
+        )
+
+        con.execute("alter table waiter_leases rename to waiter_leases_v8")
+        execute_sql_script(
+            con,
+            """
+            create table waiter_leases (
+              waiter_id text primary key,
+              wait_kind text not null check (wait_kind in ('handoff', 'cr_review', 'watch')),
+              role_id text not null references roles(role_id),
+              started_at text not null,
+              heartbeat_at text not null,
+              lease_expires_at text not null
+            );
+
+            insert into waiter_leases(
+              waiter_id, wait_kind, role_id, started_at, heartbeat_at, lease_expires_at
+            )
+            select waiter_id, wait_kind, role_id, started_at, heartbeat_at, lease_expires_at
+            from waiter_leases_v8;
+
+            drop table waiter_leases_v8;
+            create index if not exists idx_waiter_leases_expiry on waiter_leases(lease_expires_at);
+            """,
+        )
+    finally:
+        con.execute("PRAGMA legacy_alter_table = OFF")
+
+
 MIGRATIONS = (
     (1, "initial_schema", migration_v1_initial_schema),
     (2, "handoff_cancel_permission", migration_v2_handoff_cancel_permission),
@@ -665,6 +789,7 @@ MIGRATIONS = (
     (6, "workspace_provenance", migration_v6_workspace_provenance),
     (7, "handoff_failures", migration_v7_handoff_failures),
     (8, "cr_body_integrity", migration_v8_cr_body_integrity),
+    (9, "plan_revision_controls", migration_v9_plan_revision_controls),
 )
 
 
@@ -1390,7 +1515,11 @@ def active_waiter_count(con: sqlite3.Connection) -> int:
 def in_progress_handoff_count(con: sqlite3.Connection) -> int:
     if "handoff_jobs" not in database_table_names(con):
         return 0
-    return int(con.execute("select count(*) from handoff_jobs where status = 'in_progress'").fetchone()[0])
+    return int(
+        con.execute(
+            "select count(*) from handoff_jobs where status in ('in_progress', 'cancel_requested')"
+        ).fetchone()[0]
+    )
 
 
 def global_stop_is_active(con: sqlite3.Connection) -> bool:
@@ -1879,6 +2008,7 @@ def cancel_handoff_with_dependents(
     job_id: str,
     actor_role: str,
     message: str,
+    event_type: str = "cancelled",
 ) -> list[str]:
     row = con.execute(
         "select status from handoff_jobs where job_id = ?",
@@ -1892,7 +2022,7 @@ def cancel_handoff_with_dependents(
     )
     event(
         con,
-        "cancelled",
+        event_type,
         job_id=job_id,
         actor_role=actor_role,
         from_status=row["status"],
@@ -1900,6 +2030,83 @@ def cancel_handoff_with_dependents(
         message=message,
     )
     return [job_id, *cancel_blocked_dependents(con, job_id, actor_role)]
+
+
+def request_handoff_cancellation(
+    con: sqlite3.Connection,
+    job_id: str,
+    actor_role: str,
+    message: str,
+) -> tuple[str, list[str]]:
+    row = con.execute(
+        "select status from handoff_jobs where job_id = ?",
+        (job_id,),
+    ).fetchone()
+    if not row:
+        raise SystemExit(f"ERROR: unknown job: {job_id}")
+    if row["status"] in {"finished", "cancelled"}:
+        raise SystemExit(f"ERROR: {row['status']} job cannot be cancelled: {job_id}")
+    if row["status"] == "cancel_requested":
+        raise SystemExit(f"ERROR: cancellation is already requested: {job_id}")
+    if row["status"] == "in_progress":
+        con.execute(
+            "update handoff_jobs set status = 'cancel_requested' where job_id = ?",
+            (job_id,),
+        )
+        event(
+            con,
+            "cancellation_requested",
+            job_id=job_id,
+            actor_role=actor_role,
+            from_status="in_progress",
+            to_status="cancel_requested",
+            message=message,
+        )
+        return "requested", [job_id]
+    return "cancelled", cancel_handoff_with_dependents(con, job_id, actor_role, message)
+
+
+def cancel_linked_implementation_handoffs(
+    con: sqlite3.Connection,
+    cr_id: str,
+    actor_role: str,
+    reason: str,
+) -> tuple[list[str], list[str]]:
+    rows = con.execute(
+        """
+        select h.job_id, h.status
+        from cr_handoffs ch
+        join handoff_jobs h on h.job_id = ch.job_id
+        where ch.cr_id = ? and ch.kind = 'implementation'
+        order by h.created_at, h.job_id
+        """,
+        (cr_id,),
+    ).fetchall()
+    failed = [row["job_id"] for row in rows if row["status"] == "failed"]
+    if failed:
+        raise SystemExit(
+            "ERROR: resolve the failure CR before cancelling or superseding its parent CR: "
+            + ", ".join(failed)
+        )
+    requested: list[str] = []
+    cancelled: list[str] = []
+    for row in rows:
+        if row["status"] in {"finished", "cancelled"}:
+            continue
+        if row["status"] == "cancel_requested":
+            requested.append(row["job_id"])
+            continue
+        outcome, affected = request_handoff_cancellation(
+            con,
+            row["job_id"],
+            actor_role,
+            reason,
+        )
+        if outcome == "requested":
+            requested.extend(affected)
+        else:
+            cancelled.extend(affected)
+    return requested, list(dict.fromkeys(cancelled))
 
 
 def cancel_jobs_for_gate(
@@ -2071,6 +2278,8 @@ def cr_frontmatter(row: sqlite3.Row) -> str:
         "active_revision_job_id": row["active_revision_job_id"] or "",
         "submitted_body_hash": row["submitted_body_hash"] or "",
         "approved_body_hash": row["approved_body_hash"] or "",
+        "superseded_by_cr_id": row["superseded_by_cr_id"] or "",
+        "superseded_by_ref": row["superseded_by_ref"] or "",
         "managed_by": "baton",
         "updated_at": row["updated_at"],
     }
@@ -2153,7 +2362,7 @@ def cr_body_integrity(
     row: sqlite3.Row,
     current_hash: str | None = None,
 ) -> tuple[str, str]:
-    if row["status"] in {"approved", "implemented"}:
+    if row["status"] in {"approved", "implemented", "superseded"}:
         expected = str(row["approved_body_hash"] or "")
     elif row["status"] == "submitted":
         expected = str(row["submitted_body_hash"] or "")
@@ -2220,7 +2429,7 @@ def sync_cr_file(
         return
     if (
         not allow_body_mismatch
-        and row["status"] in {"approved", "implemented"}
+        and row["status"] in {"approved", "implemented", "superseded"}
         and row["approved_body_hash"]
     ):
         require_cr_body_hash(con, row, "approved_body_hash", "approval")
@@ -2451,6 +2660,17 @@ def command_migrate(args: argparse.Namespace) -> int:
             if marker:
                 print(f"Project marker {marker}")
             return 0
+        waiters = active_waiter_count(con)
+        if waiters:
+            raise MigrationError(
+                f"cannot migrate while {waiters} Baton waiter(s) are active; stop agents and retry"
+            )
+        active_handoffs = in_progress_handoff_count(con)
+        if active_handoffs:
+            raise MigrationError(
+                f"cannot migrate while {active_handoffs} handoff(s) are in progress or awaiting "
+                "cancellation acknowledgement; finish or cancel them and retry"
+            )
         signature = database_content_signature(con)
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -3182,7 +3402,7 @@ def command_cr_reassign_reviewer(args: argparse.Namespace) -> int:
         row = con.execute("select * from change_requests where cr_id = ?", (args.cr_id,)).fetchone()
         if not row:
             raise SystemExit(f"ERROR: unknown CR: {args.cr_id}")
-        if row["status"] in {"approved", "rejected", "implemented", "cancelled"}:
+        if row["status"] in {"approved", "rejected", "implemented", "superseded", "cancelled"}:
             raise SystemExit(f"ERROR: CR reviewer cannot be reassigned after terminal review: {args.cr_id} status={row['status']}")
         require_distinct_cr_roles(row["author_role"], new_reviewer_role)
         old_reviewer_role = row["reviewer_role"]
@@ -3223,6 +3443,8 @@ def command_cr_cancel(args: argparse.Namespace) -> int:
             raise SystemExit(f"ERROR: CR is already cancelled: {args.cr_id}")
         if row["status"] == "implemented":
             raise SystemExit(f"ERROR: implemented CR cannot be cancelled: {args.cr_id}")
+        if row["status"] == "superseded":
+            raise SystemExit(f"ERROR: superseded CR cannot be cancelled: {args.cr_id}")
         failure = con.execute(
             """
             select id, job_id
@@ -3231,6 +3453,12 @@ def command_cr_cancel(args: argparse.Namespace) -> int:
             """,
             (args.cr_id,),
         ).fetchone()
+        requested_jobs, cancelled_jobs = cancel_linked_implementation_handoffs(
+            con,
+            args.cr_id,
+            actor_role,
+            f"CR {args.cr_id} cancelled: {reason}",
+        )
         now = utc_now()
         con.execute(
             """
@@ -3284,7 +3512,95 @@ def command_cr_cancel(args: argparse.Namespace) -> int:
         )
         sync_cr_file(con, args.cr_id, allow_body_mismatch=True)
         con.commit()
-    print(f"{args.cr_id}\tcancelled")
+    print(
+        f"{args.cr_id}\tcancelled\t"
+        f"cancel_requested={len(requested_jobs)}\tcancelled_jobs={len(cancelled_jobs)}"
+    )
+    return 0
+
+
+def command_cr_supersede(args: argparse.Namespace) -> int:
+    reason = args.reason.strip()
+    if not reason:
+        raise SystemExit("ERROR: --reason cannot be blank")
+    if args.by_cr and args.cr_id == args.by_cr:
+        raise SystemExit("ERROR: a CR cannot supersede itself")
+    with connect(args.db) as con:
+        init_schema(con)
+        begin_immediate(con)
+        actor_role = require_permission(con, args.role, "cr.admin")
+        old = con.execute(
+            "select * from change_requests where cr_id = ?",
+            (args.cr_id,),
+        ).fetchone()
+        replacement = None
+        replacement_ref = args.by_source_ref.strip()
+        if args.by_cr:
+            replacement = con.execute(
+                "select * from change_requests where cr_id = ?",
+                (args.by_cr,),
+            ).fetchone()
+        if not old:
+            raise SystemExit(f"ERROR: unknown CR: {args.cr_id}")
+        if args.by_cr and not replacement:
+            raise SystemExit(f"ERROR: unknown replacement CR: {args.by_cr}")
+        if old["status"] != "approved":
+            raise SystemExit(
+                f"ERROR: superseded CR must be approved: {args.cr_id} status={old['status']}"
+            )
+        if replacement and replacement["status"] != "approved":
+            raise SystemExit(
+                f"ERROR: replacement CR must be approved: {args.by_cr} status={replacement['status']}"
+            )
+        require_cr_body_hash(con, old, "approved_body_hash", "approval")
+        if replacement:
+            require_cr_body_hash(con, replacement, "approved_body_hash", "approval")
+            replacement_label = args.by_cr
+        else:
+            require_permission(con, actor_role, "handoff.register")
+            if not replacement_ref:
+                raise SystemExit("ERROR: --by-source-ref cannot be blank")
+            replacement_label = replacement_ref
+        requested_jobs, cancelled_jobs = cancel_linked_implementation_handoffs(
+            con,
+            args.cr_id,
+            actor_role,
+            f"CR {args.cr_id} superseded by {replacement_label}: {reason}",
+        )
+        now = utc_now()
+        con.execute(
+            """
+            update change_requests
+            set status = 'superseded', superseded_by_cr_id = ?, superseded_by_ref = ?, updated_at = ?
+            where cr_id = ?
+            """,
+            (args.by_cr or None, replacement_ref or None, now, args.cr_id),
+        )
+        cr_event(
+            con,
+            args.cr_id,
+            "superseded",
+            actor_role=actor_role,
+            from_status="approved",
+            to_status="superseded",
+            message=f"{replacement_label}: {reason}",
+        )
+        if replacement:
+            cr_event(
+                con,
+                args.by_cr,
+                "supersedes",
+                actor_role=actor_role,
+                from_status="approved",
+                to_status="approved",
+                message=f"{args.cr_id}: {reason}",
+            )
+        sync_cr_file(con, args.cr_id)
+        con.commit()
+    print(
+        f"{args.cr_id}\tsuperseded_by\t{replacement_label}\t"
+        f"cancel_requested={len(requested_jobs)}\tcancelled_jobs={len(cancelled_jobs)}"
+    )
     return 0
 
 
@@ -3380,6 +3696,10 @@ def command_cr_status(args: argparse.Namespace) -> int:
         print(f"body_hash: {expected_hash}")
     if row["active_revision_job_id"]:
         print(f"active_revision_job_id: {row['active_revision_job_id']}")
+    if row["superseded_by_cr_id"]:
+        print(f"superseded_by_cr_id: {row['superseded_by_cr_id']}")
+    if row["superseded_by_ref"]:
+        print(f"superseded_by_ref: {row['superseded_by_ref']}")
     return 0
 
 
@@ -3397,6 +3717,10 @@ def command_cr_show(args: argparse.Namespace) -> int:
     print(f"title: {row['title']}")
     print(f"author_role: {row['author_role']}")
     print(f"reviewer_role: {row['reviewer_role']}")
+    if row["superseded_by_cr_id"]:
+        print(f"superseded_by_cr_id: {row['superseded_by_cr_id']}")
+    if row["superseded_by_ref"]:
+        print(f"superseded_by_ref: {row['superseded_by_ref']}")
     print(f"file_path: {path}")
     print(f"body_integrity: {integrity}")
     if expected_hash:
@@ -3471,6 +3795,74 @@ def command_cr_wait_review(args: argparse.Namespace) -> int:
                 args.db,
                 waiter_id,
                 "cr_review",
+                role,
+                waiter_lease_seconds(args.interval),
+            )
+    finally:
+        unregister_waiter(args.db, waiter_id)
+
+
+def command_watch(args: argparse.Namespace) -> int:
+    deadline = None if args.timeout == 0 else time.monotonic() + args.timeout
+    waiter_id, role, active_waiters = start_waiter(args, "watch")
+    try:
+        while True:
+            with connect(args.db) as con:
+                init_schema(con)
+                stopped = get_stop_control(con, role)
+            if stopped:
+                reason = f" reason={stopped['reason']}" if stopped["reason"] else ""
+                print(f"Stopped watching role {role} by {stopped['scope']}.{reason}")
+                return 3
+
+            promote_args = argparse.Namespace(db=args.db, actor_role=role, quiet=True)
+            command_promote_ready(promote_args)
+            with connect(args.db) as con:
+                init_schema(con)
+                can_review = bool(
+                    con.execute(
+                        "select 1 from role_permissions where role_id = ? and permission = 'cr.review'",
+                        (role,),
+                    ).fetchone()
+                )
+                review = None
+                if can_review:
+                    review = con.execute(
+                        """
+                        select cr_id, title, file_path
+                        from change_requests
+                        where status = 'submitted' and reviewer_role = ?
+                        order by submitted_at, created_at, cr_id
+                        limit 1
+                        """,
+                        (role,),
+                    ).fetchone()
+                if review:
+                    path = project_file_path(con, review["file_path"])
+                    print(f"cr_review\t{review['cr_id']}\t{review['title']}\t{path}")
+                    return 0
+                handoff = con.execute(
+                    """
+                    select job_id, title
+                    from handoff_jobs
+                    where status = 'open' and target_role = ?
+                    order by created_at, job_id
+                    limit 1
+                    """,
+                    (role,),
+                ).fetchone()
+            if handoff:
+                print(f"handoff\t{handoff['job_id']}\t{handoff['title']}")
+                return 0
+            if deadline is not None and time.monotonic() >= deadline:
+                print(f"Timed out watching role {role}")
+                return 2
+            interval = poll_sleep_seconds(args.interval, active_waiters, waiter_id)
+            time.sleep(bounded_sleep_seconds(interval, deadline))
+            active_waiters = heartbeat_waiter(
+                args.db,
+                waiter_id,
+                "watch",
                 role,
                 waiter_lease_seconds(args.interval),
             )
@@ -3703,6 +4095,10 @@ def command_finish(args: argparse.Namespace) -> int:
             raise SystemExit(f"ERROR: unknown job: {args.job_id}")
         if row["target_role"] != role:
             raise SystemExit(f"ERROR: job target role is {row['target_role']}, not {role}")
+        if row["status"] == "cancel_requested":
+            raise SystemExit(
+                f"ERROR: cancellation was requested for {args.job_id}; stop work and run cancel-ack"
+            )
         if row["status"] != "in_progress":
             raise SystemExit(f"ERROR: job is not in_progress: {args.job_id} status={row['status']}")
         require_linked_cr_integrity(con, args.job_id)
@@ -3745,6 +4141,10 @@ def command_fail(args: argparse.Namespace) -> int:
             raise SystemExit(f"ERROR: unknown job: {args.job_id}")
         if row["target_role"] != role:
             raise SystemExit(f"ERROR: job target role is {row['target_role']}, not {role}")
+        if row["status"] == "cancel_requested":
+            raise SystemExit(
+                f"ERROR: cancellation was requested for {args.job_id}; stop work and run cancel-ack"
+            )
         if row["status"] != "in_progress":
             raise SystemExit(f"ERROR: job is not in_progress: {args.job_id} status={row['status']}")
 
@@ -3968,6 +4368,11 @@ def command_cancel(args: argparse.Namespace) -> int:
             raise SystemExit(f"ERROR: finished job cannot be cancelled: {args.job_id}")
         if row["status"] == "cancelled":
             raise SystemExit(f"ERROR: job is already cancelled: {args.job_id}")
+        if row["status"] == "cancel_requested" and not args.force:
+            raise SystemExit(
+                f"ERROR: cancellation is already requested: {args.job_id}; "
+                "the claimant must run cancel-ack, or an authorized role may use cancel --force"
+            )
         active_failure = con.execute(
             """
             select f.id, f.cr_id, c.status as cr_status
@@ -3987,12 +4392,22 @@ def command_cancel(args: argparse.Namespace) -> int:
                 f"ERROR: failure CR must be rejected or cancelled before handoff cancellation: "
                 f"{active_failure['cr_id']} status={active_failure['cr_status']}"
             )
-        cancelled = cancel_handoff_with_dependents(
-            con,
-            args.job_id,
-            actor_role,
-            reason,
-        )
+        if args.force:
+            cancelled = cancel_handoff_with_dependents(
+                con,
+                args.job_id,
+                actor_role,
+                reason,
+                event_type="cancellation_forced",
+            )
+            outcome = "cancelled"
+        else:
+            outcome, cancelled = request_handoff_cancellation(
+                con,
+                args.job_id,
+                actor_role,
+                reason,
+            )
         if active_failure:
             con.execute(
                 """
@@ -4003,7 +4418,55 @@ def command_cancel(args: argparse.Namespace) -> int:
                 (actor_role, utc_now(), reason, active_failure["id"]),
             )
         con.commit()
-    print(f"Cancelled {args.job_id} dependents={len(cancelled) - 1}")
+    if outcome == "requested":
+        print(f"Cancellation requested {args.job_id}")
+    else:
+        print(f"Cancelled {args.job_id} dependents={len(cancelled) - 1}")
+    return 0
+
+
+def command_cancel_ack(args: argparse.Namespace) -> int:
+    evidence = args.evidence.strip()
+    if not evidence:
+        raise SystemExit("ERROR: --evidence cannot be blank")
+    with connect(args.db) as con:
+        init_schema(con)
+        begin_immediate(con)
+        role = resolve_role(con, args.role)
+        row = con.execute(
+            "select status, target_role, claimed_by from handoff_jobs where job_id = ?",
+            (args.job_id,),
+        ).fetchone()
+        if not row:
+            raise SystemExit(f"ERROR: unknown job: {args.job_id}")
+        if row["target_role"] != role:
+            raise SystemExit(f"ERROR: job target role is {row['target_role']}, not {role}")
+        if row["status"] != "cancel_requested":
+            raise SystemExit(
+                f"ERROR: job is not cancel_requested: {args.job_id} status={row['status']}"
+            )
+        claimant = claimed_by_value(args, role)
+        if row["claimed_by"] and row["claimed_by"] != claimant:
+            raise SystemExit(
+                f"ERROR: cancellation must be acknowledged by claimant {row['claimed_by']}, not {claimant}"
+            )
+        con.execute(
+            "update handoff_jobs set status = 'cancelled' where job_id = ?",
+            (args.job_id,),
+        )
+        event(
+            con,
+            "cancellation_acknowledged",
+            job_id=args.job_id,
+            actor_role=role,
+            actor_id=claimant,
+            from_status="cancel_requested",
+            to_status="cancelled",
+            message=evidence,
+        )
+        descendants = cancel_blocked_dependents(con, args.job_id, role)
+        con.commit()
+    print(f"Cancelled {args.job_id} dependents={len(descendants)}")
     return 0
 
 
@@ -4634,6 +5097,23 @@ def build_parser() -> argparse.ArgumentParser:
     cr_cancel.add_argument("--reason", required=True)
     cr_cancel.set_defaults(func=command_cr_cancel)
 
+    cr_supersede = cr_sub.add_parser(
+        "supersede",
+        help="replace an approved CR and retire its unfinished implementation work",
+    )
+    cr_supersede.add_argument("cr_id", metavar="OLD_CR_ID")
+    cr_supersede_target = cr_supersede.add_mutually_exclusive_group(required=True)
+    cr_supersede_target.add_argument("--by", dest="by_cr", default="", metavar="NEW_CR_ID")
+    cr_supersede_target.add_argument(
+        "--by-source-ref",
+        default="",
+        metavar="SOURCE_REF",
+        help="immutable authoritative design reference when no replacement CR is needed",
+    )
+    cr_supersede.add_argument("--role", required=True)
+    cr_supersede.add_argument("--reason", required=True)
+    cr_supersede.set_defaults(func=command_cr_supersede)
+
     cr_create_handoff = cr_sub.add_parser("create-handoff")
     cr_create_handoff.add_argument("cr_id")
     cr_create_handoff.add_argument("--by-role", required=True)
@@ -4723,11 +5203,29 @@ def build_parser() -> argparse.ArgumentParser:
     retry.add_argument("--reason", required=True)
     retry.set_defaults(func=command_retry)
 
-    cancel = sub.add_parser("cancel", help="cancel one handoff and its blocked dependents")
+    cancel = sub.add_parser(
+        "cancel",
+        help="cancel queued work or request cooperative cancellation of claimed work",
+    )
     cancel.add_argument("job_id")
     cancel.add_argument("--role", required=True)
     cancel.add_argument("--reason", required=True)
+    cancel.add_argument(
+        "--force",
+        action="store_true",
+        help="force final cancellation when the claimant cannot acknowledge",
+    )
     cancel.set_defaults(func=command_cancel)
+
+    cancel_ack = sub.add_parser(
+        "cancel-ack",
+        help="acknowledge a cancellation request as the handoff claimant",
+    )
+    cancel_ack.add_argument("job_id")
+    cancel_ack.add_argument("--role", required=True)
+    cancel_ack.add_argument("--claimed-by", default="")
+    cancel_ack.add_argument("--evidence", required=True)
+    cancel_ack.set_defaults(func=command_cancel_ack)
 
     events = sub.add_parser("events", help="show one handoff audit history")
     events.add_argument("job_id")
@@ -4784,6 +5282,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="poll seconds or auto; default: auto (3 seconds per active waiter, maximum 30); minimum fixed value: 1",
     )
     wait.set_defaults(func=command_wait)
+
+    watch = sub.add_parser(
+        "watch",
+        help="wait for assigned CR review first, then a ready handoff",
+        description="Wait for assigned CR review first, then a ready handoff.",
+    )
+    watch.add_argument("--role", required=True)
+    watch.add_argument("--timeout", type=int, default=900, help="seconds; default: 900; 0 means forever")
+    watch.add_argument(
+        "--interval",
+        type=parse_poll_interval,
+        default=None,
+        help="poll seconds or auto; default: auto (3 seconds per active waiter, maximum 30); minimum fixed value: 1",
+    )
+    watch.set_defaults(func=command_watch)
     return parser
 
 

@@ -323,6 +323,7 @@ Use `tools/baton/bin/baton` for role handoff and CR workflow state.
 - Configure least privilege with `role permission-add` and `role permission-remove`; do not edit permission rows directly.
 - Grant `handoff.register` only to roles allowed to create or retry work. Schema v7 preserves this formerly implicit access for existing roles, so review compatibility grants after migration.
 - Use handoff `cancel` only with explicit user/SM intent and a role granted `handoff.cancel`.
+- An `in_progress` cancellation becomes `cancel_requested`. The claimant must stop before commit or integration and run `cancel-ack` with evidence; use `cancel --force` only when acknowledgement is impossible.
 - Handoff cancellation affects only the selected job and its blocked dependency descendants; unrelated queues remain active.
 - Use a named Gate when work must wait for a future stage whose handoff ID does not exist yet.
 - Treat Gate release as a workflow decision requiring evidence, not as a routine worker action.
@@ -330,6 +331,7 @@ Use `tools/baton/bin/baton` for role handoff and CR workflow state.
 - Read CR handoff references such as `cr:CR-...` with `baton cr show <cr-id>`; do not resolve them relative to a task worktree.
 - Keep mutable CR Markdown under the shared `.baton/change-requests/` directory unless the user specifies an absolute branch-independent path.
 - Treat `body_integrity: mismatch` as a stop condition. Do not implement or finish work against a changed approved body.
+- Replace an incompatible approved design with `cr supersede`; do not edit the approved body. Compatible changes keep valid work, while supersession retires linked unfinished implementation work.
 - After migrating an existing approved CR without a hash, ask its assigned reviewer to run `cr seal` before creating or claiming implementation work.
 ```
 
@@ -362,13 +364,14 @@ Do not use repeated next commands as a substitute for wait, and do not stop when
 Exit 2 means only that the bounded wait timed out: check the shift and run wait again silently while it remains active.
 Do not send periodic or duplicate waiting updates. Report once when work becomes ready, a claim or completion changes state, waiting stops or the shift expires, an error needs intervention, or the user asks for status.
 When work appears, re-check with next, claim it, complete only the claimed task, then finish it with concrete evidence.
+Before commit, integration, or finish, inspect the handoff again. If it is cancel_requested, stop and run cancel-ack with evidence instead of finish or fail.
 If the exit criteria cannot be met, report it with baton fail and the available evidence. Never use finish for unsuccessful work.
 After finish or failure reporting, return to bounded wait while the shift remains active.
 Blocked handoffs are promoted automatically after their dependencies finish. A failed dependency remains blocked pending its failure CR decision; cancelled dependency branches will not become ready, while unrelated queue branches remain active.
 Do not edit Baton SQLite records directly.
 ```
 
-Minimal CR reviewer prompt:
+Minimal planner/SM reviewer prompt:
 
 ```text
 Use Baton to review submitted CRs as the sm role.
@@ -386,12 +389,16 @@ tools/baton/bin/baton shift start --role sm
 
 Preserve an active deadline. Do not restart, extend, or resume an expired or stopped scope without explicit user or SM authorization.
 
-Then repeat bounded CR review waits while the shift is active:
-tools/baton/bin/baton cr wait-review --role sm --timeout 900
+Then repeat the combined CR and handoff watcher while the shift is active:
+tools/baton/bin/baton watch --role sm --timeout 900
 
 On exit 2, check the shift and re-enter the wait silently while it remains active. Do not report unchanged waiting state.
-When a CR appears, inspect the Markdown file, then approve, reject, or request revision through Baton.
+Do not send a final response while the shift remains active merely because one action completed or the queue is empty; Baton cannot create a new Codex turn after this one ends.
+The watcher returns assigned CRs before handoffs. When a CR appears, inspect the Markdown file, then approve, reject, or request revision through Baton.
 If approved implementation should proceed, create implementation handoffs through Baton.
+If your role has direct design authority, do not create and self-review a CR. Record the authoritative contract and register implementation handoffs directly unless independent or user review is required.
+When worker results require planning reconciliation, register a planning handoff depending on every required worker job, then return to watch. Make that handoff complete enough for another planning agent to claim.
+For an incompatible approved design change, use `cr supersede` with an approved replacement CR. If your planner/SM role has direct design authority and no independent review is required, use `--by-source-ref <immutable-ref>` instead. Do not modify the old approved body.
 Do not edit Baton SQLite records directly.
 ```
 
@@ -536,7 +543,7 @@ baton project migrate --apply --plan-token <token>
 baton migrate --check
 ```
 
-Automatic discovery recognizes `.baton/baton.sqlite3`, `tools/baton/.baton/baton.sqlite3`, and `tools/agents-baton/.baton/baton.sqlite3` under the selected Baton project root. Use `--project-root PATH` when no marker exists yet or the command runs outside the intended project, or `--source-db PATH` when the existing database is elsewhere. Check mode performs the real migration logic only on an in-memory clone. Apply mode rechecks the source signature, blocks active waiters and in-progress handoffs, requires `stop --all` for a layout move, backs up the source, installs the marker, and refuses to overwrite or merge a different existing target database. A successful layout move replaces the legacy path with a symlink to the canonical database to prevent old wrappers from creating a split workflow.
+Automatic discovery recognizes `.baton/baton.sqlite3`, `tools/baton/.baton/baton.sqlite3`, and `tools/agents-baton/.baton/baton.sqlite3` under the selected Baton project root. Use `--project-root PATH` when no marker exists yet or the command runs outside the intended project, or `--source-db PATH` when the existing database is elsewhere. Check mode performs the real migration logic only on an in-memory clone. Apply mode rechecks the source signature, blocks active waiters and in-progress or cancel-requested handoffs, requires `stop --all` for a layout move, backs up the source, installs the marker, and refuses to overwrite or merge a different existing target database. A successful layout move replaces the legacy path with a symlink to the canonical database to prevent old wrappers from creating a split workflow.
 
 ## When To Avoid Sharing One Database
 

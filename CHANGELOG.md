@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added schema migration v9 with cooperative `cancel_requested` handoff cancellation, claimant `cancel-ack`, audited emergency force cancellation, CR supersession, and linked implementation retirement.
+- Blocked in-place schema migration while waiters, in-progress handoffs, or cancellation acknowledgements remain active.
+- Added combined `watch` polling for planner/SM roles, prioritizing assigned CR reviews before ready handoffs while retaining bounded shift and automatic interval behavior.
+- Defined planner reconciliation handoffs and state-specific policy for incompatible approved design changes without rewriting immutable CR bodies.
 - Added schema migration v8 with submitted and approved CR body hashes, approval-time verification, explicit legacy `cr seal`, and implementation claim/finish integrity guards.
 - Moved new mutable CR bodies to branch-independent `.baton/change-requests/`, added stable `cr:CR-ID` handoff references and `cr show`, and retained all existing CR paths without relocation.
 - Added `BATON_DB` and `BATON_WORKSPACE_ROOT` support for one local control database shared safely by isolated Git worktrees, plus generated `.baton/.gitignore` protection.
