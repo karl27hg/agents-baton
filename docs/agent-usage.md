@@ -54,6 +54,8 @@ A role may register downstream work only when it has `handoff.register`, a valid
 
 The planning agent must follow `docs/planner-prompt.md` before registering parallel work. Jobs are parallel only when their inputs, write sets, contracts, shared state, and accepted completion order are independent. Unknown independence is a dependency, not permission to run concurrently.
 
+When planning must resume after worker execution, register a planning-role reconciliation handoff with every required worker job in `--depends-on`. Use a Gate when the final predecessor set is not yet known. The follow-up belongs to the role queue and may be claimed by another planning agent, so its stored contract must not rely on private conversation context. A planner/SM with direct design authority may register implementation work without creating a self-reviewed CR; use CR review for proposals from another role or changes requiring independent/user approval.
+
 ```bash
 bin/baton --db /tmp/baton.sqlite3 register \
   --title "Backend follow-up" \
@@ -143,7 +145,16 @@ bin/baton --db /tmp/baton.sqlite3 cancel HO-YYYY-MM-DD-001 \
   --reason "Work is no longer required."
 ```
 
-This cancels the selected handoff and recursively cancels only `blocked` descendants that depend on it. Unrelated queue branches remain unchanged. It does not stop wait loops or clear a role queue; that is the purpose of `stop`. Baton rejects cancellation of finished or already-cancelled jobs. Worker agents must not infer cancellation from a wait timeout or stop control.
+For `blocked`, `open`, and reviewed `failed` jobs, this immediately cancels the selected handoff and recursively cancels only blocked descendants. An `in_progress` handoff becomes `cancel_requested`. The original claimant must stop before commit or integration and acknowledge with evidence:
+
+```bash
+bin/baton --db /tmp/baton.sqlite3 cancel-ack HO-YYYY-MM-DD-001 \
+  --role backend \
+  --claimed-by backend-main \
+  --evidence "Stopped before commit; local changes retained for inspection."
+```
+
+Acknowledgement finalizes cancellation and propagates it to blocked descendants. Use `cancel --force` only when the claimant cannot acknowledge. Unrelated queue branches remain unchanged. `stop` controls wait loops and is not job cancellation.
 
 ## Named Gate Flow
 
@@ -268,8 +279,15 @@ bin/baton --db /tmp/baton.sqlite3 cr reassign-reviewer CR-YYYY-MM-DD-001 \
 
 bin/baton --db /tmp/baton.sqlite3 cr cancel CR-YYYY-MM-DD-001 \
   --role sm \
-  --reason "Superseded by replacement CR."
+  --reason "The request was withdrawn."
+
+bin/baton --db /tmp/baton.sqlite3 cr supersede CR-YYYY-MM-DD-001 \
+  --by CR-YYYY-MM-DD-002 \
+  --role sm \
+  --reason "The approved contract changed incompatibly."
 ```
+
+Use `--by-source-ref <immutable-ref>` instead of `--by <new-cr>` when a planner/SM has direct design authority and independent review is not required. `cr cancel` retires linked unfinished implementation work. `cr supersede` preserves the immutable old approval, records the replacement, cancels queued linked work, and requests cooperative cancellation of linked active work. Finished work remains evidence and needs an explicit remediation handoff when the replacement invalidates its result.
 
 Approval does not automatically assign implementation. Use a separate implementation handoff when the reviewer decides work should proceed.
 
@@ -326,7 +344,10 @@ Use bounded waits by default:
 ```bash
 bin/baton --db /tmp/baton.sqlite3 wait --role frontend --timeout 900
 bin/baton --db /tmp/baton.sqlite3 cr wait-review --role sm --timeout 900
+bin/baton --db /tmp/baton.sqlite3 watch --role planning --timeout 900
 ```
+
+Use `watch` for planner/SM roles that receive both kinds of work. It checks assigned CR reviews first and then ready handoffs; a role without `cr.review` uses it as a handoff-only wait.
 
 `next` checks the queue once and exits immediately; it does not wait. If no ready handoff exists, run `wait`. A blocked handoff becomes visible after all required upstream handoffs finish and `wait` promotes it to `open`.
 
@@ -336,7 +357,7 @@ Avoid `--timeout 0` unless the user explicitly asks for a forever-wait experimen
 
 If a required upstream handoff or Gate is cancelled, Baton recursively cancels blocked dependent handoffs in that dependency branch. Independent queue branches remain available. Cancelled handoffs do not become ready and must not be reopened by agents.
 
-`--interval` defaults to `auto`. Automatic mode counts active handoff and CR waiters in the same database and targets `min(30, 3 * active waiters)` seconds with a small stable jitter. Use `--interval N` only for an explicit fixed override; `N` must be at least 1. Fixed waiters remain part of the active count used by automatic waiters.
+`--interval` defaults to `auto`. Automatic mode counts active handoff, CR, and combined watchers in the same database and targets `min(30, 3 * active waiters)` seconds with a small stable jitter. Use `--interval N` only for an explicit fixed override; `N` must be at least 1. Fixed waiters remain part of the active count used by automatic waiters.
 
 ## Shift Usage
 

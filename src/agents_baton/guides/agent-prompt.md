@@ -70,6 +70,7 @@ Baton records and authorizes workflow operations, but cannot disable tools suppl
 - Use the default automatic interval. Set a numeric `--interval` only when the user or project policy requires a fixed response bound.
 - Omitting `--interval` is equivalent to `--interval auto`.
 - Keep repeating bounded waits while the shift is active. A timeout is not completion.
+- Do not send a final response while the shift remains active merely because one action completed or the queue is empty. Baton cannot create a new host turn after the agent ends the current one.
 
 Recommended command:
 
@@ -81,6 +82,12 @@ Reviewer roles waiting for CR review work use:
 
 ```bash
 baton --db <db> cr wait-review --role <role> --timeout 900
+```
+
+Planner/SM roles that receive both handoffs and CR reviews use `watch`, which checks assigned CR reviews first and then ready handoffs:
+
+```bash
+baton --db <db> watch --role <role> --timeout 900
 ```
 
 Exit handling:
@@ -98,7 +105,7 @@ Shift handling:
 - Extend a shift only with explicit user or SM authorization. Omitting `--duration` from `shift extend` adds the default `1h`.
 - Use `baton shift status --role <role>` before re-entering wait after a timeout or after finishing work.
 - If the shift is expired or stopped, do not re-enter wait.
-- If work was already claimed, finish or report failure even if the shift expires before the report is submitted.
+- If work was already claimed, finish or report failure even if the shift expires before the report is submitted, unless the handoff changed to `cancel_requested`.
 - After a successful `finish`, `fail`, or CR review action, report the transition once, check shift status, and re-enter the appropriate bounded wait only if the shift is still active.
 
 A global shift uses `shift start --all`, `shift extend --all`, and `shift end --all`. Global and role scopes are cumulative controls: either scope can stop a role. Changing one scope does not clear an expired or stopped state on the other scope.
@@ -146,6 +153,8 @@ If claim fails, do not work on the job. Re-check with `next`, then return to bou
 - Do not treat stop/resume as job cancellation.
 - If claimed work cannot meet its exit criteria, use `baton fail` with a concrete reason and available evidence. Never use `finish` to report an unsuccessful result.
 - `fail` submits a linked CR and keeps downstream handoffs blocked. After reporting it, return to the normal wait loop; do not retry, cancel, or bypass the failed dependency without the failure CR decision.
+- Before committing, integrating, or reporting completion, inspect the claimed handoff again. If its status is `cancel_requested`, stop work and run `cancel-ack` with evidence describing retained changes and whether anything was committed. Do not use `finish` or `fail` after cancellation is requested.
+- Cancelling an `in_progress` handoff requests cooperative cancellation. Final cancellation and blocked-descendant propagation occur after the claimant runs `cancel-ack`. An SM may use `cancel --force` only when the claimant cannot acknowledge.
 - If a required upstream handoff is cancelled, Baton recursively cancels only blocked handoffs in that dependency branch. Unrelated queue branches remain active. Do not attempt to claim or reopen cancelled jobs.
 - Use `baton cancel` only when the user/SM explicitly decides to cancel work or the assigned failure reviewer rejects retry, and your role has `handoff.cancel`. Worker agents must not infer cancellation from timeout, stop, or missing work.
 - Do not release, cancel, or transfer a Gate unless the handoff or user instruction explicitly assigns that decision to your role. Gate ownership is authority, not evidence that the workflow condition is complete.
@@ -160,6 +169,7 @@ Only roles with CR review permissions can review submitted CRs. Do not approve, 
 Read the branch-independent body with `baton cr show <cr-id>`. Approval applies to the exact
 submitted body hash; if the body changed after submission, request revision instead of
 approving it. Do not edit an approved body. Requirement changes after approval need a new CR.
+For an incompatible approved change, use `cr supersede` with an approved replacement CR or an immutable authoritative design reference so linked queued work is cancelled and active work receives cooperative cancellation.
 
 The CR author role and reviewer role must be different. If you encounter a CR that is stuck because the same role is both author and reviewer, report it to the SM/admin role; do not edit SQLite directly.
 

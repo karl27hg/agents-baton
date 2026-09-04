@@ -29,8 +29,13 @@ grep -- '--plan-token PLAN_TOKEN' "$TMP/migrate-command.txt" >/dev/null
 "$CLI" help workspace events | grep -- '--limit LIMIT' >/dev/null
 "$CLI" help fail | grep -- '--reviewer-role REVIEWER_ROLE' >/dev/null
 "$CLI" help retry | grep -- '--cr-id CR_ID' >/dev/null
+"$CLI" help cancel | grep -- '--force' >/dev/null
+"$CLI" help cancel-ack | grep -- '--evidence EVIDENCE' >/dev/null
+"$CLI" help watch | grep 'CR review first' >/dev/null
 "$CLI" help cr show | grep 'CR_ID' >/dev/null
 "$CLI" help cr seal | grep -- '--evidence EVIDENCE' >/dev/null
+"$CLI" help cr supersede | grep -- '--by NEW_CR_ID' >/dev/null
+"$CLI" help cr supersede | grep -- '--by-source-ref SOURCE_REF' >/dev/null
 if "$CLI" help unknown-command >/dev/null 2>&1; then
   echo "ERROR: help accepted an unknown command" >&2
   exit 1

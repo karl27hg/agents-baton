@@ -52,7 +52,7 @@
 
 `baton migrate`는 검증된 SQLite backup을 먼저 만든 뒤 pending migration, 해당되는 seed 보강, `PRAGMA quick_check`, `PRAGMA foreign_key_check`를 하나의 transaction에서 실행합니다. 실패하면 schema 변경, seed 변경, migration record가 함께 rollback됩니다. 일반 workflow 명령은 pending migration을 자동 적용하지 않고 실패합니다. 전체 기본 권한은 신규 또는 무버전 DB에만 seed하며, 이후 migration은 그 migration에서 새로 도입한 권한만 추가하므로 프로젝트별 권한 철회가 보존됩니다.
 
-Release된 migration:
+현재 binary가 아는 migration:
 
 ```text
 1 initial_schema
@@ -62,6 +62,8 @@ Release된 migration:
 5 database_metadata
 6 workspace_provenance
 7 handoff_failures
+8 cr_body_integrity
+9 plan_revision_controls
 ```
 
 `baton migrate --check`는 DB가 현재 binary가 아는 최신 schema version인지 읽기 전용으로 확인합니다.
@@ -245,6 +247,7 @@ workspace.override
 blocked
 open
 in_progress
+cancel_requested
 failed
 finished
 cancelled
@@ -255,11 +258,12 @@ cancelled
 - `blocked`: 필수 upstream job이 완료되기를 기다리는 상태입니다.
 - `open`: `target_role`이 claim할 수 있는 ready 상태입니다.
 - `in_progress`: agent profile이 claim한 상태입니다.
+- `cancel_requested`: 권한 있는 role이 취소를 요청했으며 원래 claimant의 중단 확인을 기다리는 상태입니다.
 - `failed`: claim한 작업이 exit criteria를 충족하지 못해 실패 CR의 결정을 기다리거나 기록한 상태입니다.
 - `finished`: closure evidence와 함께 완료된 상태입니다.
 - `cancelled`: 단순 pause가 아니라 job 자체가 의도적으로 취소된 상태입니다.
 
-권한이 있는 `cancel` 명령은 선택한 `blocked`, `open`, `in_progress` 또는 심사가 끝난 `failed` job을 `cancelled`로 바꾸고, 그 job에 의존하는 `blocked` 하위 job만 재귀적으로 취소합니다. 실패 job은 먼저 연결된 실패 CR이 `rejected` 또는 `cancelled` 상태여야 합니다. 관련 없는 queue branch는 변경하지 않습니다. `finished`와 이미 `cancelled`인 job에는 적용할 수 없습니다.
+권한이 있는 `cancel` 명령은 선택한 `blocked`, `open` 또는 심사가 끝난 `failed` job을 즉시 `cancelled`로 바꾸고 blocked 하위 job을 재귀적으로 취소합니다. `in_progress` job은 `cancel_requested`로 바뀌며 원래 claimant가 `cancel-ack`를 실행해야 최종 취소와 하위 전파가 확정됩니다. claimant가 확인할 수 없을 때만 감사되는 복구 경로인 `cancel --force`를 사용합니다. 실패 job은 먼저 연결된 실패 CR이 `rejected` 또는 `cancelled` 상태여야 합니다.
 
 `fail`은 `in_progress` job만 `failed`로 바꾸고 연결된 실패 CR을 생성·제출하며, 하위 dependency는 `blocked`로 유지합니다. 실패 CR이 승인되면 reviewer가 `retry`로 원래 job을 `open`으로 되돌릴 수 있습니다. 실패 CR이 거절되면 권한 있는 role이 해당 job과 하위 branch를 취소할 수 있습니다. 하위 작업은 재시도된 원래 job이 `finished`가 된 이후에만 ready 상태가 됩니다.
 
@@ -399,6 +403,9 @@ claimed
 finished
 promoted
 cancelled
+cancellation_requested
+cancellation_acknowledged
+cancellation_forced
 dependency_cancelled
 gate_cancelled
 control_stopped
@@ -460,13 +467,13 @@ Wait 동작:
 Claim 동작:
 
 - `claim`은 새 작업 착수 전에 같은 control을 확인합니다.
-- `finish`는 shift control을 확인하지 않으므로, 이미 claim한 작업은 shift 만료 후에도 완료 보고할 수 있습니다.
+- `finish`는 shift control을 확인하지 않으므로 이미 claim한 작업은 shift 만료 후에도 완료 보고할 수 있습니다. 단, `cancel_requested` 작업은 거부하며 claimant가 `cancel-ack`를 사용해야 합니다.
 
 ## `waiter_leases`
 
 용도:
 
-- 같은 Baton DB를 공유하는 `wait`, `cr wait-review` process를 추적합니다.
+- 같은 Baton DB를 공유하는 `wait`, `cr wait-review`, 통합 `watch` process를 추적합니다.
 - 기본 자동 polling interval 계산에 사용하는 활성 waiter 수를 제공합니다.
 - workflow 이력이나 감사 증거가 아닌 일시적인 조율 상태를 저장합니다.
 
@@ -475,7 +482,7 @@ Claim 동작:
 | 컬럼 | 타입 | 필수 | 용도 |
 | --- | --- | --- | --- |
 | `waiter_id` | `text primary key` | 예 | wait 명령 시작 시 생성되는 process-local UUID입니다. |
-| `wait_kind` | `text` | 예 | `handoff` 또는 `cr_review`입니다. |
+| `wait_kind` | `text` | 예 | `handoff`, `cr_review` 또는 `watch`입니다. |
 | `role_id` | `text` | 예 | waiter에 연결된 표준 role입니다. |
 | `started_at` | `text` | 예 | wait 명령이 등록된 UTC 시각입니다. |
 | `heartbeat_at` | `text` | 예 | 최근 polling heartbeat UTC 시각입니다. |
@@ -518,6 +525,8 @@ Claim 동작:
 | `active_revision_job_id` | `text` | 아니오 | 진행 중인 보강 handoff입니다. |
 | `submitted_body_hash` | `text` | 아니오 | 마지막 submit 또는 resubmit에서 캡처한 Markdown 본문의 SHA-256입니다. |
 | `approved_body_hash` | `text` | 아니오 | reviewer가 승인한 불변 본문의 SHA-256입니다. null이면 migration된 과거 미봉인 승인입니다. |
+| `superseded_by_cr_id` | `text` | 아니오 | `cr supersede`로 이 승인을 대체한 approved CR입니다. |
+| `superseded_by_ref` | `text` | 아니오 | replacement CR 대신 사용한 불변 authoritative design reference입니다. |
 
 허용되는 `status` 값:
 
@@ -528,6 +537,7 @@ revision_requested
 approved
 rejected
 implemented
+superseded
 cancelled
 ```
 
@@ -540,7 +550,8 @@ cancelled
 - implementation handoff 생성, claim, finish와 최종 구현 완료 처리는 승인 본문 hash가 유지돼야 합니다.
 - hash 없이 migration된 과거 approved CR은 새 구현 전에 reviewer가 명시적으로 `cr seal`해야 합니다.
 - `approved -> implemented`는 연결된 implementation handoff가 최소 1개 있어야 하고, 모든 implementation handoff가 `finished`여야 합니다.
-- `cancelled`는 `cr.admin` 권한을 가진 role이 수행하며 audit event를 남깁니다.
+- `approved -> superseded`는 `cr.admin`과 approved replacement CR 또는 `handoff.register` 권한을 가진 role의 불변 authoritative design reference가 필요합니다. 연결된 queued 구현 작업은 취소되고 active 작업은 `cancel_requested`가 되며 finished 작업은 보존됩니다.
+- `cancelled`는 `cr.admin` 권한을 가진 role이 수행하고 연결된 미완료 구현 작업을 같은 취소 규칙으로 정리하며 audit event를 남깁니다.
 - `reviewer_role`은 terminal review 전까지 `cr.admin` 권한을 가진 role이 재지정할 수 있습니다.
 
 ## `cr_events`
@@ -575,6 +586,8 @@ body_sealed
 rejected
 reviewer_reassigned
 cancelled
+superseded
+supersedes
 implementation_handoff_created
 implemented
 ```

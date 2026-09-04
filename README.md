@@ -216,7 +216,7 @@ baton project migrate --check
 baton project migrate --apply --plan-token <token>
 ```
 
-Use the token from the second check. Repeat `--source-db` and `--project-root` on apply when they were used during check. Baton rechecks the source and refuses stale tokens, active waiters, in-progress handoffs, missing maintenance stop for a layout move, incompatible databases, ambiguous discovery, or a distinct existing target. It writes a validated backup under `.baton/backups/`, installs the canonical database and marker, and atomically replaces the legacy database path with a relative symlink to the canonical file. This redirect prevents old wrappers from continuing on a second database; the original database remains in the backup directory. Resume workers only after verification.
+Use the token from the second check. Repeat `--source-db` and `--project-root` on apply when they were used during check. Baton rechecks the source and refuses stale tokens, active waiters, in-progress or cancel-requested handoffs, missing maintenance stop for a layout move, incompatible databases, ambiguous discovery, or a distinct existing target. It writes a validated backup under `.baton/backups/`, installs the canonical database and marker, and atomically replaces the legacy database path with a relative symlink to the canonical file. This redirect prevents old wrappers from continuing on a second database; the original database remains in the backup directory. Resume workers only after verification.
 
 Pin or unpin a pipx environment when automatic upgrades must be controlled:
 
@@ -498,6 +498,8 @@ See [Optional Git Workspace Integration](docs/git-integration.md) for policy sem
 
 Before registering concurrent handoffs, the planning agent must follow `docs/planner-prompt.md`. Work is parallel only when inputs, write sets, contracts, shared state, and accepted completion order are independent. Otherwise, register the upstream work first and use `--depends-on`, or use a named Gate when the predecessor is not known yet. Baton enforces declared edges and atomic claims but cannot infer missing dependencies or source-level conflicts.
 
+When the planner must reconcile worker results later, it registers a final planning-role handoff that depends on every required worker job. This returns work to the planning role, not necessarily the same agent instance, so the follow-up contract must contain all required context. Use a Gate when the predecessor set is still changing, and return to `watch` after registration instead of ending the planner shift.
+
 Register a ready handoff:
 
 ```bash
@@ -581,7 +583,16 @@ bin/baton cancel HO-YYYY-MM-DD-001 \
   --reason "Work is no longer required."
 ```
 
-Cancellation is scoped. Baton cancels the selected handoff and recursively cancels only `blocked` handoffs that depend on it. A failed handoff must first have a rejected or administratively cancelled failure CR. Independent `open`, `blocked`, `in_progress`, or `failed` jobs in other queue branches are unchanged. It does not stop wait loops or clear a role queue; use `stop` for wait control. Finished and already-cancelled handoffs cannot be cancelled again.
+Cancellation is scoped. `blocked`, `open`, and reviewed `failed` jobs are cancelled immediately with their blocked dependency descendants. An `in_progress` job becomes `cancel_requested`; its original claimant stops before commit or integration and acknowledges the request with evidence:
+
+```bash
+bin/baton cancel-ack HO-YYYY-MM-DD-001 \
+  --role backend \
+  --claimed-by backend-main \
+  --evidence "Stopped before commit; retained local changes for inspection."
+```
+
+The acknowledgement finalizes cancellation and recursively cancels blocked descendants. Use `cancel --force` only when the claimant cannot acknowledge, and record that reason. Independent queue branches remain unchanged. `stop` controls wait loops and does not cancel jobs.
 
 ## Named Gates
 
@@ -691,6 +702,26 @@ body edit, and blocks implementation handoff creation, claim, finish, and final 
 marking when an approved body is missing or changed. Requirement changes after approval use
 a new CR rather than editing the approved body.
 
+For an incompatible replacement, approve the new CR and supersede the old one:
+
+```bash
+bin/baton cr supersede CR-YYYY-MM-DD-001 \
+  --by CR-YYYY-MM-DD-002 \
+  --role sm \
+  --reason "The approved contract changed incompatibly."
+```
+
+When a planner/SM has direct design authority and independent review is not required, use an immutable authoritative reference instead of creating a self-reviewed replacement CR:
+
+```bash
+bin/baton cr supersede CR-YYYY-MM-DD-001 \
+  --by-source-ref "abc123:docs/approved-design.md" \
+  --role sm \
+  --reason "The authoritative design replaced the previous approval."
+```
+
+The old CR remains immutable with status `superseded`. Linked queued implementation jobs are cancelled, linked active jobs receive `cancel_requested`, and finished jobs remain audit evidence. A failed linked implementation must complete its failure-CR decision first. Compatible or additive changes should keep valid existing work and add only the required handoffs.
+
 SQLite and the filesystem cannot share one transaction. After a process crash or suspected frontmatter mismatch, reconcile the managed header from authoritative DB state without changing the body:
 
 ```bash
@@ -739,8 +770,10 @@ bin/baton cr reassign-reviewer CR-YYYY-MM-DD-001 \
 
 bin/baton cr cancel CR-YYYY-MM-DD-001 \
   --role sm \
-  --reason "Superseded by replacement CR."
+  --reason "The request was withdrawn."
 ```
+
+`cr cancel` also retires linked unfinished implementation handoffs using the same immediate or cooperative cancellation rules. Use `cr supersede` instead when another approved CR replaces the design.
 
 ## Transaction Model
 
@@ -752,6 +785,7 @@ State-changing commands run inside `BEGIN IMMEDIATE` transactions:
 - `role permission-remove`
 - `migrate`
 - `cancel`
+- `cancel-ack`
 - `register`
 - `gate create`
 - `gate release`
@@ -763,6 +797,7 @@ State-changing commands run inside `BEGIN IMMEDIATE` transactions:
 - `retry`
 - `promote-ready`
 - `wait`
+- `watch`
 - `stop`
 - `resume`
 - `shift start`
@@ -776,6 +811,7 @@ State-changing commands run inside `BEGIN IMMEDIATE` transactions:
 - `cr reject`
 - `cr reassign-reviewer`
 - `cr cancel`
+- `cr supersede`
 - `cr create-handoff`
 - `cr mark-implemented`
 - `cr wait-review`
@@ -883,6 +919,14 @@ No-op polling is silent. `wait` prints only a ready job, an actual promotion/can
 bin/baton wait --role frontend --timeout 900
 ```
 
+A planner or SM that receives both review and handoff work uses the combined watcher. It returns an assigned submitted CR before a ready handoff:
+
+```bash
+bin/baton watch --role planning --timeout 900
+```
+
+Continuous circulation exists only while the agent keeps its current host turn active and re-enters bounded `watch` calls. Baton records workflow state and blocks in the CLI, but it cannot start a new Codex turn after an agent sends its final response.
+
 Omitting `--interval` is equivalent to selecting automatic mode explicitly:
 
 ```bash
@@ -915,7 +959,7 @@ A blocked handoff is not returned by `next`. `wait` keeps checking required upst
 
 `--timeout 0` means wait forever, but that should be used only in explicit experiments. Normal workers must repeat bounded waits until their shift expires or a stop control is set.
 
-`cr wait-review` uses the same stop/resume controls and exit codes, but checks submitted CRs assigned to the reviewer role instead of handoff jobs.
+`cr wait-review` uses the same stop/resume controls and exit codes, but checks submitted CRs assigned to the reviewer role instead of handoff jobs. `watch` uses the same contract and checks both queues, prioritizing assigned CR review. Roles without `cr.review` permission use it as a handoff-only wait.
 
 Agents should report waiting state only when it changes: work becomes ready, claim/finish succeeds, stop or shift expiry occurs, an error needs intervention, or the user explicitly asks for status. Repeated polling and repeated exit `2` timeouts are not progress events.
 
@@ -925,8 +969,9 @@ The wait commands use polling with `time.sleep()` between unsuccessful checks. T
 
 - `wait` checks stop/shift controls, reconciles dependency and Gate state, and inspects one role queue per polling cycle.
 - `cr wait-review` checks stop/shift controls and the assigned review queue per polling cycle.
-- Both commands register a heartbeat lease in `waiter_leases`. Automatic waits use 30 seconds; fixed intervals over 25 seconds use `interval + 5` seconds so healthy sleepers remain active. Normal exits remove the lease immediately, and a later heartbeat removes stale leases left by disconnected processes.
-- Automatic mode counts all active handoff and CR waiters in the same database, including waiters using a fixed override. Its target interval is 3 seconds per active waiter, capped at 30 seconds, with a small stable jitter to avoid synchronized polling.
+- `watch` checks the assigned review queue first and then the handoff queue in the same cycle.
+- All three commands register a heartbeat lease in `waiter_leases`. Automatic waits use 30 seconds; fixed intervals over 25 seconds use `interval + 5` seconds so healthy sleepers remain active. Normal exits remove the lease immediately, and a later heartbeat removes stale leases left by disconnected processes.
+- Automatic mode counts all active handoff, CR, and combined watchers in the same database, including waiters using a fixed override. Its target interval is 3 seconds per active waiter, capped at 30 seconds, with a small stable jitter to avoid synchronized polling.
 - A numeric `--interval N` keeps that process on a fixed interval but does not exclude it from the active count used by automatic waiters.
 
 Automatic mode keeps aggregate idle polling approximately bounded as agent count grows. One active waiter targets 3 seconds; two target 6 seconds each; ten or more target 30 seconds each. An explicit fixed interval is intended for a role with a measured response requirement and can increase aggregate SQLite activity when used by many processes.
@@ -980,7 +1025,7 @@ Inspect shift state:
 bin/baton shift status --role frontend
 ```
 
-When a shift expires, Baton marks the matching control scope stopped. Future `wait`, `cr wait-review`, and `claim` attempts stop or fail, while `finish`, `fail`, and CR reporting commands remain allowed.
+When a shift expires, Baton marks the matching control scope stopped. Future `wait`, `watch`, `cr wait-review`, and `claim` attempts stop or fail, while completion reporting for already-claimed work remains allowed unless cooperative cancellation was requested.
 
 ## Stop And Resume
 

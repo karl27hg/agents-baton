@@ -111,7 +111,7 @@ baton project migrate --apply \
   --plan-token <token>
 ```
 
-The apply command rechecks the source. It refuses a stale token, active waiters, in-progress handoffs, a layout move without global stop, an incompatible database, or a distinct existing target. It creates a SQLite backup before changing schema or moving layout and installs the project marker. For a layout move, it atomically redirects the legacy path to the canonical database with a relative symlink; the original content is retained in `.baton/backups/`.
+The apply command rechecks the source. It refuses a stale token, active waiters, in-progress or cancel-requested handoffs, a layout move without global stop, an incompatible database, or a distinct existing target. It creates a SQLite backup before changing schema or moving layout and installs the project marker. For a layout move, it atomically redirects the legacy path to the canonical database with a relative symlink; the original content is retained in `.baton/backups/`.
 
 After migration:
 
@@ -139,8 +139,10 @@ baton guide show planner
 ```
 
 - `worker`: wait, claim, finish/fail, CR review, shift, and reporting behavior.
-- `planner`: parallel-safety, dependency, Gate planning, and failed-handoff decisions.
+- `planner`: parallel safety, reconciliation handoffs, combined `watch`, Gate planning, failure decisions, and approved-design replacement.
 
 Before a worker's first wait, require it to inspect `shift status --role <role>`. A worker may create the default `4h` role shift only when no applicable deadline or stopped/expired scope exists. Existing active deadlines are preserved, and expired or stopped role/global scopes require explicit user or SM authorization before restart, extension, or resume.
+
+Require planner/SM roles that receive both CR reviews and handoffs to use `watch` rather than alternating long independent waits. Require every active claimant to inspect its handoff before commit, integration, and completion; `cancel_requested` must be acknowledged with `cancel-ack`, not reported with `finish` or `fail`.
 
 Project `AGENTS.md` should require these guides and define the assigned role. If a command, version, path, migration plan, or authority decision is unclear, stop and ask the user or SM instead of guessing.
