@@ -53,7 +53,7 @@ test -L "$LEGACY_DB"
 test "$LEGACY_DB" -ef "$TARGET_DB"
 test -f "$LEGACY_PROJECT/.baton/project.json"
 test "$(find "$LEGACY_PROJECT/.baton/backups" -type f -name '*.sqlite3' | wc -l | tr -d ' ')" = "1"
-"$CLI" --db "$TARGET_DB" migrate --check | grep 'schema=6' >/dev/null
+"$CLI" --db "$TARGET_DB" migrate --check | grep 'schema=8' >/dev/null
 "$CLI" --db "$TARGET_DB" role list | grep '^migration-custom' >/dev/null
 POST_CHECK="$("$CLI" project migrate --check --project-root "$LEGACY_PROJECT")"
 printf '%s\n' "$POST_CHECK" | grep 'layout_move: no' >/dev/null
@@ -80,7 +80,8 @@ import sqlite3
 import sys
 
 with sqlite3.connect(sys.argv[1]) as con:
-    con.execute("delete from schema_migrations where version in (3, 4, 5, 6)")
+    con.execute("delete from schema_migrations where version in (3, 4, 5, 6, 7, 8)")
+    con.execute("drop table handoff_failure_reviews")
     con.execute("drop table workspace_events")
     con.execute("drop table waiter_leases")
     con.execute("drop table database_metadata")
@@ -95,7 +96,7 @@ EXPLICIT_CHECK="$("$CLI" project migrate --check \
   --source-db "$EXPLICIT_DB")"
 EXPLICIT_TOKEN="$(printf '%s\n' "$EXPLICIT_CHECK" | plan_token)"
 printf '%s\n' "$EXPLICIT_CHECK" | grep 'source_schema: 2' >/dev/null
-printf '%s\n' "$EXPLICIT_CHECK" | grep 'pending_migrations: 3:named_gates,4:waiter_leases,5:database_metadata,6:workspace_provenance' >/dev/null
+printf '%s\n' "$EXPLICIT_CHECK" | grep 'pending_migrations: 3:named_gates,4:waiter_leases,5:database_metadata,6:workspace_provenance,7:handoff_failures' >/dev/null
 test ! -e "$EXPLICIT_PROJECT/.baton/baton.sqlite3"
 
 python3 - "$EXPLICIT_DB" <<'PY'
@@ -121,7 +122,7 @@ EXPLICIT_TOKEN="$("$CLI" project migrate --check \
   --project-root "$EXPLICIT_PROJECT" \
   --source-db "$EXPLICIT_DB" \
   --plan-token "$EXPLICIT_TOKEN" >/dev/null
-"$CLI" --db "$EXPLICIT_PROJECT/.baton/baton.sqlite3" migrate --check | grep 'schema=6' >/dev/null
+"$CLI" --db "$EXPLICIT_PROJECT/.baton/baton.sqlite3" migrate --check | grep 'schema=8' >/dev/null
 
 IN_PLACE_PROJECT="$TMP/in-place-project"
 IN_PLACE_DB="$IN_PLACE_PROJECT/.baton/baton.sqlite3"
@@ -131,18 +132,19 @@ import sqlite3
 import sys
 
 with sqlite3.connect(sys.argv[1]) as con:
-    con.execute("delete from schema_migrations where version in (5, 6)")
+    con.execute("delete from schema_migrations where version in (5, 6, 7, 8)")
+    con.execute("drop table handoff_failure_reviews")
     con.execute("drop table workspace_events")
     con.execute("drop table database_metadata")
 PY
 IN_PLACE_CHECK="$("$CLI" project migrate --check --project-root "$IN_PLACE_PROJECT")"
 IN_PLACE_TOKEN="$(printf '%s\n' "$IN_PLACE_CHECK" | plan_token)"
 printf '%s\n' "$IN_PLACE_CHECK" | grep 'layout_move: no' >/dev/null
-printf '%s\n' "$IN_PLACE_CHECK" | grep 'pending_migrations: 5:database_metadata,6:workspace_provenance' >/dev/null
+printf '%s\n' "$IN_PLACE_CHECK" | grep 'pending_migrations: 5:database_metadata,6:workspace_provenance,7:handoff_failures' >/dev/null
 "$CLI" project migrate --apply \
   --project-root "$IN_PLACE_PROJECT" \
   --plan-token "$IN_PLACE_TOKEN" >/dev/null
-"$CLI" --db "$IN_PLACE_DB" migrate --check | grep 'schema=6' >/dev/null
+"$CLI" --db "$IN_PLACE_DB" migrate --check | grep 'schema=8' >/dev/null
 test "$(find "$IN_PLACE_PROJECT/.baton/backups" -type f -name '*.sqlite3' | wc -l | tr -d ' ')" = "1"
 
 MISSING_PROJECT="$TMP/missing-project"

@@ -89,6 +89,9 @@ init_git_project "$STRICT_PROJECT" strict
     --objective "Block a divergent checkout." \
     --exit-criteria "Only an audited SM override can claim it." | awk '{print $1}')"
   git checkout -q main
+  printf 'main\n' >>source.txt
+  git add source.txt
+  git commit -q -m "main"
   if "$CLI" workspace check --job "$JOB" >/dev/null 2>&1; then
     echo "ERROR: strict workspace check accepted a divergent checkout" >&2
     exit 1
@@ -110,7 +113,13 @@ init_git_project "$STRICT_PROJECT" strict
     --workspace-reason "Intentional branch transfer" \
     --workspace-authorized-by-role sm >/dev/null
   "$CLI" workspace events --job "$JOB" | grep $'claimed\tstrict\toverride' >/dev/null
-  "$CLI" finish "$JOB" --role backend --evidence "Strict override finished." >/dev/null
+  git checkout -q feature
+  "$CLI" fail "$JOB" \
+    --role backend \
+    --reason "Divergent implementation failed." \
+    --dir "$STRICT_PROJECT/change-requests" >/dev/null 2>failure-warning.txt
+  grep 'failure reporting was not blocked' failure-warning.txt >/dev/null
+  "$CLI" workspace events --job "$JOB" | grep $'failed\tstrict\twarning' >/dev/null
 
   mv baton.toml baton.toml.saved
   if "$CLI" workspace check >/dev/null 2>&1; then

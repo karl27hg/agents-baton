@@ -43,6 +43,16 @@ The default database is `<project-root>/.baton/baton.sqlite3`, selected by the n
 baton project info
 ```
 
+For isolated Git worktrees, do not initialize each checkout. Set `BATON_DB` to the one
+branch-independent control database, set `BATON_WORKSPACE_ROOT` to the current checkout,
+and confirm that every project agent reports the same database path:
+
+```bash
+export BATON_DB=/absolute/path/to/project-control/.baton/baton.sqlite3
+export BATON_WORKSPACE_ROOT="$PWD"
+baton project info
+```
+
 If `project info` reports a configured VCS provider, read the project `baton.toml` and the version-matched Git guide, then inspect the workspace before claiming work:
 
 ```bash
@@ -113,6 +123,12 @@ baton-report summary
 
 Normal workflow commands do not migrate schemas automatically. A `database migration required` error is an operator action: keep workers stopped, run `baton migrate`, verify with `baton migrate --check`, and then resume the intended scopes.
 
+Schema v7 introduces `failed` handoffs and `handoff.register`. Existing projects retain prior registration behavior because migration grants `handoff.register` to every active role already present. Review those grants after migration and use `role permission-remove <role> handoff.register` when registration should remain centralized in `sm` or `planning`.
+
+Schema v8 adds submitted and approved CR body hashes. It does not guess an approval hash
+for an existing approved CR. The assigned reviewer must inspect it with `cr show` and run
+`cr seal` before creating or claiming new implementation work from that legacy CR.
+
 ## Role Guides
 
 Read the appropriate installed guide before starting role work:
@@ -122,8 +138,8 @@ baton guide show worker
 baton guide show planner
 ```
 
-- `worker`: wait, claim, finish, CR review, shift, and reporting behavior.
-- `planner`: parallel-safety, dependency, and Gate planning behavior.
+- `worker`: wait, claim, finish/fail, CR review, shift, and reporting behavior.
+- `planner`: parallel-safety, dependency, Gate planning, and failed-handoff decisions.
 
 Before a worker's first wait, require it to inspect `shift status --role <role>`. A worker may create the default `4h` role shift only when no applicable deadline or stopped/expired scope exists. Existing active deadlines are preserved, and expired or stopped role/global scopes require explicit user or SM authorization before restart, extension, or resume.
 

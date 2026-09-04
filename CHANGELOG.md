@@ -2,7 +2,13 @@
 
 ## Unreleased
 
-- Added optional tracked `baton.toml` Git workspace integration with backward-compatible `off`, default-on-enable `warn`, and enforced `strict` policies.
+- Added schema migration v8 with submitted and approved CR body hashes, approval-time verification, explicit legacy `cr seal`, and implementation claim/finish integrity guards.
+- Moved new mutable CR bodies to branch-independent `.baton/change-requests/`, added stable `cr:CR-ID` handoff references and `cr show`, and retained all existing CR paths without relocation.
+- Added `BATON_DB` and `BATON_WORKSPACE_ROOT` support for one local control database shared safely by isolated Git worktrees, plus generated `.baton/.gitignore` protection.
+- Documented that Baton completion does not integrate commits across branches and that planners must gate downstream work until required commits are present.
+- Added schema migration v7, explicit failed handoffs, automatically submitted failure CRs, reviewed retry/cancel resolution, and blocked dependency preservation.
+- Added `handoff.register` authority with restricted defaults for new projects and compatibility grants that preserve existing registration behavior during upgrades.
+- Added optional shared `baton.toml` Git workspace integration with backward-compatible `off`, default-on-enable `warn`, and enforced `strict` policies.
 - Added schema migration v6, `workspace check/events`, handoff register/claim/finish commit provenance, ancestry checks, read-only report integration, and audited `workspace.override` authority.
 - Required Baton agents and planners to delegate exclusively through registered handoffs instead of creating subagents, child tasks, parallel agent sessions, or delegated background agents, while documenting that host policy remains the enforcement layer.
 - Required workers to inspect shift controls before their first wait, create the default `4h` role shift only when no applicable control exists, preserve active deadlines, and require user or SM authority to restart expired or stopped role/global scopes.

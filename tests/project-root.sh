@@ -18,20 +18,21 @@ mkdir -p "$PROJECT_A/nested/work"
   cd "$PROJECT_A/nested/work"
   "$CLI" status >/dev/null
   "$CLI" project info | grep "project_root: $PROJECT_A" >/dev/null
-  "$CLI" project info | grep 'schema_version: 6' >/dev/null
+  "$CLI" project info | grep 'schema_version: 8' >/dev/null
   "$CLI" project info | grep 'last_migrated_with_baton_version:' >/dev/null
   "$REPORT" summary | grep 'Handoffs:' >/dev/null
   "$CLI" agent init --role planning --agent-id planning-root-test >/dev/null
   CR_LINE="$("$CLI" cr create --title "Root anchored CR" --author-role planning --reviewer-role sm)"
-  printf '%s\n' "$CR_LINE" | grep 'docs/change-requests/' >/dev/null
+  printf '%s\n' "$CR_LINE" | grep '.baton/change-requests/' >/dev/null
 )
 
 test -f "$PROJECT_A/.baton/project.json"
 test -f "$PROJECT_A/.baton/baton.sqlite3"
 test -f "$PROJECT_A/.baton/agent-id"
-test -f "$PROJECT_A/docs/change-requests/CR-"*"-root-anchored-cr.md"
+test -f "$PROJECT_A/.baton/.gitignore"
+test -f "$PROJECT_A/.baton/change-requests/CR-"*"-root-anchored-cr.md"
 test ! -e "$PROJECT_A/nested/work/.baton"
-test ! -e "$PROJECT_A/nested/work/docs/change-requests"
+test ! -e "$PROJECT_A/nested/work/.baton/change-requests"
 
 MOVED_PROJECT="$TMP/moved-project"
 mv "$PROJECT_A" "$MOVED_PROJECT"
@@ -96,7 +97,8 @@ import sqlite3
 import sys
 
 with sqlite3.connect(sys.argv[1]) as con:
-    con.execute("delete from schema_migrations where version in (5, 6)")
+    con.execute("delete from schema_migrations where version in (5, 6, 7, 8)")
+    con.execute("drop table handoff_failure_reviews")
     con.execute("drop table workspace_events")
     con.execute("drop table database_metadata")
 PY
@@ -132,7 +134,7 @@ if (cd "$EXTERNAL_ROOT" && "$CLI" --db "$EXTERNAL_DB" cr create \
   echo "ERROR: external database accepted an ambiguous relative CR path" >&2
   exit 1
 fi
-test ! -e "$EXTERNAL_ROOT/docs/change-requests"
+test ! -e "$EXTERNAL_ROOT/.baton/change-requests"
 
 MALFORMED_PROJECT="$TMP/malformed-project"
 mkdir -p "$MALFORMED_PROJECT/.baton/nested"
@@ -185,5 +187,20 @@ with open(sys.argv[1], encoding="utf-8") as marker:
 if payload.get("format_version") != 1 or payload.get("database") != "baton.sqlite3":
     raise SystemExit(f"invalid marker after concurrent init: {payload}")
 PY
+
+IGNORED_PROJECT="$TMP/ignored-project"
+mkdir -p "$IGNORED_PROJECT"
+git -C "$IGNORED_PROJECT" init -q
+(
+  cd "$IGNORED_PROJECT"
+  "$CLI" init >/dev/null
+  CR_PATH="$("$CLI" cr create \
+    --title "Ignored control CR" \
+    --author-role planning \
+    --reviewer-role sm | awk '{print $3}')"
+  git check-ignore -q .baton/project.json
+  git check-ignore -q .baton/baton.sqlite3
+  git check-ignore -q "$CR_PATH"
+)
 
 echo "OK marker discovery, move, copy, adoption, report, explicit-db safety, and concurrent init"

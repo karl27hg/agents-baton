@@ -35,7 +35,7 @@ DEFAULT_ROLES = (
     ("backend-design", "Backend Design"),
 )
 
-STATUSES = {"blocked", "open", "in_progress", "finished", "cancelled"}
+STATUSES = {"blocked", "open", "in_progress", "failed", "finished", "cancelled"}
 CR_STATUSES = {"draft", "submitted", "revision_requested", "approved", "rejected", "implemented", "cancelled"}
 BATON_VERSION = __version__
 AUTO_INTERVAL_BASE_SECONDS = 3
@@ -52,6 +52,7 @@ REVIEW_PERMISSIONS = {
 }
 HANDOFF_PERMISSIONS = {
     "handoff.cancel",
+    "handoff.register",
 }
 GATE_PERMISSIONS = {
     "gate.manage",
@@ -59,13 +60,22 @@ GATE_PERMISSIONS = {
 WORKSPACE_PERMISSIONS = {
     "workspace.override",
 }
+FAILURE_REVIEW_PERMISSIONS = {
+    "handoff.register",
+    "cr.review",
+    "cr.request_revision",
+    "cr.approve",
+    "cr.reject",
+    "cr.mark_implemented",
+}
 KNOWN_PERMISSIONS = (
     REVIEW_PERMISSIONS | HANDOFF_PERMISSIONS | GATE_PERMISSIONS | WORKSPACE_PERMISSIONS
 )
-LATEST_SCHEMA_VERSION = 6
+LATEST_SCHEMA_VERSION = 8
 PROJECT_FORMAT_VERSION = 1
 PROJECT_MARKER_NAME = "project.json"
 PROJECT_CONFIG_NAME = "baton.toml"
+DEFAULT_CR_DIRECTORY = ".baton/change-requests"
 GUIDE_FILES = {
     "bootstrap": "agent-bootstrap.md",
     "worker": "agent-prompt.md",
@@ -566,6 +576,86 @@ def migration_v6_workspace_provenance(con: sqlite3.Connection) -> None:
     )
 
 
+def migration_v7_handoff_failures(con: sqlite3.Connection) -> None:
+    con.execute("PRAGMA legacy_alter_table = ON")
+    try:
+        con.execute("alter table handoff_jobs rename to handoff_jobs_v6")
+        execute_sql_script(
+            con,
+            """
+            create table handoff_jobs (
+              job_id text primary key,
+              title text not null,
+              status text not null check (status in ('blocked', 'open', 'in_progress', 'failed', 'finished', 'cancelled')),
+              target_role text not null references roles(role_id),
+              source_ref text,
+              objective text not null,
+              exit_criteria text not null,
+              created_at text not null,
+              claimed_by text,
+              started_at text,
+              finished_at text,
+              closure_evidence text,
+              related_commit text
+            );
+
+            insert into handoff_jobs(
+              job_id, title, status, target_role, source_ref, objective, exit_criteria,
+              created_at, claimed_by, started_at, finished_at, closure_evidence, related_commit
+            )
+            select
+              job_id, title, status, target_role, source_ref, objective, exit_criteria,
+              created_at, claimed_by, started_at, finished_at, closure_evidence, related_commit
+            from handoff_jobs_v6;
+
+            drop table handoff_jobs_v6;
+
+            create index if not exists idx_handoff_jobs_status_role on handoff_jobs(status, target_role);
+
+            create table if not exists handoff_failure_reviews (
+              id integer primary key autoincrement,
+              job_id text not null references handoff_jobs(job_id) on delete cascade,
+              cr_id text not null unique references change_requests(cr_id) on delete cascade,
+              failed_by_role text not null references roles(role_id),
+              reason text not null,
+              evidence text,
+              failed_at text not null,
+              resolution text check (resolution in ('retry', 'cancelled')),
+              resolved_by_role text references roles(role_id),
+              resolved_at text,
+              resolution_message text
+            );
+
+            create index if not exists idx_handoff_failure_reviews_job
+              on handoff_failure_reviews(job_id, id);
+            """,
+        )
+    finally:
+        con.execute("PRAGMA legacy_alter_table = OFF")
+
+    # Before this permission existed, every active role could register work.
+    # Preserve that effective access for upgraded projects.
+    con.execute(
+        """
+        insert into role_permissions(role_id, permission)
+        select role_id, 'handoff.register'
+        from roles
+        where active = 1
+        on conflict(role_id, permission) do nothing
+        """
+    )
+
+
+def migration_v8_cr_body_integrity(con: sqlite3.Connection) -> None:
+    columns = {
+        row["name"] for row in con.execute("PRAGMA table_info(change_requests)").fetchall()
+    }
+    if "submitted_body_hash" not in columns:
+        con.execute("alter table change_requests add column submitted_body_hash text")
+    if "approved_body_hash" not in columns:
+        con.execute("alter table change_requests add column approved_body_hash text")
+
+
 MIGRATIONS = (
     (1, "initial_schema", migration_v1_initial_schema),
     (2, "handoff_cancel_permission", migration_v2_handoff_cancel_permission),
@@ -573,6 +663,8 @@ MIGRATIONS = (
     (4, "waiter_leases", migration_v4_waiter_leases),
     (5, "database_metadata", migration_v5_database_metadata),
     (6, "workspace_provenance", migration_v6_workspace_provenance),
+    (7, "handoff_failures", migration_v7_handoff_failures),
+    (8, "cr_body_integrity", migration_v8_cr_body_integrity),
 )
 
 
@@ -656,8 +748,11 @@ def migrate_schema(
     transaction_started: bool = False,
 ) -> tuple[int, int, list[str]]:
     validate_migration_definitions()
+    restore_foreign_keys = False
     if not transaction_started:
         enable_wal(con)
+        con.execute("PRAGMA foreign_keys = OFF")
+        restore_foreign_keys = True
         con.execute("BEGIN IMMEDIATE")
     try:
         existing_tables = {
@@ -730,6 +825,9 @@ def migrate_schema(
         if isinstance(exc, sqlite3.DatabaseError):
             raise MigrationError(f"database migration failed: {exc}") from exc
         raise
+    finally:
+        if restore_foreign_keys:
+            con.execute("PRAGMA foreign_keys = ON")
     return previous_version, LATEST_SCHEMA_VERSION, applied_names
 
 
@@ -773,7 +871,22 @@ def find_legacy_project_root(start: Path | None = None) -> Path | None:
     return None
 
 
+def ensure_control_ignore(root: Path) -> Path:
+    control_dir = root / ".baton"
+    control_dir.mkdir(parents=True, exist_ok=True)
+    ignore_path = control_dir / ".gitignore"
+    try:
+        with ignore_path.open("x", encoding="utf-8") as output:
+            output.write("*\n")
+            output.flush()
+            os.fsync(output.fileno())
+    except FileExistsError:
+        pass
+    return ignore_path
+
+
 def write_project_marker(root: Path) -> Path:
+    ensure_control_ignore(root)
     marker = project_marker_path(root)
     if marker.exists():
         read_project_marker(root)
@@ -1033,7 +1146,11 @@ def latest_recorded_workspace_policy(database_value: str) -> str:
     return str(row["policy"]) if row else ""
 
 
-def assess_workspace(database_value: str, baseline_commit: str = "") -> WorkspaceAssessment:
+def assess_workspace(
+    database_value: str,
+    baseline_commit: str = "",
+    workspace_root_value: str = "",
+) -> WorkspaceAssessment:
     config = read_workspace_config(database_value)
     issues: list[str] = []
     if (
@@ -1050,7 +1167,7 @@ def assess_workspace(database_value: str, baseline_commit: str = "") -> Workspac
                 "",
             )
             issues.append(
-                f"tracked {PROJECT_CONFIG_NAME} is missing after Git workspace integration was enabled"
+                f"shared {PROJECT_CONFIG_NAME} is missing after Git workspace integration was enabled"
             )
     if config.required_version and not version_requirement_matches(BATON_VERSION, config.required_version):
         issues.append(
@@ -1059,9 +1176,16 @@ def assess_workspace(database_value: str, baseline_commit: str = "") -> Workspac
     snapshot: WorkspaceSnapshot | None = None
     if config.provider == "git" and config.policy != "off":
         try:
-            snapshot = capture_git_snapshot(config.root)
+            workspace_root = (
+                Path(workspace_root_value).expanduser().resolve()
+                if workspace_root_value
+                else Path.cwd().resolve()
+            )
+            if not workspace_root.is_dir():
+                raise MigrationError(f"workspace root is not a directory: {workspace_root}")
+            snapshot = capture_git_snapshot(workspace_root)
             if baseline_commit and not git_commit_is_ancestor(
-                config.root,
+                snapshot.repository_root,
                 baseline_commit,
                 snapshot.head_commit,
             ):
@@ -1146,6 +1270,22 @@ def apply_workspace_policy(
     issues = "; ".join(assessment.issues)
     if assessment.issues and assessment.config.policy == "strict":
         if not getattr(args, "accept_workspace_change", False):
+            if operation == "failed":
+                print(
+                    f"WARNING: workspace failed: {issues}; failure reporting was not blocked",
+                    file=sys.stderr,
+                )
+                record_workspace_event(
+                    con,
+                    assessment,
+                    entity_type=entity_type,
+                    entity_id=entity_id,
+                    operation=operation,
+                    actor_role=actor_role,
+                    outcome="warning",
+                    message=f"{issues}; failure reporting was not blocked",
+                )
+                return
             raise MigrationError(
                 f"workspace policy strict blocked {operation}: {issues}; "
                 "use an authorized workspace override only for an intentional transition"
@@ -1514,7 +1654,7 @@ def command_workspace_check(args: argparse.Namespace) -> int:
             if not row:
                 raise MigrationError(f"unknown job: {args.job_id}")
         baseline = latest_workspace_commit(args.db, args.job_id, ("claimed", "registered"))
-    assessment = assess_workspace(args.db, baseline)
+    assessment = assess_workspace(args.db, baseline, args.workspace_root)
     snapshot = assessment.snapshot
     result = (
         "off"
@@ -1625,6 +1765,23 @@ def seed_role_permissions(con: sqlite3.Connection) -> None:
             """
             insert into role_permissions(role_id, permission)
             values ('sm', ?)
+            on conflict(role_id, permission) do nothing
+            """,
+            (permission,),
+        )
+    for permission in (
+        "cr.review",
+        "cr.request_revision",
+        "cr.approve",
+        "cr.reject",
+        "cr.mark_implemented",
+        "handoff.cancel",
+        "handoff.register",
+    ):
+        con.execute(
+            """
+            insert into role_permissions(role_id, permission)
+            values ('planning', ?)
             on conflict(role_id, permission) do nothing
             """,
             (permission,),
@@ -1831,6 +1988,23 @@ def require_permission(con: sqlite3.Connection, role: str, permission: str) -> s
     return role_id
 
 
+def require_failure_reviewer(con: sqlite3.Connection, role: str) -> str:
+    role_id = resolve_role(con, role)
+    granted = {
+        row["permission"]
+        for row in con.execute(
+            "select permission from role_permissions where role_id = ?",
+            (role_id,),
+        ).fetchall()
+    }
+    missing = sorted(FAILURE_REVIEW_PERMISSIONS - granted)
+    if missing:
+        raise SystemExit(
+            f"ERROR: failure reviewer role {role_id} lacks permissions: {', '.join(missing)}"
+        )
+    return role_id
+
+
 def require_gate_owner(con: sqlite3.Connection, gate_name: str, role: str) -> str:
     role_id = resolve_role(con, role)
     owner = con.execute(
@@ -1895,6 +2069,8 @@ def cr_frontmatter(row: sqlite3.Row) -> str:
         "reviewer_role": row["reviewer_role"],
         "revision_count": str(row["revision_count"]),
         "active_revision_job_id": row["active_revision_job_id"] or "",
+        "submitted_body_hash": row["submitted_body_hash"] or "",
+        "approved_body_hash": row["approved_body_hash"] or "",
         "managed_by": "baton",
         "updated_at": row["updated_at"],
     }
@@ -1902,10 +2078,15 @@ def cr_frontmatter(row: sqlite3.Row) -> str:
     return f"---\n{body}\n---\n"
 
 
-def cr_file_signature(path: Path) -> tuple[int, int, int, int, str]:
-    stat = path.stat()
-    content = path.read_bytes()
-    current_stat = path.stat()
+def read_stable_cr_bytes(path: Path) -> tuple[bytes, tuple[int, int, int, int]]:
+    if not path.is_file():
+        raise MigrationError(f"CR document is missing: {path}")
+    try:
+        stat = path.stat()
+        content = path.read_bytes()
+        current_stat = path.stat()
+    except OSError as exc:
+        raise MigrationError(f"cannot read CR document {path}: {exc}") from exc
     signature = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
     current_signature = (
         current_stat.st_dev,
@@ -1915,7 +2096,80 @@ def cr_file_signature(path: Path) -> tuple[int, int, int, int, str]:
     )
     if signature != current_signature:
         raise MigrationError(f"CR document changed while it was being read: {path}")
+    return content, signature
+
+
+def cr_file_signature(path: Path) -> tuple[int, int, int, int, str]:
+    content, signature = read_stable_cr_bytes(path)
     return (*signature, hashlib.sha256(content).hexdigest())
+
+
+def cr_markdown_body(text: str) -> str:
+    if text.startswith("---\n"):
+        end = text.find("\n---\n", 4)
+        if end != -1:
+            return text[end + len("\n---\n") :]
+    return text
+
+
+def cr_body_snapshot(path: Path) -> tuple[str, str]:
+    content, _ = read_stable_cr_bytes(path)
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise MigrationError(f"CR document is not valid UTF-8: {path}") from exc
+    body = cr_markdown_body(text)
+    return body, hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def cr_body_hash(path: Path) -> str:
+    return cr_body_snapshot(path)[1]
+
+
+def require_cr_body_hash(
+    con: sqlite3.Connection,
+    row: sqlite3.Row,
+    hash_column: str,
+    label: str,
+) -> str:
+    expected = str(row[hash_column] or "")
+    if not expected:
+        raise MigrationError(
+            f"CR {row['cr_id']} has no recorded {label} body hash; "
+            "the assigned reviewer must seal the current body before implementation"
+        )
+    path = project_file_path(con, row["file_path"])
+    current = cr_body_hash(path)
+    if current != expected:
+        raise MigrationError(
+            f"CR {row['cr_id']} body changed after {label}: {path}; "
+            "restore the reviewed body or create a new CR"
+        )
+    return current
+
+
+def cr_body_integrity(
+    con: sqlite3.Connection,
+    row: sqlite3.Row,
+    current_hash: str | None = None,
+) -> tuple[str, str]:
+    if row["status"] in {"approved", "implemented"}:
+        expected = str(row["approved_body_hash"] or "")
+    elif row["status"] == "submitted":
+        expected = str(row["submitted_body_hash"] or "")
+    else:
+        return "editable", ""
+    if not expected:
+        return "legacy-unsealed", ""
+    path = project_file_path(con, row["file_path"])
+    if not path.is_file():
+        return "missing", expected
+    if current_hash is None:
+        try:
+            current_hash = cr_body_hash(path)
+        except MigrationError:
+            return "unreadable", expected
+    return ("ok" if current_hash == expected else "mismatch"), expected
 
 
 def write_cr_markdown(
@@ -1946,24 +2200,42 @@ def write_cr_markdown(
             temporary_path.unlink()
 
 
-def sync_cr_file(con: sqlite3.Connection, cr_id: str) -> None:
+def sync_cr_file(
+    con: sqlite3.Connection,
+    cr_id: str,
+    *,
+    new_body: str = "",
+    allow_body_mismatch: bool = False,
+) -> None:
     row = con.execute("select * from change_requests where cr_id = ?", (cr_id,)).fetchone()
     if not row:
         raise SystemExit(f"ERROR: unknown CR: {cr_id}")
     path = project_file_path(con, row["file_path"])
     frontmatter = cr_frontmatter(row)
     if not path.exists():
-        body = f"# {row['title']}\n\n## Background\n\n## Requirements\n\n## Acceptance Criteria\n"
+        body = new_body or (
+            f"# {row['title']}\n\n## Background\n\n## Requirements\n\n## Acceptance Criteria\n"
+        )
         write_cr_markdown(path, frontmatter, body, expect_missing=True)
         return
+    if (
+        not allow_body_mismatch
+        and row["status"] in {"approved", "implemented"}
+        and row["approved_body_hash"]
+    ):
+        require_cr_body_hash(con, row, "approved_body_hash", "approval")
+    if (
+        not allow_body_mismatch
+        and row["status"] == "submitted"
+        and row["submitted_body_hash"]
+    ):
+        require_cr_body_hash(con, row, "submitted_body_hash", "submission")
     signature = cr_file_signature(path)
     text = path.read_text(encoding="utf-8")
-    if text.startswith("---\n"):
-        end = text.find("\n---\n", 4)
-        if end != -1:
-            body = text[end + len("\n---\n") :]
-            write_cr_markdown(path, frontmatter, body, expected_signature=signature)
-            return
+    body = cr_markdown_body(text)
+    if body != text:
+        write_cr_markdown(path, frontmatter, body, expected_signature=signature)
+        return
     write_cr_markdown(path, frontmatter, text, expected_signature=signature)
 
 
@@ -2186,12 +2458,14 @@ def command_migrate(args: argparse.Namespace) -> int:
     backup_database(path, backup_path, signature)
     with connect(args.db) as con:
         enable_wal(con)
+        con.execute("PRAGMA foreign_keys = OFF")
         con.execute("BEGIN IMMEDIATE")
         if database_content_signature(con) != signature:
             con.rollback()
             backup_path.unlink()
             raise MigrationError("database changed while migration was starting; rerun 'baton migrate'")
         previous, current, applied = migrate_schema(con, transaction_started=True)
+        con.execute("PRAGMA foreign_keys = ON")
     marker = ensure_marker_for_database(path)
     applied_text = ",".join(applied) if applied else "none"
     print(
@@ -2419,11 +2693,11 @@ def create_handoff_job(
 
 def command_register(args: argparse.Namespace) -> int:
     depends_on = args.depends_on or []
-    assessment = assess_workspace(args.db)
+    assessment = assess_workspace(args.db, workspace_root_value=args.workspace_root)
     with connect(args.db) as con:
         init_schema(con)
         begin_immediate(con)
-        actor_role = normalize_role(args.actor_role)
+        actor_role = require_permission(con, args.actor_role, "handoff.register")
         job_id, status, role = create_handoff_job(
             con,
             args.title,
@@ -2673,7 +2947,8 @@ def command_cr_create(args: argparse.Namespace) -> int:
         file_path = args.file_path.strip()
         if not file_path:
             file_path = str(Path(args.dir) / f"{cr_id}-{slugify(args.title)}.md")
-        if project_file_path(con, file_path).exists():
+        resolved_file_path = project_file_path(con, file_path)
+        if resolved_file_path.exists():
             raise SystemExit(f"ERROR: CR file already exists: {file_path}")
         now = utc_now()
         con.execute(
@@ -2686,7 +2961,7 @@ def command_cr_create(args: argparse.Namespace) -> int:
         cr_event(con, cr_id, "created", actor_role=author_role, to_status="draft")
         sync_cr_file(con, cr_id)
         con.commit()
-    print(f"{cr_id}\tdraft\t{file_path}")
+    print(f"{cr_id}\tdraft\t{resolved_file_path}")
     return 0
 
 
@@ -2705,14 +2980,17 @@ def transition_cr_to_submitted(args: argparse.Namespace, resubmit: bool) -> int:
         if row["author_role"] != actor_role:
             raise SystemExit(f"ERROR: CR author role is {row['author_role']}, not {actor_role}")
         require_distinct_cr_roles(row["author_role"], row["reviewer_role"])
+        body_hash = cr_body_hash(project_file_path(con, row["file_path"]))
         now = utc_now()
         con.execute(
             """
             update change_requests
-            set status = 'submitted', submitted_at = ?, updated_at = ?, active_revision_job_id = null
+            set status = 'submitted', submitted_at = ?, updated_at = ?,
+                active_revision_job_id = null, submitted_body_hash = ?,
+                approved_body_hash = null
             where cr_id = ?
             """,
-            (now, now, args.cr_id),
+            (now, now, body_hash, args.cr_id),
         )
         event_type = "resubmitted" if resubmit else "submitted"
         cr_event(con, args.cr_id, event_type, actor_role=actor_role, from_status=row["status"], to_status="submitted", message=evidence)
@@ -2766,7 +3044,7 @@ def command_cr_request_revision(args: argparse.Namespace) -> int:
             con,
             args.title or f"Revise rejected CR: {row['title']}",
             assign_role,
-            row["file_path"],
+            f"cr:{args.cr_id}",
             f"Address CR revision feedback for {args.cr_id}: {reason}",
             "CR Markdown body is updated and baton cr resubmit is completed.",
             [],
@@ -2803,15 +3081,70 @@ def command_cr_approve(args: argparse.Namespace) -> int:
         row, actor_role = assert_reviewer_action(con, args.cr_id, args.role, "cr.approve")
         if row["status"] != "submitted":
             raise SystemExit(f"ERROR: CR must be submitted: {args.cr_id} status={row['status']}")
+        current_hash = cr_body_hash(project_file_path(con, row["file_path"]))
+        submitted_hash = str(row["submitted_body_hash"] or "")
+        if submitted_hash and current_hash != submitted_hash:
+            raise MigrationError(
+                f"CR {args.cr_id} body changed after submission; "
+                "request revision so the author can resubmit the reviewed body"
+            )
         now = utc_now()
         con.execute(
-            "update change_requests set status = 'approved', approved_at = ?, updated_at = ? where cr_id = ?",
-            (now, now, args.cr_id),
+            """
+            update change_requests
+            set status = 'approved', approved_at = ?, updated_at = ?,
+                submitted_body_hash = ?, approved_body_hash = ?
+            where cr_id = ?
+            """,
+            (now, now, submitted_hash or current_hash, current_hash, args.cr_id),
         )
         cr_event(con, args.cr_id, "approved", actor_role=actor_role, from_status="submitted", to_status="approved", message=args.evidence)
         sync_cr_file(con, args.cr_id)
         con.commit()
     print(f"{args.cr_id}\tapproved")
+    return 0
+
+
+def command_cr_seal(args: argparse.Namespace) -> int:
+    evidence = args.evidence.strip()
+    if not evidence:
+        raise SystemExit("ERROR: --evidence cannot be blank")
+    with connect(args.db) as con:
+        init_schema(con)
+        begin_immediate(con)
+        row, actor_role = assert_reviewer_action(con, args.cr_id, args.role, "cr.review")
+        if row["status"] not in {"approved", "implemented"}:
+            raise SystemExit(
+                f"ERROR: CR must be approved or implemented: {args.cr_id} status={row['status']}"
+            )
+        if row["approved_body_hash"]:
+            require_cr_body_hash(con, row, "approved_body_hash", "approval")
+            con.rollback()
+            print(f"{args.cr_id}\talready-sealed\t{row['approved_body_hash']}")
+            return 0
+        body_hash = cr_body_hash(project_file_path(con, row["file_path"]))
+        now = utc_now()
+        con.execute(
+            """
+            update change_requests
+            set submitted_body_hash = coalesce(submitted_body_hash, ?),
+                approved_body_hash = ?, updated_at = ?
+            where cr_id = ?
+            """,
+            (body_hash, body_hash, now, args.cr_id),
+        )
+        cr_event(
+            con,
+            args.cr_id,
+            "body_sealed",
+            actor_role=actor_role,
+            from_status=row["status"],
+            to_status=row["status"],
+            message=evidence,
+        )
+        sync_cr_file(con, args.cr_id)
+        con.commit()
+    print(f"{args.cr_id}\tsealed\t{body_hash}")
     return 0
 
 
@@ -2890,6 +3223,14 @@ def command_cr_cancel(args: argparse.Namespace) -> int:
             raise SystemExit(f"ERROR: CR is already cancelled: {args.cr_id}")
         if row["status"] == "implemented":
             raise SystemExit(f"ERROR: implemented CR cannot be cancelled: {args.cr_id}")
+        failure = con.execute(
+            """
+            select id, job_id
+            from handoff_failure_reviews
+            where cr_id = ? and resolution is null
+            """,
+            (args.cr_id,),
+        ).fetchone()
         now = utc_now()
         con.execute(
             """
@@ -2912,6 +3253,26 @@ def command_cr_cancel(args: argparse.Namespace) -> int:
                     actor_role,
                     f"CR {args.cr_id} cancelled: {reason}",
                 )
+        if failure:
+            failed_job = con.execute(
+                "select status from handoff_jobs where job_id = ?",
+                (failure["job_id"],),
+            ).fetchone()
+            if failed_job and failed_job["status"] == "failed":
+                cancel_handoff_with_dependents(
+                    con,
+                    failure["job_id"],
+                    actor_role,
+                    f"Failure CR {args.cr_id} cancelled: {reason}",
+                )
+            con.execute(
+                """
+                update handoff_failure_reviews
+                set resolution = 'cancelled', resolved_by_role = ?, resolved_at = ?, resolution_message = ?
+                where id = ?
+                """,
+                (actor_role, now, reason, failure["id"]),
+            )
         cr_event(
             con,
             args.cr_id,
@@ -2921,7 +3282,7 @@ def command_cr_cancel(args: argparse.Namespace) -> int:
             to_status="cancelled",
             message=reason,
         )
-        sync_cr_file(con, args.cr_id)
+        sync_cr_file(con, args.cr_id, allow_body_mismatch=True)
         con.commit()
     print(f"{args.cr_id}\tcancelled")
     return 0
@@ -2934,11 +3295,12 @@ def command_cr_create_handoff(args: argparse.Namespace) -> int:
         row, actor_role = assert_reviewer_action(con, args.cr_id, args.by_role, "cr.assign_implementation")
         if row["status"] != "approved":
             raise SystemExit(f"ERROR: CR must be approved: {args.cr_id} status={row['status']}")
+        require_cr_body_hash(con, row, "approved_body_hash", "approval")
         job_id, status, role = create_handoff_job(
             con,
             args.title,
             args.role,
-            row["file_path"],
+            f"cr:{args.cr_id}",
             args.objective,
             args.exit_criteria,
             args.depends_on or [],
@@ -2965,6 +3327,7 @@ def command_cr_mark_implemented(args: argparse.Namespace) -> int:
         row, actor_role = assert_reviewer_action(con, args.cr_id, args.role, "cr.mark_implemented")
         if row["status"] != "approved":
             raise SystemExit(f"ERROR: CR must be approved: {args.cr_id} status={row['status']}")
+        require_cr_body_hash(con, row, "approved_body_hash", "approval")
         unfinished = con.execute(
             """
             select h.job_id, h.status
@@ -3004,14 +3367,42 @@ def command_cr_status(args: argparse.Namespace) -> int:
     with connect(args.db) as con:
         init_schema(con)
         row = con.execute("select * from change_requests where cr_id = ?", (args.cr_id,)).fetchone()
-    if not row:
-        raise SystemExit(f"ERROR: unknown CR: {args.cr_id}")
-    print(f"{row['cr_id']}\t{row['status']}\t{row['title']}\t{row['file_path']}")
+        if not row:
+            raise SystemExit(f"ERROR: unknown CR: {args.cr_id}")
+        resolved_path = project_file_path(con, row["file_path"])
+        integrity, expected_hash = cr_body_integrity(con, row)
+    print(f"{row['cr_id']}\t{row['status']}\t{row['title']}\t{resolved_path}")
     print(f"author_role: {row['author_role']}")
     print(f"reviewer_role: {row['reviewer_role']}")
     print(f"revision_count: {row['revision_count']}")
+    print(f"body_integrity: {integrity}")
+    if expected_hash:
+        print(f"body_hash: {expected_hash}")
     if row["active_revision_job_id"]:
         print(f"active_revision_job_id: {row['active_revision_job_id']}")
+    return 0
+
+
+def command_cr_show(args: argparse.Namespace) -> int:
+    with connect(args.db) as con:
+        init_schema(con)
+        row = con.execute("select * from change_requests where cr_id = ?", (args.cr_id,)).fetchone()
+        if not row:
+            raise SystemExit(f"ERROR: unknown CR: {args.cr_id}")
+        path = project_file_path(con, row["file_path"])
+        body, current_hash = cr_body_snapshot(path)
+        integrity, expected_hash = cr_body_integrity(con, row, current_hash)
+    print(f"cr_id: {row['cr_id']}")
+    print(f"status: {row['status']}")
+    print(f"title: {row['title']}")
+    print(f"author_role: {row['author_role']}")
+    print(f"reviewer_role: {row['reviewer_role']}")
+    print(f"file_path: {path}")
+    print(f"body_integrity: {integrity}")
+    if expected_hash:
+        print(f"body_hash: {expected_hash}")
+    print("--- body ---")
+    print(body, end="" if body.endswith("\n") else "\n")
     return 0
 
 
@@ -3067,7 +3458,9 @@ def command_cr_wait_review(args: argparse.Namespace) -> int:
                 print(f"Stopped waiting for CR review role {role} by {stopped['scope']}.{reason}")
                 return 3
             if row:
-                print(f"{row['cr_id']}\t{row['title']}\t{row['file_path']}")
+                with connect(args.db) as con:
+                    resolved_path = project_file_path(con, row["file_path"])
+                print(f"{row['cr_id']}\t{row['title']}\t{resolved_path}")
                 return 0
             if deadline is not None and time.monotonic() >= deadline:
                 print(f"Timed out waiting for CR review role {role}")
@@ -3121,9 +3514,23 @@ def command_handoff_show(args: argparse.Namespace) -> int:
                 (args.job_id,),
             ).fetchall()
         ]
+        failures = [
+            {key: item[key] for key in item.keys()}
+            for item in con.execute(
+                """
+                select cr_id, failed_by_role, reason, evidence, failed_at,
+                       resolution, resolved_by_role, resolved_at, resolution_message
+                from handoff_failure_reviews
+                where job_id = ?
+                order by id
+                """,
+                (args.job_id,),
+            ).fetchall()
+        ]
     payload = {key: row[key] for key in row.keys()}
     payload["depends_on"] = dependencies
     payload["depends_on_gates"] = gates
+    payload["failure_reviews"] = failures
     if args.format == "json":
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return 0
@@ -3143,11 +3550,16 @@ def command_handoff_show(args: argparse.Namespace) -> int:
         "finished_at",
         "closure_evidence",
         "related_commit",
+        "failure_reviews",
     )
     for key in ordered_keys:
         value = payload.get(key)
         if isinstance(value, list):
-            value = ",".join(value)
+            value = (
+                json.dumps(value, ensure_ascii=False)
+                if value and isinstance(value[0], dict)
+                else ",".join(value)
+            )
         print(f"{key}: {value or ''}")
     return 0
 
@@ -3211,9 +3623,29 @@ def command_next(args: argparse.Namespace) -> int:
     return 0
 
 
+def require_linked_cr_integrity(con: sqlite3.Connection, job_id: str) -> None:
+    rows = con.execute(
+        """
+        select cr.*
+        from cr_handoffs ch
+        join change_requests cr on cr.cr_id = ch.cr_id
+        where ch.job_id = ? and ch.kind = 'implementation'
+        order by cr.cr_id
+        """,
+        (job_id,),
+    ).fetchall()
+    for row in rows:
+        if row["status"] not in {"approved", "implemented"}:
+            raise MigrationError(
+                f"implementation handoff {job_id} references CR {row['cr_id']} "
+                f"with invalid status {row['status']}"
+            )
+        require_cr_body_hash(con, row, "approved_body_hash", "approval")
+
+
 def command_claim(args: argparse.Namespace) -> int:
     baseline = latest_workspace_commit(args.db, args.job_id, ("registered",))
-    assessment = assess_workspace(args.db, baseline)
+    assessment = assess_workspace(args.db, baseline, args.workspace_root)
     with connect(args.db) as con:
         init_schema(con)
         begin_immediate(con)
@@ -3225,6 +3657,7 @@ def command_claim(args: argparse.Namespace) -> int:
             raise SystemExit(f"ERROR: job target role is {row['target_role']}, not {role}")
         if row["status"] != "open":
             raise SystemExit(f"ERROR: job is not open: {args.job_id} status={row['status']}")
+        require_linked_cr_integrity(con, args.job_id)
         stopped = get_stop_control(con, role)
         if stopped:
             reason = f" reason={stopped['reason']}" if stopped["reason"] else ""
@@ -3260,7 +3693,7 @@ def command_finish(args: argparse.Namespace) -> int:
     if not evidence:
         raise SystemExit("ERROR: --evidence cannot be blank")
     baseline = latest_workspace_commit(args.db, args.job_id, ("claimed", "registered"))
-    assessment = assess_workspace(args.db, baseline)
+    assessment = assess_workspace(args.db, baseline, args.workspace_root)
     with connect(args.db) as con:
         init_schema(con)
         begin_immediate(con)
@@ -3272,6 +3705,7 @@ def command_finish(args: argparse.Namespace) -> int:
             raise SystemExit(f"ERROR: job target role is {row['target_role']}, not {role}")
         if row["status"] != "in_progress":
             raise SystemExit(f"ERROR: job is not in_progress: {args.job_id} status={row['status']}")
+        require_linked_cr_integrity(con, args.job_id)
         apply_workspace_policy(
             con,
             args,
@@ -3295,6 +3729,227 @@ def command_finish(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_fail(args: argparse.Namespace) -> int:
+    reason = args.reason.strip()
+    evidence = args.evidence.strip()
+    if not reason:
+        raise SystemExit("ERROR: --reason cannot be blank")
+    baseline = latest_workspace_commit(args.db, args.job_id, ("claimed", "registered"))
+    assessment = assess_workspace(args.db, baseline, args.workspace_root)
+    with connect(args.db) as con:
+        init_schema(con)
+        begin_immediate(con)
+        role = resolve_role(con, args.role)
+        row = con.execute("select * from handoff_jobs where job_id = ?", (args.job_id,)).fetchone()
+        if not row:
+            raise SystemExit(f"ERROR: unknown job: {args.job_id}")
+        if row["target_role"] != role:
+            raise SystemExit(f"ERROR: job target role is {row['target_role']}, not {role}")
+        if row["status"] != "in_progress":
+            raise SystemExit(f"ERROR: job is not in_progress: {args.job_id} status={row['status']}")
+
+        reviewer_input = args.reviewer_role.strip()
+        if reviewer_input:
+            reviewer_role = require_failure_reviewer(con, reviewer_input)
+        else:
+            preferred_role = "sm" if role == "planning" else "planning"
+            preferred = con.execute(
+                "select role_id from roles where role_id = ? and active = 1",
+                (preferred_role,),
+            ).fetchone()
+            granted = set()
+            if preferred:
+                granted = {
+                    item["permission"]
+                    for item in con.execute(
+                        "select permission from role_permissions where role_id = ?",
+                        (preferred["role_id"],),
+                    ).fetchall()
+                }
+            reviewer_role = (
+                preferred["role_id"]
+                if preferred and FAILURE_REVIEW_PERMISSIONS <= granted
+                else require_failure_reviewer(con, "sm")
+            )
+        require_distinct_cr_roles(role, reviewer_role)
+        apply_workspace_policy(
+            con,
+            args,
+            assessment,
+            entity_type="handoff",
+            entity_id=args.job_id,
+            operation="failed",
+            actor_role=role,
+        )
+
+        cr_id = next_cr_id(con)
+        title = args.title.strip() or f"Resolve failed handoff {args.job_id}: {row['title']}"
+        file_path = args.file_path.strip() or str(Path(args.dir) / f"{cr_id}-{slugify(title)}.md")
+        if project_file_path(con, file_path).exists():
+            raise SystemExit(f"ERROR: CR file already exists: {file_path}")
+        now = utc_now()
+        con.execute(
+            "update handoff_jobs set status = 'failed' where job_id = ?",
+            (args.job_id,),
+        )
+        event(
+            con,
+            "failed",
+            job_id=args.job_id,
+            actor_role=role,
+            from_status="in_progress",
+            to_status="failed",
+            message=f"{reason}{f' Evidence: {evidence}' if evidence else ''}",
+        )
+        con.execute(
+            """
+            insert into change_requests(
+              cr_id, title, status, author_role, reviewer_role, file_path,
+              created_at, updated_at, submitted_at
+            )
+            values (?, ?, 'submitted', ?, ?, ?, ?, ?, ?)
+            """,
+            (cr_id, title, role, reviewer_role, file_path, now, now, now),
+        )
+        cr_event(con, cr_id, "created", actor_role=role, to_status="draft")
+        cr_event(
+            con,
+            cr_id,
+            "failure_submitted",
+            actor_role=role,
+            from_status="draft",
+            to_status="submitted",
+            message=args.job_id,
+        )
+        con.execute(
+            """
+            insert into handoff_failure_reviews(
+              job_id, cr_id, failed_by_role, reason, evidence, failed_at
+            )
+            values (?, ?, ?, ?, ?, ?)
+            """,
+            (args.job_id, cr_id, role, reason, evidence, now),
+        )
+        body = (
+            f"# {title}\n\n"
+            f"## Failed Handoff\n\n- Job: `{args.job_id}`\n- Role: `{role}`\n"
+            f"- Source: `{row['source_ref'] or ''}`\n\n"
+            f"## Failure Reason\n\n{reason}\n\n"
+            f"## Evidence\n\n{evidence or 'No additional evidence was supplied.'}\n\n"
+            "## Decision\n\n"
+            "Review the failure without releasing dependent handoffs. Approve this CR to allow "
+            "`baton retry`, or reject it and explicitly cancel the failed handoff.\n\n"
+            "## Acceptance Criteria\n\n"
+            "The failed handoff is either retried and finished, or cancelled with its blocked dependency branch.\n"
+        )
+        sync_cr_file(con, cr_id, new_body=body)
+        submitted_hash = cr_body_hash(project_file_path(con, file_path))
+        con.execute(
+            "update change_requests set submitted_body_hash = ? where cr_id = ?",
+            (submitted_hash, cr_id),
+        )
+        sync_cr_file(con, cr_id)
+        con.commit()
+    print(f"Failed {args.job_id} cr={cr_id} reviewer={reviewer_role}")
+    return 0
+
+
+def command_retry(args: argparse.Namespace) -> int:
+    reason = args.reason.strip()
+    if not reason:
+        raise SystemExit("ERROR: --reason cannot be blank")
+    with connect(args.db) as con:
+        init_schema(con)
+        begin_immediate(con)
+        actor_role = require_permission(con, args.role, "handoff.register")
+        row = con.execute(
+            "select status from handoff_jobs where job_id = ?",
+            (args.job_id,),
+        ).fetchone()
+        if not row:
+            raise SystemExit(f"ERROR: unknown job: {args.job_id}")
+        if row["status"] != "failed":
+            raise SystemExit(f"ERROR: job is not failed: {args.job_id} status={row['status']}")
+        failure = con.execute(
+            """
+            select f.id, f.cr_id, c.status as cr_status, c.reviewer_role
+            from handoff_failure_reviews f
+            join change_requests c on c.cr_id = f.cr_id
+            where f.job_id = ? and f.resolution is null
+            order by f.id desc
+            limit 1
+            """,
+            (args.job_id,),
+        ).fetchone()
+        if not failure:
+            raise SystemExit(f"ERROR: failed job has no active failure CR: {args.job_id}")
+        if args.cr_id and args.cr_id != failure["cr_id"]:
+            raise SystemExit(
+                f"ERROR: active failure CR is {failure['cr_id']}, not {args.cr_id}"
+            )
+        if failure["reviewer_role"] != actor_role:
+            raise SystemExit(
+                f"ERROR: failure CR reviewer role is {failure['reviewer_role']}, not {actor_role}"
+            )
+        if failure["cr_status"] != "approved":
+            raise SystemExit(
+                f"ERROR: failure CR must be approved before retry: "
+                f"{failure['cr_id']} status={failure['cr_status']}"
+            )
+        failure_cr = con.execute(
+            "select * from change_requests where cr_id = ?",
+            (failure["cr_id"],),
+        ).fetchone()
+        require_cr_body_hash(con, failure_cr, "approved_body_hash", "approval")
+        now = utc_now()
+        con.execute(
+            """
+            update handoff_jobs
+            set status = 'open', claimed_by = null, started_at = null,
+                finished_at = null, closure_evidence = null, related_commit = null
+            where job_id = ? and status = 'failed'
+            """,
+            (args.job_id,),
+        )
+        con.execute(
+            """
+            update handoff_failure_reviews
+            set resolution = 'retry', resolved_by_role = ?, resolved_at = ?, resolution_message = ?
+            where id = ?
+            """,
+            (actor_role, now, reason, failure["id"]),
+        )
+        con.execute(
+            """
+            insert into cr_handoffs(cr_id, job_id, kind, created_at)
+            values (?, ?, 'implementation', ?)
+            on conflict(cr_id, job_id) do nothing
+            """,
+            (failure["cr_id"], args.job_id, now),
+        )
+        event(
+            con,
+            "retried",
+            job_id=args.job_id,
+            actor_role=actor_role,
+            from_status="failed",
+            to_status="open",
+            message=f"{failure['cr_id']}: {reason}",
+        )
+        cr_event(
+            con,
+            failure["cr_id"],
+            "retry_authorized",
+            actor_role=actor_role,
+            from_status="approved",
+            to_status="approved",
+            message=f"{args.job_id}: {reason}",
+        )
+        con.commit()
+    print(f"Retried {args.job_id} cr={failure['cr_id']}")
+    return 0
+
+
 def command_cancel(args: argparse.Namespace) -> int:
     reason = args.reason.strip()
     if not reason:
@@ -3313,12 +3968,40 @@ def command_cancel(args: argparse.Namespace) -> int:
             raise SystemExit(f"ERROR: finished job cannot be cancelled: {args.job_id}")
         if row["status"] == "cancelled":
             raise SystemExit(f"ERROR: job is already cancelled: {args.job_id}")
+        active_failure = con.execute(
+            """
+            select f.id, f.cr_id, c.status as cr_status
+            from handoff_failure_reviews f
+            join change_requests c on c.cr_id = f.cr_id
+            where f.job_id = ? and f.resolution is null
+            order by f.id desc
+            limit 1
+            """,
+            (args.job_id,),
+        ).fetchone()
+        if row["status"] == "failed" and active_failure and active_failure["cr_status"] not in {
+            "rejected",
+            "cancelled",
+        }:
+            raise SystemExit(
+                f"ERROR: failure CR must be rejected or cancelled before handoff cancellation: "
+                f"{active_failure['cr_id']} status={active_failure['cr_status']}"
+            )
         cancelled = cancel_handoff_with_dependents(
             con,
             args.job_id,
             actor_role,
             reason,
         )
+        if active_failure:
+            con.execute(
+                """
+                update handoff_failure_reviews
+                set resolution = 'cancelled', resolved_by_role = ?, resolved_at = ?, resolution_message = ?
+                where id = ?
+                """,
+                (actor_role, utc_now(), reason, active_failure["id"]),
+            )
         con.commit()
     print(f"Cancelled {args.job_id} dependents={len(cancelled) - 1}")
     return 0
@@ -3695,8 +4378,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"%(prog)s {BATON_VERSION}")
     parser.add_argument(
         "--db",
-        default="",
-        help="SQLite database path; default: <nearest-baton-marker>/.baton/baton.sqlite3",
+        default=os.environ.get("BATON_DB", ""),
+        help=(
+            "SQLite database path; default: BATON_DB or "
+            "<nearest-baton-marker>/.baton/baton.sqlite3"
+        ),
+    )
+    parser.add_argument(
+        "--workspace-root",
+        default=os.environ.get("BATON_WORKSPACE_ROOT", ""),
+        help=(
+            "source workspace inspected by optional VCS policy; default: "
+            "BATON_WORKSPACE_ROOT or current directory"
+        ),
     )
     parser.add_argument("--agent-id-file", default="", help="local non-shared agent identity file")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -3876,8 +4570,15 @@ def build_parser() -> argparse.ArgumentParser:
     cr_create.add_argument("--title", required=True)
     cr_create.add_argument("--author-role", required=True)
     cr_create.add_argument("--reviewer-role", default="sm")
-    cr_create.add_argument("--dir", default="docs/change-requests")
-    cr_create.add_argument("--file-path", default="")
+    cr_create.add_argument(
+        "--dir",
+        default=DEFAULT_CR_DIRECTORY,
+        help=(
+            "CR body directory relative to the Baton control root; "
+            f"default: {DEFAULT_CR_DIRECTORY}"
+        ),
+    )
+    cr_create.add_argument("--file-path", default="", help="explicit CR Markdown path")
     cr_create.set_defaults(func=command_cr_create)
 
     cr_submit = cr_sub.add_parser("submit")
@@ -3904,6 +4605,15 @@ def build_parser() -> argparse.ArgumentParser:
     cr_approve.add_argument("--role", required=True)
     cr_approve.add_argument("--evidence", default="")
     cr_approve.set_defaults(func=command_cr_approve)
+
+    cr_seal = cr_sub.add_parser(
+        "seal",
+        help="seal the current body of a legacy approved CR for integrity checks",
+    )
+    cr_seal.add_argument("cr_id", metavar="CR_ID")
+    cr_seal.add_argument("--role", required=True)
+    cr_seal.add_argument("--evidence", required=True)
+    cr_seal.set_defaults(func=command_cr_seal)
 
     cr_reject = cr_sub.add_parser("reject")
     cr_reject.add_argument("cr_id")
@@ -3945,6 +4655,10 @@ def build_parser() -> argparse.ArgumentParser:
     cr_status.add_argument("cr_id")
     cr_status.set_defaults(func=command_cr_status)
 
+    cr_show = cr_sub.add_parser("show", help="show CR metadata and the shared Markdown body")
+    cr_show.add_argument("cr_id", metavar="CR_ID")
+    cr_show.set_defaults(func=command_cr_show)
+
     cr_sync = cr_sub.add_parser("sync", help="reconcile managed Markdown frontmatter from SQLite state")
     cr_sync.add_argument("cr_id")
     cr_sync.set_defaults(func=command_cr_sync)
@@ -3982,6 +4696,32 @@ def build_parser() -> argparse.ArgumentParser:
     finish.add_argument("--commit", default="")
     add_workspace_override_arguments(finish)
     finish.set_defaults(func=command_finish)
+
+    fail = sub.add_parser("fail", help="fail a claimed handoff and submit a failure CR")
+    fail.add_argument("job_id")
+    fail.add_argument("--role", required=True)
+    fail.add_argument("--reason", required=True)
+    fail.add_argument("--evidence", default="")
+    fail.add_argument("--reviewer-role", default="")
+    fail.add_argument("--title", default="")
+    fail.add_argument(
+        "--dir",
+        default=DEFAULT_CR_DIRECTORY,
+        help=(
+            "failure CR directory relative to the Baton control root; "
+            f"default: {DEFAULT_CR_DIRECTORY}"
+        ),
+    )
+    fail.add_argument("--file-path", default="", help="explicit failure CR Markdown path")
+    add_workspace_override_arguments(fail)
+    fail.set_defaults(func=command_fail)
+
+    retry = sub.add_parser("retry", help="retry a failed handoff after its failure CR is approved")
+    retry.add_argument("job_id")
+    retry.add_argument("--role", required=True)
+    retry.add_argument("--cr-id", default="")
+    retry.add_argument("--reason", required=True)
+    retry.set_defaults(func=command_retry)
 
     cancel = sub.add_parser("cancel", help="cancel one handoff and its blocked dependents")
     cancel.add_argument("job_id")
@@ -4053,7 +4793,9 @@ def main() -> int:
     if argv and argv[0] == "help":
         argv = [*argv[1:], "--help"]
     args = parser.parse_args(argv)
-    args.db_explicit = any(token == "--db" or token.startswith("--db=") for token in argv)
+    args.db_explicit = bool(os.environ.get("BATON_DB")) or any(
+        token == "--db" or token.startswith("--db=") for token in argv
+    )
     try:
         needs_default_database = args.command not in {"help", "guide"} and not (
             args.command == "project" and args.project_command == "migrate"

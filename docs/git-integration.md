@@ -6,7 +6,7 @@ Baton remains independent of Git. Its SQLite database records live workflow stat
 
 ## Enable The Integration
 
-Create a tracked `baton.toml` in the Baton project root, beside the `.baton/` directory:
+Create `baton.toml` in the Baton control root, beside the `.baton/` directory:
 
 ```toml
 [baton]
@@ -17,11 +17,11 @@ provider = "git"
 policy = "warn"
 ```
 
-`required_version` accepts comma-separated numeric version comparisons using `==`, `!=`, `<`, `<=`, `>`, and `>=`. Prerelease phases `dev`, `a`, `b`, and `rc` are supported. Keep `baton.toml` tracked in Git; keep `.baton/` ignored.
+`required_version` accepts comma-separated numeric version comparisons using `==`, `!=`, `<`, `<=`, `>`, and `>=`. Prerelease phases `dev`, `a`, `b`, and `rc` are supported. In a single checkout, `baton.toml` may be tracked in Git. For isolated worktrees, keep one shared copy in the branch-independent control root so every agent applies the same policy.
 
 If `baton.toml` is absent, the effective policy is `off` and Baton does not execute Git. If `provider = "git"` is present and `policy` is omitted, the policy defaults to `warn`.
 
-After a configured project has recorded workspace provenance, removing `baton.toml` does not silently disable protection. Baton retains the most recently recorded `warn` or `strict` behavior for inspection, reports the missing tracked config as a mismatch, and requires the file to be restored or an intentional strict override to be audited. A project can disable integration deliberately by committing `policy = "off"` before the transition.
+After a configured project has recorded workspace provenance, removing `baton.toml` does not silently disable protection. Baton retains the most recently recorded `warn` or `strict` behavior for inspection, reports the missing shared config as a mismatch, and requires the file to be restored or an intentional strict override to be audited. To disable integration deliberately, keep the shared file and set `policy = "off"`.
 
 ## Policy Modes
 
@@ -31,11 +31,13 @@ After a configured project has recorded workspace provenance, removing `baton.to
 | `warn` | Inspect and record the workspace. Allow transitions when an issue is found, print one warning, and record a `warning` workspace event. |
 | `strict` | Inspect and record the workspace. Reject an incompatible state transition unless a role with `workspace.override` supplies an audited override reason. |
 
+Failure reporting is never blocked: `fail` records a `warning` workspace event under `strict` when the checkout is mismatched, then submits the failure CR. This prevents provenance policy from trapping unsuccessful work in `in_progress`.
+
 `warn` is the default after Git integration is enabled because rebases, cherry-picks, intentional branch transfers, and older handoffs without a baseline can require operator judgment. Promote a project to `strict` only after its branch workflow has been validated.
 
 ## Recorded Provenance
 
-For configured `warn` and `strict` projects, Baton records a workspace event when a handoff is registered, claimed, or finished:
+For configured `warn` and `strict` projects, Baton records a workspace event when a handoff is registered, claimed, finished, or reported failed:
 
 - immutable HEAD commit
 - informational branch name, or `DETACHED`
@@ -52,7 +54,9 @@ Registration captures the initial handoff commit. Claim checks that the current 
 
 Moving forward through normal commits is accepted. Switching to an ancestor or a divergent branch produces a warning or strict rejection. Branch names are not authoritative because they can be renamed or moved.
 
-The current integration guards handoff `register`, `claim`, and `finish`. CR Markdown continues to use Baton's existing atomic frontmatter and concurrent-edit checks; Git ancestry is not yet a CR approval rule.
+The current integration guards handoff `register`, `claim`, `finish`, and `fail`. CR approval uses the shared Markdown body's submitted and approved hashes; Git ancestry is not a CR approval rule.
+
+`finished` records that an agent completed its handoff. It does not prove that `related_commit` was merged or cherry-picked into a downstream worktree. The planner or integrator must establish that source relationship before releasing integration-dependent work.
 
 ## Inspect The Workspace
 
@@ -60,6 +64,13 @@ Inspect the current project:
 
 ```bash
 baton workspace check
+```
+
+Git inspection defaults to the current directory. A caller operating from the control root
+can select its source checkout explicitly:
+
+```bash
+BATON_WORKSPACE_ROOT=/absolute/path/to/worktree baton workspace check
 ```
 
 Compare it with a handoff's latest recorded baseline:
@@ -111,9 +122,10 @@ Finish or explicitly cancel in-progress handoffs before the checkout. Resume onl
 ## Limits
 
 - Baton does not watch `.git/` or detect checkout events in the background.
-- A Git branch intended for Baton work should contain the tracked `baton.toml`; a missing file after prior use is treated as a policy issue rather than a fresh `off` project.
+- All worktrees sharing a Baton database use the one `baton.toml` beside that database's project root. A missing file after prior use is treated as a policy issue rather than a fresh `off` project.
 - Baton does not install Git hooks.
-- An external `--db` has no implicit project root, so project `baton.toml` integration is disabled for that database.
-- Separate Git worktrees should use separate project-local `.baton/` databases. Do not point concurrent worktrees at one external SQLite file.
-- `git clean -fdx` can delete ignored `.baton/` state. Back up the database before destructive workspace cleanup.
+- A canonical external `<control-root>/.baton/baton.sqlite3` uses that control root's config and CR paths. An arbitrarily named external DB has no implicit project root.
+- Separate Git worktrees for one logical project should share one canonical local Baton database through `BATON_DB`; unrelated projects must not share it.
+- Keep the shared control root on the same machine and a local filesystem. SQLite files on network or synchronized storage are unsupported.
+- `git clean -fdx` can delete ignored `.baton/` state when the control root is inside a checkout. Keep the control root outside disposable worktrees or back it up before destructive cleanup.
 - A schema migration is not reversible by Git checkout. Do not use an older Baton binary after migrating unless it explicitly supports that schema.

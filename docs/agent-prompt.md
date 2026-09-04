@@ -10,6 +10,18 @@ You are a role worker. Your role is provided by the user or the surrounding thre
 
 Before waiting or claiming work, use the profile name assigned by the user or project policy.
 
+In an isolated Git worktree, point Baton at the shared project control database while
+keeping VCS inspection on the current source checkout:
+
+```bash
+export BATON_DB=/absolute/path/to/project-control/.baton/baton.sqlite3
+export BATON_WORKSPACE_ROOT="$PWD"
+export BATON_AGENT_ID=<profile-name>
+```
+
+Do not run `baton init` inside each worktree. Every agent for one logical project must see
+the same `database` value in `baton project info`.
+
 ```bash
 baton --db <db> agent init --role <role> --agent-id <profile-name>
 baton --db <db> agent show
@@ -86,8 +98,8 @@ Shift handling:
 - Extend a shift only with explicit user or SM authorization. Omitting `--duration` from `shift extend` adds the default `1h`.
 - Use `baton shift status --role <role>` before re-entering wait after a timeout or after finishing work.
 - If the shift is expired or stopped, do not re-enter wait.
-- If work was already claimed, finish/report it even if the shift expires before the report is submitted.
-- After a successful `finish` or CR review action, report success, check shift status, and re-enter the appropriate bounded wait only if the shift is still active.
+- If work was already claimed, finish or report failure even if the shift expires before the report is submitted.
+- After a successful `finish`, `fail`, or CR review action, report the transition once, check shift status, and re-enter the appropriate bounded wait only if the shift is still active.
 
 A global shift uses `shift start --all`, `shift extend --all`, and `shift end --all`. Global and role scopes are cumulative controls: either scope can stop a role. Changing one scope does not clear an expired or stopped state on the other scope.
 
@@ -127,11 +139,15 @@ If claim fails, do not work on the job. Re-check with `next`, then return to bou
 - Claim before editing files.
 - If the project enables Git workspace policy, do not bypass a `strict` mismatch. Use `workspace check --job <job-id>` and report it to the SM or user; only a role with `workspace.override` may authorize an intentional transition with a concrete reason.
 - Read the handoff objective, source reference, dependencies, and exit criteria through `handoff show` before editing files.
+- When `source_ref` is `cr:<cr-id>`, use `baton cr show <cr-id>` to read the shared CR body. Do not look for it relative to the current branch.
+- Stop if an approved CR reports `body_integrity: mismatch`, `missing`, `unreadable`, or `legacy-unsealed`. The assigned reviewer must restore or seal it before implementation.
 - Work only on the claimed handoff.
 - Do not claim work for another role unless the user explicitly authorizes it.
 - Do not treat stop/resume as job cancellation.
+- If claimed work cannot meet its exit criteria, use `baton fail` with a concrete reason and available evidence. Never use `finish` to report an unsuccessful result.
+- `fail` submits a linked CR and keeps downstream handoffs blocked. After reporting it, return to the normal wait loop; do not retry, cancel, or bypass the failed dependency without the failure CR decision.
 - If a required upstream handoff is cancelled, Baton recursively cancels only blocked handoffs in that dependency branch. Unrelated queue branches remain active. Do not attempt to claim or reopen cancelled jobs.
-- Use `baton cancel` only when the user or SM explicitly decides to cancel work and your role has `handoff.cancel`. Worker agents must not infer cancellation from timeout, stop, or missing work.
+- Use `baton cancel` only when the user/SM explicitly decides to cancel work or the assigned failure reviewer rejects retry, and your role has `handoff.cancel`. Worker agents must not infer cancellation from timeout, stop, or missing work.
 - Do not release, cancel, or transfer a Gate unless the handoff or user instruction explicitly assigns that decision to your role. Gate ownership is authority, not evidence that the workflow condition is complete.
 - Use `gate transfer` only for an explicit owner change or emergency recovery. Record a concrete reason; it replaces the full owner set.
 - If a revision handoff asks you to improve a CR, edit the CR Markdown body and use `cr resubmit`; `finish` alone does not change CR state.
@@ -140,6 +156,10 @@ If claim fails, do not work on the job. Re-check with `next`, then return to bou
 ## CR Review Rules
 
 Only roles with CR review permissions can review submitted CRs. Do not approve, reject, or request revision for a CR assigned to another reviewer role.
+
+Read the branch-independent body with `baton cr show <cr-id>`. Approval applies to the exact
+submitted body hash; if the body changed after submission, request revision instead of
+approving it. Do not edit an approved body. Requirement changes after approval need a new CR.
 
 The CR author role and reviewer role must be different. If you encounter a CR that is stuck because the same role is both author and reviewer, report it to the SM/admin role; do not edit SQLite directly.
 
@@ -152,6 +172,17 @@ baton --db <db> cr request-revision <cr-id> --role <role> --reason "Reason"
 baton --db <db> cr approve <cr-id> --role <role> --evidence "Evidence summary"
 baton --db <db> cr reject <cr-id> --role <role> --reason "Reason"
 ```
+
+After schema migration, an older approved CR may report `legacy-unsealed`. Its assigned
+reviewer must verify the current body before implementation and seal it explicitly:
+
+```bash
+baton --db <db> cr seal <cr-id> \
+  --role <role> \
+  --evidence "Verified legacy approved body."
+```
+
+For a failure CR, approval authorizes the assigned reviewer to run `baton retry` on the original failed handoff. Rejection does not release downstream work; a role with `handoff.cancel` must explicitly cancel the failed job. Do not approve a failure CR merely to clear the queue.
 
 After approval, create implementation handoffs only when implementation should proceed:
 

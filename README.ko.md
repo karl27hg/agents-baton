@@ -15,7 +15,7 @@ Baton은 같은 저장소에서 작업하는 Codex app의 role agent들이 다�
 - 제한된 wait, shift, stop/resume 제어
 - 감사 이력과 요약 보고서 조회
 
-SQLite가 workflow 상태의 기준이며 agent는 DB를 직접 수정하지 않고 `bin/baton`을 사용해야 합니다. CR의 구체적인 본문은 Markdown이 기준이고, Baton은 해당 파일의 frontmatter 상태를 DB와 동기화합니다.
+SQLite가 workflow 상태의 기준이며 agent는 DB를 직접 수정하지 않고 `bin/baton`을 사용해야 합니다. CR의 구체적인 본문은 Markdown이 기준이고, Baton은 해당 파일의 frontmatter 상태를 DB와 동기화하며 제출·승인 본문 hash를 검증합니다.
 
 ## 실행 조건
 
@@ -52,7 +52,7 @@ baton project info
 baton status
 ```
 
-`baton init`은 선택한 디렉터리에 `.baton/project.json` marker와 `.baton/baton.sqlite3`를 만듭니다. 이후 하위 디렉터리에서는 가장 가까운 상위 marker를 찾아 동일한 DB를 사용하므로 Git 존재 여부와 무관하며, 프로젝트를 이동하거나 전체 복사해도 경로를 다시 등록할 필요가 없습니다. 다른 위치에서 초기화하려면 `baton init --project-root PATH`를 사용합니다.
+`baton init`은 선택한 디렉터리에 `.baton/project.json`, `.baton/baton.sqlite3`, `.baton/.gitignore`를 만듭니다. 새 CR 본문은 기본적으로 `.baton/change-requests/`에 생성됩니다. 이후 하위 디렉터리에서는 가장 가까운 상위 marker를 찾아 동일한 DB를 사용하므로 Git 존재 여부와 무관하며, 프로젝트를 이동하거나 전체 복사해도 경로를 다시 등록할 필요가 없습니다. 다른 위치에서 초기화하려면 `baton init --project-root PATH`를 사용합니다.
 
 Marker는 있지만 DB가 없으면 workflow 이력 복구가 필요한 상태로 판단합니다. `init`은 이 경우 빈 DB를 만들어 기존 이력을 대체하지 않습니다.
 
@@ -162,13 +162,22 @@ pipx uninstall agents-baton
 
 Uninstall은 `baton`, `baton-report` 명령과 pipx 가상환경만 제거합니다. 각 프로젝트의 `.baton/` DB와 감사 이력은 삭제하지 않습니다.
 
-기본 DB 경로는 marker와 같은 `.baton/`에 있는 `.baton/baton.sqlite3`입니다. `--db`는 진단과 격리 테스트를 위한 고급 옵션입니다.
+기본 DB 경로는 marker와 같은 `.baton/`에 있는 `.baton/baton.sqlite3`입니다. 한 논리 프로젝트에서 Git worktree를 분리한 경우에는 worktree마다 초기화하지 않고 branch 밖의 공통 control DB를 지정합니다.
+
+```bash
+export BATON_DB=/absolute/path/to/project-control/.baton/baton.sqlite3
+export BATON_WORKSPACE_ROOT="$PWD"
+export BATON_AGENT_ID=backend-main
+baton project info
+```
+
+모든 agent의 `project info`에 같은 DB가 나와야 합니다. `BATON_WORKSPACE_ROOT`는 선택적 Git 검사가 현재 source checkout을 보도록 하며 기본값은 현재 디렉터리입니다. 임의 DB 경로는 진단과 격리 테스트에도 사용할 수 있습니다.
 
 ```bash
 bin/baton --db /tmp/baton.sqlite3 init
 ```
 
-외부 DB에는 암묵적인 project root가 없습니다. CR 파일 경로는 절대 경로를 사용해야 하며, Baton은 실행 디렉터리에 따라 다른 파일을 만드는 상대 경로를 거부합니다.
+`<control-root>/.baton/baton.sqlite3` 형태의 외부 DB는 해당 control root의 config와 CR 경로를 사용합니다. 임의 이름의 외부 DB에는 암묵적인 project root가 없으므로 CR 파일은 절대 경로를 사용해야 합니다.
 
 ## 문서 구성
 
@@ -214,9 +223,10 @@ bin/baton role add content-design --display-name "Content Design"
 bin/baton role alias-add fe frontend
 bin/baton role permission-add architecture cr.review
 bin/baton role permission-add architecture cr.approve
+bin/baton role permission-add architecture handoff.register
 ```
 
-`sm`은 기본적으로 CR 권한, `handoff.cancel`, 긴급 `gate.manage`, `workspace.override` 권한을 갖습니다. 사용자 수준 인증은 Baton의 범위가 아니므로 OS 계정, 저장소 권한 및 agent 운영 정책으로 별도 통제해야 합니다.
+`sm`은 기본적으로 CR 권한, `handoff.cancel`, `handoff.register`, 긴급 `gate.manage`, `workspace.override` 권한을 갖습니다. 신규 프로젝트의 `planning`도 실패 handoff를 결정하는 데 필요한 등록·취소·CR 심사 권한을 받습니다. Schema v7로 올리는 기존 프로젝트는 이전 등록 동작을 깨지 않도록 기존 active role 모두에게 `handoff.register`를 승계하며, SM이 정책 검토 후 불필요한 권한을 철회할 수 있습니다. 사용자 수준 인증은 Baton의 범위가 아니므로 OS 계정, 저장소 권한 및 agent 운영 정책으로 별도 통제해야 합니다.
 
 ## 기본 Handoff 흐름
 
@@ -228,7 +238,7 @@ Planning agent는 병렬 handoff를 등록하기 전에 [Planner prompt](docs/pl
 bin/baton register \
   --title "Frontend follow-up" \
   --role frontend \
-  --source-ref "docs/change-requests/CR-example.md" \
+  --source-ref "cr:CR-example" \
   --objective "Implement the approved change." \
   --exit-criteria "The behavior is implemented and verified."
 
@@ -241,12 +251,35 @@ bin/baton finish HO-YYYY-MM-DD-001 \
   --evidence "Verification passed."
 ```
 
+Claim한 작업이 exit criteria를 충족할 수 없다면 `finish` 대신 실패를 보고합니다.
+
+```bash
+bin/baton fail HO-YYYY-MM-DD-001 \
+  --role frontend \
+  --reason "승인된 API contract로 필요한 상태를 표현할 수 없습니다." \
+  --evidence "Contract test failure: tests/api-contract.sh"
+```
+
+`fail`은 job을 `failed`로 바꾸고 연결된 실패 CR을 자동 제출하며 모든 하위 handoff를 `blocked`로 유지합니다. 기본 reviewer는 `planning`이고 planning 자체의 실패는 자기 심사를 피하기 위해 `sm`으로 배정됩니다. 다른 reviewer는 `handoff.register`와 필요한 CR 심사 권한을 보유해야 합니다.
+
+실패 CR을 승인한 reviewer는 원래 job을 재시도할 수 있습니다.
+
+```bash
+bin/baton cr approve CR-YYYY-MM-DD-001 --role planning --evidence "수정안으로 재시도합니다."
+bin/baton retry HO-YYYY-MM-DD-001 \
+  --role planning \
+  --cr-id CR-YYYY-MM-DD-001 \
+  --reason "심사된 수정안을 적용합니다."
+```
+
+대상 role은 다시 열린 job을 새로 claim해야 합니다. 재시도하지 않기로 결정하면 실패 CR을 거절한 뒤 `cancel`을 실행하며, 이때 해당 blocked dependency branch만 연쇄 취소됩니다.
+
 `next`는 한 번만 확인하는 비대기 명령입니다. 작업이 없다는 이유로 agent가 종료되면 안 되며, shift가 활성 상태인 동안 제한된 `wait`를 반복해야 합니다.
 `next` 출력만으로 작업을 시작하지 말고 claim 전에 `handoff show`로 objective, source reference, dependency, Gate, exit criteria를 모두 확인해야 합니다. `handoff list`는 role과 status별 queue를 읽기 전용으로 조회합니다.
 
 ### 선택적 Git workspace 연동
 
-Baton은 기본적으로 Git에 의존하지 않습니다. Git commit provenance와 checkout 불일치 경고가 필요한 프로젝트만 root의 `baton.toml`을 Git으로 추적합니다.
+Baton은 기본적으로 Git에 의존하지 않습니다. Git commit provenance와 checkout 불일치 경고가 필요한 프로젝트만 control root에 공통 `baton.toml`을 둡니다. 단일 checkout에서는 Git으로 추적할 수 있지만, 분리 worktree에서는 branch마다 다른 설정을 두지 않습니다.
 
 ```toml
 [baton]
@@ -257,7 +290,7 @@ provider = "git"
 policy = "warn"
 ```
 
-설정이 없으면 `off`, Git provider만 설정하면 `warn`이 기본입니다. `strict`는 불일치한 claim과 finish를 차단하며 `workspace.override` 권한을 가진 role의 사유 있는 override만 허용합니다.
+설정이 없으면 `off`, Git provider만 설정하면 `warn`이 기본입니다. `strict`는 불일치한 register, claim, finish를 차단하며 `workspace.override` 권한을 가진 role의 사유 있는 override만 허용합니다. 단, 실패 보고는 차단하지 않고 warning event를 기록해 작업이 `in_progress`에 갇히지 않게 합니다.
 
 ```bash
 bin/baton workspace check
@@ -265,11 +298,11 @@ bin/baton workspace check --job HO-YYYY-MM-DD-001
 bin/baton workspace events --job HO-YYYY-MM-DD-001
 ```
 
-자세한 의미와 checkout 절차는 [선택적 Git workspace 연동 가이드](docs/git-integration.ko.md)를 따릅니다. Git 검사는 register, claim, finish와 명시적인 check에서만 실행되며 wait polling에는 영향을 주지 않습니다.
+자세한 의미와 checkout 절차는 [선택적 Git workspace 연동 가이드](docs/git-integration.ko.md)를 따릅니다. Git 검사는 register, claim, finish, fail과 명시적인 check에서만 실행되며 wait polling에는 영향을 주지 않습니다. `finished`는 선행 commit이 후행 worktree에 통합됐음을 보장하지 않으므로 planner 또는 integrator가 merge/cherry-pick을 확인해야 합니다.
 
 ## CR 흐름
 
-CR 본문은 Markdown에 작성하고 상태 전환은 Baton으로 수행합니다.
+CR 본문은 공통 control root의 Markdown에 작성하고 상태 전환은 Baton으로 수행합니다. 새 CR은 기본적으로 branch와 무관한 `.baton/change-requests/`에 생성됩니다.
 
 ```bash
 bin/baton cr create \
@@ -279,6 +312,7 @@ bin/baton cr create \
 
 bin/baton cr submit CR-YYYY-MM-DD-001 --role planning
 bin/baton cr wait-review --role sm --timeout 900
+bin/baton cr show CR-YYYY-MM-DD-001
 ```
 
 보강이 필요하면 reviewer가 revision handoff를 생성합니다. 작성 role은 Markdown 본문을 수정하고 재심사를 요청한 뒤 revision handoff를 완료합니다.
@@ -294,7 +328,17 @@ bin/baton cr resubmit CR-YYYY-MM-DD-001 \
 ```
 
 Revision handoff는 항상 CR 작성 role로 돌아갑니다. `--assign-back`으로 다른 role을 지정할 수 없으며, 심사 사유는 handoff objective에 포함됩니다. Baton이 frontmatter를 동기화하는 동안 Markdown이 변경되면 사람의 편집을 덮어쓰지 않고 명령을 실패시킵니다.
-SQLite와 파일시스템은 하나의 transaction이 아니므로 비정상 종료 후 frontmatter가 의심되면 `bin/baton cr sync CR-ID`로 DB 상태를 기준으로 managed header만 복구합니다. CR 본문은 보존됩니다.
+SQLite와 파일시스템은 하나의 transaction이 아니므로 비정상 종료 후 frontmatter가 의심되면 `bin/baton cr sync CR-ID`로 DB 상태를 기준으로 managed header만 복구합니다. CR 본문은 보존됩니다. 단, 승인 본문이 변경된 경우 `cr sync`는 이를 숨기지 않고 실패합니다.
+
+`submit`과 `resubmit`은 본문 hash를 기록하고 `approve`는 같은 본문인지 확인한 뒤 승인 hash를 고정합니다. 승인 후 본문이 바뀌면 implementation handoff 생성·claim·finish·최종 구현 완료 처리가 차단됩니다. 승인 후 요구 변경은 기존 본문을 고치지 않고 새 CR로 진행합니다.
+
+Schema migration 후 과거 approved CR이 `legacy-unsealed`로 표시되면 지정 reviewer가 본문을 확인하고 새 구현 전에 명시적으로 봉인합니다.
+
+```bash
+bin/baton cr seal CR-YYYY-MM-DD-001 \
+  --role sm \
+  --evidence "과거 승인 본문을 확인했습니다."
+```
 
 승인과 구현 handoff 생성은 별도 결정입니다. 자세한 명령과 심사 권한은 [영문 README의 Change Request Flow](README.md#change-request-flow)를 따릅니다.
 
@@ -335,7 +379,7 @@ bin/baton shift extend --role frontend
 bin/baton shift end --role frontend --reason "End of day"
 ```
 
-`shift start`의 기본 duration은 4시간, `shift extend`의 기본 duration은 1시간입니다. shift가 만료되면 새로운 wait와 claim은 중지되지만 이미 claim한 작업의 `finish` 보고는 허용됩니다.
+`shift start`의 기본 duration은 4시간, `shift extend`의 기본 duration은 1시간입니다. shift가 만료되면 새로운 wait와 claim은 중지되지만 이미 claim한 작업의 `finish` 또는 `fail` 보고는 허용됩니다.
 
 worker는 첫 wait 전에 적용되는 전역 및 role shift 상태를 확인합니다. 미래 deadline이 없고 중지되거나 만료된 scope도 없을 때만 기본 4시간 role shift를 시작합니다. 이미 활성 deadline이 있으면 유지하고, 만료 또는 중지된 scope는 사용자나 SM의 명시적인 승인 없이 다시 시작, 연장 또는 resume하지 않습니다.
 
@@ -385,7 +429,7 @@ bin/baton migrate
 bin/baton migrate --check
 ```
 
-Migration은 version이 지정되어 있고 transaction 단위로 실행되며 반복 실행할 수 있습니다. 기존 handoff, CR, event, control, role, permission 데이터는 보존되고 실패한 migration은 rollback됩니다. DB보다 오래된 Baton binary는 더 새로운 schema를 수정할 수 없습니다.
+Migration은 version이 지정되어 있고 transaction 단위로 실행되며 반복 실행할 수 있습니다. 기존 handoff, CR, event, control, role, permission 데이터는 보존되고 실패한 migration은 rollback됩니다. Schema v8은 CR hash 필드를 추가하지만 과거 승인 본문의 hash를 추측하지 않습니다. DB보다 오래된 Baton binary는 더 새로운 schema를 수정할 수 없습니다.
 
 일반 workflow 명령은 pending migration을 자동 적용하지 않습니다. `baton migrate`가 변경 전에 검증된 backup을 만들며, migration이 필요한 DB에 일반 명령을 실행하면 명시적으로 실패합니다. Schema migration 5는 생성 및 최근 migration에 사용된 Baton 버전을 진단 정보로 기록하지만 호환성은 계속 `schema_migrations`로 판단합니다.
 
@@ -401,12 +445,15 @@ bin/baton-report audit --role frontend
 bin/baton-report audit --format csv
 ```
 
+Summary에는 handoff, CR, Gate와 실패 심사 건수가 포함되며 아직 결정되지 않은 실패 심사는 `pending`으로 표시됩니다.
+
 ## 제한 사항
 
 - Markdown handoff 파일 자체의 import/export는 제공하지 않습니다.
-- Handoff claim/finish 권한은 대상 role 기준이며 사용자 인증은 외부 정책에 맡깁니다.
+- Handoff claim/finish/fail 권한은 대상 role 기준이고, register와 심사된 retry에는 `handoff.register`, 관리 취소에는 `handoff.cancel`이 필요합니다. 사용자 인증은 외부 정책에 맡깁니다.
 - CR 심사는 role 권한을 사용하지만 Baton만으로 실제 사용자를 인증하지 않습니다.
 - pipx 실행 파일은 OS 사용자 범위에서 공유되지만 DB와 stop/wait 상태는 Baton marker별로 분리됩니다. 여러 프로젝트가 같은 명시적 `--db`를 공유하도록 구성하면 ID, CR 경로, control까지 하나의 workflow로 합쳐지므로 피해야 합니다.
+- 같은 논리 프로젝트의 분리 Git worktree는 하나의 canonical 로컬 DB를 공유해야 합니다. Baton은 source branch의 commit을 자동 병합하거나 겹치는 파일 수정을 감지하지 않습니다.
 - Baton은 파일시스템 전체 검색, 전역 프로젝트 registry 또는 일괄 migration을 제공하지 않습니다. 각 프로젝트는 다음 사용 시 독립적으로 검사하고 migration합니다.
 - 활성 DB는 local filesystem에 두어야 합니다. Network mount, cloud 동기화 폴더 또는 여러 PC가 공유하는 DB는 SQLite lock 전제를 보장하지 않으므로 agent 조정 용도로 사용하지 않습니다.
 - 이 저장소의 Baton DB는 다른 프로젝트의 활성 workflow 상태가 아닙니다.

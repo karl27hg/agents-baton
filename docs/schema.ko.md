@@ -22,6 +22,7 @@
 - `handoff_gate_dependencies`: handoff job에 연결된 Gate 요구사항
 - `gate_events`: Gate 소유권 및 lifecycle 감사 로그
 - `handoff_events`: 상태 변경과 운영 이벤트 감사 로그
+- `handoff_failure_reviews`: 실패 handoff와 결정 CR 및 처리 결과의 연결
 - `handoff_controls`: wait loop 중지/재개 제어
 - `waiter_leases`: polling interval 자동 조절을 위한 handoff 및 CR waiter heartbeat
 - `workspace_events`: handoff 전환의 선택적 Git commit provenance와 정책 결과
@@ -60,6 +61,7 @@ Release된 migration:
 4 waiter_leases
 5 database_metadata
 6 workspace_provenance
+7 handoff_failures
 ```
 
 `baton migrate --check`는 DB가 현재 binary가 아는 최신 schema version인지 읽기 전용으로 확인합니다.
@@ -188,7 +190,9 @@ Primary key:
 
 Seed 권한:
 
-- `init` 또는 각 권한을 도입한 migration 시 `sm`은 모든 CR 권한, `handoff.cancel`, `gate.manage`, `workspace.override`를 받습니다.
+- `init` 또는 각 권한을 도입한 migration 시 `sm`은 모든 CR 권한, `handoff.cancel`, `handoff.register`, `gate.manage`, `workspace.override`를 받습니다.
+- 신규 프로젝트의 `planning`은 실패 결정에 필요한 CR 심사 권한과 `handoff.cancel`, `handoff.register`를 받습니다.
+- Migration 7은 기존 프로젝트의 등록 동작을 보존하기 위해 이미 존재하는 모든 active role에 `handoff.register`를 부여합니다. SM은 프로젝트 정책 검토 후 이 호환 권한을 철회할 수 있습니다.
 
 알려진 권한:
 
@@ -201,6 +205,7 @@ cr.reject
 cr.assign_implementation
 cr.mark_implemented
 handoff.cancel
+handoff.register
 gate.manage
 workspace.override
 ```
@@ -214,6 +219,7 @@ workspace.override
 - handoff queue의 핵심 작업 record를 저장합니다.
 - 파일 기반 구조의 `jobs/`, `blocked/`, `finished/` 같은 위치 상태를 대체합니다.
 - `register`, `next`, `claim`, `finish`, `status` 명령이 사용하는 기본 데이터입니다.
+- `fail`을 통해 실패 결과를 명시적으로 기록하면서 하위 작업이 풀리지 않게 합니다.
 
 컬럼:
 
@@ -239,6 +245,7 @@ workspace.override
 blocked
 open
 in_progress
+failed
 finished
 cancelled
 ```
@@ -248,10 +255,13 @@ cancelled
 - `blocked`: 필수 upstream job이 완료되기를 기다리는 상태입니다.
 - `open`: `target_role`이 claim할 수 있는 ready 상태입니다.
 - `in_progress`: agent profile이 claim한 상태입니다.
+- `failed`: claim한 작업이 exit criteria를 충족하지 못해 실패 CR의 결정을 기다리거나 기록한 상태입니다.
 - `finished`: closure evidence와 함께 완료된 상태입니다.
 - `cancelled`: 단순 pause가 아니라 job 자체가 의도적으로 취소된 상태입니다.
 
-권한이 있는 `cancel` 명령은 선택한 `blocked`, `open`, `in_progress` job을 `cancelled`로 바꾸고, 그 job에 의존하는 `blocked` 하위 job만 재귀적으로 취소합니다. 관련 없는 queue branch는 변경하지 않습니다. `finished`와 이미 `cancelled`인 job에는 적용할 수 없습니다.
+권한이 있는 `cancel` 명령은 선택한 `blocked`, `open`, `in_progress` 또는 심사가 끝난 `failed` job을 `cancelled`로 바꾸고, 그 job에 의존하는 `blocked` 하위 job만 재귀적으로 취소합니다. 실패 job은 먼저 연결된 실패 CR이 `rejected` 또는 `cancelled` 상태여야 합니다. 관련 없는 queue branch는 변경하지 않습니다. `finished`와 이미 `cancelled`인 job에는 적용할 수 없습니다.
+
+`fail`은 `in_progress` job만 `failed`로 바꾸고 연결된 실패 CR을 생성·제출하며, 하위 dependency는 `blocked`로 유지합니다. 실패 CR이 승인되면 reviewer가 `retry`로 원래 job을 `open`으로 되돌릴 수 있습니다. 실패 CR이 거절되면 권한 있는 role이 해당 job과 하위 branch를 취소할 수 있습니다. 하위 작업은 재시도된 원래 job이 `finished`가 된 이후에만 ready 상태가 됩니다.
 
 최소 ready job 예:
 
@@ -260,7 +270,7 @@ job_id=HO-2026-06-02-001
 title=Frontend upload follow-up
 status=open
 target_role=frontend
-source_ref=docs/change-requests/CR-2026-06-02-example.md
+source_ref=cr:CR-2026-06-02-example
 objective=Implement the approved upload follow-up.
 exit_criteria=The approved behavior is implemented and verified.
 created_at=2026-06-02 09:00:00 UTC
@@ -296,11 +306,36 @@ depends_on_job_id=HO-2026-06-02-001
 승격 규칙:
 
 - `blocked` job은 모든 `depends_on_job_id`가 `finished` 상태일 때만 `open`으로 승격됩니다.
+- upstream이 `failed`이면 성공 완료가 아니므로 실패 CR 심사와 재시도 동안 하위 job은 `blocked`로 유지됩니다.
 - 필수 upstream job 중 하나라도 `cancelled`가 되면 Baton은 이를 기다리는 blocked job을 재귀적으로 `cancelled`로 변경합니다.
 - 전파된 각 상태 변경에는 직접적인 upstream job을 원인으로 기록한 `dependency_cancelled` handoff event가 한 번 남습니다.
 - 이미 취소된 dependency를 지정해 새 handoff를 등록하면 `blocked`가 아니라 즉시 `cancelled` 상태로 생성됩니다.
 - `promote-ready`는 취소된 dependency 뒤에 blocked job이 남아 있는 이전 DB record도 함께 정리합니다.
 - 독립 job과 관련 없는 dependency branch는 이 전파로 취소되지 않습니다.
+
+## `handoff_failure_reviews`
+
+용도:
+
+- 각 handoff 실패 시도를 자동 제출된 결정 CR과 연결합니다.
+- 실패를 성공 완료로 취급하지 않으면서 재시도와 취소 결정을 감사 가능하게 기록합니다.
+- 같은 handoff에서 여러 번 실패하고 재시도하는 흐름을 지원합니다.
+
+각 row는 `job_id`, 고유 `cr_id`, 실패 role, 사유, 선택 evidence, 실패 시각과 선택적인 `retry` 또는 `cancelled` 처리 결과 및 결정 role·시각·메시지를 기록합니다. 처리 결과가 없는 row가 해당 job의 활성 실패 심사입니다. CR reviewer는 `handoff.register`와 필요한 CR 심사 권한을 보유해야 합니다. 기본 reviewer는 `planning`이며, planning 자체가 실패한 경우 자기 심사를 막기 위해 `sm`이 기본값입니다.
+
+| 컬럼 | 타입 | 필수 | 용도 |
+| --- | --- | --- | --- |
+| `id` | `integer primary key` | 예 | 증가하는 실패 시도 식별자입니다. |
+| `job_id` | `text` | 예 | 실패한 handoff입니다. |
+| `cr_id` | `text unique` | 예 | 자동 제출된 실패 CR입니다. |
+| `failed_by_role` | `text` | 예 | 실패를 보고한 target role입니다. |
+| `reason` | `text` | 예 | 구체적인 실패 사유입니다. |
+| `evidence` | `text` | 아니오 | Test output 등 보조 evidence입니다. |
+| `failed_at` | `text` | 예 | 실패 UTC 시각입니다. |
+| `resolution` | `text` | 아니오 | `retry`, `cancelled` 또는 심사 중일 때 null입니다. |
+| `resolved_by_role` | `text` | 아니오 | 심사 결정을 적용한 role입니다. |
+| `resolved_at` | `text` | 아니오 | 처리 UTC 시각입니다. |
+| `resolution_message` | `text` | 아니오 | 필수 재시도 또는 취소 사유입니다. |
 
 ## Named Gate 테이블
 
@@ -481,6 +516,8 @@ Claim 동작:
 | `implemented_at` | `text` | 아니오 | 구현 완료 시각입니다. |
 | `revision_count` | `integer` | 예 | 보강 요청 횟수입니다. |
 | `active_revision_job_id` | `text` | 아니오 | 진행 중인 보강 handoff입니다. |
+| `submitted_body_hash` | `text` | 아니오 | 마지막 submit 또는 resubmit에서 캡처한 Markdown 본문의 SHA-256입니다. |
+| `approved_body_hash` | `text` | 아니오 | reviewer가 승인한 불변 본문의 SHA-256입니다. null이면 migration된 과거 미봉인 승인입니다. |
 
 허용되는 `status` 값:
 
@@ -499,6 +536,9 @@ cancelled
 - `draft -> submitted`는 author role이 수행합니다.
 - `submitted -> revision_requested`, `approved`, `rejected`는 reviewer role이 수행합니다.
 - `revision_requested -> submitted`는 Markdown 본문 보강 후 author role이 수행합니다.
+- 승인은 현재 본문이 `submitted_body_hash`와 일치해야 하며 `approved_body_hash`를 기록합니다.
+- implementation handoff 생성, claim, finish와 최종 구현 완료 처리는 승인 본문 hash가 유지돼야 합니다.
+- hash 없이 migration된 과거 approved CR은 새 구현 전에 reviewer가 명시적으로 `cr seal`해야 합니다.
 - `approved -> implemented`는 연결된 implementation handoff가 최소 1개 있어야 하고, 모든 implementation handoff가 `finished`여야 합니다.
 - `cancelled`는 `cr.admin` 권한을 가진 role이 수행하며 audit event를 남깁니다.
 - `reviewer_role`은 terminal review 전까지 `cr.admin` 권한을 가진 role이 재지정할 수 있습니다.
@@ -531,6 +571,7 @@ submitted
 resubmitted
 revision_requested
 approved
+body_sealed
 rejected
 reviewer_reassigned
 cancelled

@@ -26,6 +26,7 @@ tables = (
     "gate_owners",
     "gate_events",
     "workspace_events",
+    "handoff_failure_reviews",
 )
 with sqlite3.connect(sys.argv[1]) as con:
     con.row_factory = sqlite3.Row
@@ -48,7 +49,11 @@ with sqlite3.connect(sys.argv[1]) as con:
     snapshot["custom_permissions"] = [
         dict(row)
         for row in con.execute(
-            "select * from role_permissions where role_id = 'migration-custom' order by permission"
+            """
+            select * from role_permissions
+            where role_id = 'migration-custom' and permission != 'handoff.register'
+            order by permission
+            """
         )
     ]
 print(json.dumps(snapshot, sort_keys=True, separators=(",", ":")))
@@ -107,7 +112,7 @@ with sqlite3.connect(sys.argv[1]) as con:
 PY
 
 BEFORE="$(snapshot_workflow_data "$DB")"
-"$CLI" --db "$DB" migrate | grep 'schema=0->6 applied=1:initial_schema,2:handoff_cancel_permission,3:named_gates,4:waiter_leases,5:database_metadata,6:workspace_provenance' >/dev/null
+"$CLI" --db "$DB" migrate | grep 'schema=0->8 applied=1:initial_schema,2:handoff_cancel_permission,3:named_gates,4:waiter_leases,5:database_metadata,6:workspace_provenance,7:handoff_failures,8:cr_body_integrity' >/dev/null
 AFTER="$(snapshot_workflow_data "$DB")"
 if [[ "$BEFORE" != "$AFTER" ]]; then
   echo "ERROR: workflow data changed during migration" >&2
@@ -117,6 +122,7 @@ fi
 "$CLI" --db "$DB" role permission-list sm | grep 'handoff.cancel' >/dev/null
 "$CLI" --db "$DB" role permission-list sm | grep 'gate.manage' >/dev/null
 "$CLI" --db "$DB" role permission-list sm | grep 'workspace.override' >/dev/null
+"$CLI" --db "$DB" role permission-list migration-custom | grep 'handoff.register' >/dev/null
 python3 - "$DB" <<'PY'
 import sqlite3
 import sys
@@ -132,14 +138,16 @@ if row != [
     (4, "waiter_leases"),
     (5, "database_metadata"),
     (6, "workspace_provenance"),
+    (7, "handoff_failures"),
+    (8, "cr_body_integrity"),
 ]:
     raise SystemExit(f"unexpected migration records: {row}")
 PY
 
-"$CLI" --db "$DB" migrate | grep 'schema=6->6 applied=none' >/dev/null
-"$CLI" --db "$DB" migrate --check | grep 'schema=6' >/dev/null
+"$CLI" --db "$DB" migrate | grep 'schema=8->8 applied=none' >/dev/null
+"$CLI" --db "$DB" migrate --check | grep 'schema=8' >/dev/null
 chmod 444 "$DB"
-"$CLI" --db "$DB" migrate --check | grep 'schema=6' >/dev/null
+"$CLI" --db "$DB" migrate --check | grep 'schema=8' >/dev/null
 chmod 644 "$DB"
 if [[ "$(snapshot_workflow_data "$DB")" != "$AFTER" ]]; then
   echo "ERROR: repeated migration changed workflow data" >&2
@@ -188,7 +196,7 @@ with sqlite3.connect(sys.argv[1]) as con:
 if exists:
     raise SystemExit("normal command recreated the migration table")
 PY
-"$CLI" --db "$AUTO_DB" migrate | grep 'schema=0->6 applied=1:initial_schema,2:handoff_cancel_permission,3:named_gates,4:waiter_leases,5:database_metadata,6:workspace_provenance' >/dev/null
+"$CLI" --db "$AUTO_DB" migrate | grep 'schema=0->8 applied=1:initial_schema,2:handoff_cancel_permission,3:named_gates,4:waiter_leases,5:database_metadata,6:workspace_provenance,7:handoff_failures,8:cr_body_integrity' >/dev/null
 test "$(find "$TMP/backups" -type f -name '*.sqlite3' | wc -l | tr -d ' ')" -ge 1
 
 UPGRADE_DB="$TMP/upgrade-v030.sqlite3"
@@ -198,7 +206,8 @@ import sqlite3
 import sys
 
 with sqlite3.connect(sys.argv[1]) as con:
-    con.execute("delete from schema_migrations where version in (3, 4, 5, 6)")
+    con.execute("delete from schema_migrations where version in (3, 4, 5, 6, 7, 8)")
+    con.execute("drop table handoff_failure_reviews")
     con.execute("drop table workspace_events")
     con.execute("drop table waiter_leases")
     con.execute("drop table database_metadata")
@@ -217,7 +226,7 @@ if "$CLI" --db "$UPGRADE_DB" migrate --check >/dev/null 2>&1; then
   echo "ERROR: migrate --check accepted a pending v0.3.0 database" >&2
   exit 1
 fi
-"$CLI" --db "$UPGRADE_DB" migrate | grep 'schema=2->6 applied=3:named_gates,4:waiter_leases,5:database_metadata,6:workspace_provenance' >/dev/null
+"$CLI" --db "$UPGRADE_DB" migrate | grep 'schema=2->8 applied=3:named_gates,4:waiter_leases,5:database_metadata,6:workspace_provenance,7:handoff_failures,8:cr_body_integrity' >/dev/null
 "$CLI" --db "$UPGRADE_DB" role permission-list sm | grep 'handoff.cancel' >/dev/null
 "$CLI" --db "$UPGRADE_DB" role permission-list sm | grep 'gate.manage' >/dev/null
 "$CLI" --db "$UPGRADE_DB" role permission-list sm | grep 'workspace.override' >/dev/null
@@ -225,7 +234,7 @@ if "$CLI" --db "$UPGRADE_DB" role permission-list sm | grep 'cr.approve' >/dev/n
   echo "ERROR: migration restored a project-revoked permission" >&2
   exit 1
 fi
-"$CLI" --db "$UPGRADE_DB" migrate --check | grep 'schema=6' >/dev/null
+"$CLI" --db "$UPGRADE_DB" migrate --check | grep 'schema=8' >/dev/null
 python3 - "$UPGRADE_DB" "$BATON_VERSION" <<'PY'
 import sqlite3
 import sys
@@ -250,7 +259,8 @@ import sqlite3
 import sys
 
 with sqlite3.connect(sys.argv[1]) as con:
-    con.execute("delete from schema_migrations where version = 6")
+    con.execute("delete from schema_migrations where version in (6, 7, 8)")
+    con.execute("drop table handoff_failure_reviews")
     con.execute("drop table workspace_events")
     con.execute(
         "delete from role_permissions where role_id = 'sm' and permission = 'workspace.override'"
@@ -260,9 +270,78 @@ if "$CLI" --db "$V5_DB" migrate --check >/dev/null 2>&1; then
   echo "ERROR: migrate --check accepted a pending schema v5 database" >&2
   exit 1
 fi
-"$CLI" --db "$V5_DB" migrate | grep 'schema=5->6 applied=6:workspace_provenance' >/dev/null
+"$CLI" --db "$V5_DB" migrate | grep 'schema=5->8 applied=6:workspace_provenance,7:handoff_failures,8:cr_body_integrity' >/dev/null
 "$CLI" --db "$V5_DB" handoff show "$V5_JOB" | grep 'Preserve v5 handoff' >/dev/null
 "$CLI" --db "$V5_DB" role permission-list sm | grep 'workspace.override' >/dev/null
+
+V6_DB="$TMP/upgrade-v6.sqlite3"
+"$CLI" --db "$V6_DB" init >/dev/null
+"$CLI" --db "$V6_DB" role add legacy-registrar --display-name "Legacy Registrar" >/dev/null
+V6_JOB="$("$CLI" --db "$V6_DB" register \
+  --title "Preserve v6 handoff" \
+  --role legacy-registrar \
+  --objective "Upgrade schema v6 without data loss." \
+  --exit-criteria "The handoff and implied registration access remain." | awk '{print $1}')"
+python3 - "$V6_DB" <<'PY'
+import sqlite3
+import sys
+
+with sqlite3.connect(sys.argv[1]) as con:
+    con.execute("delete from schema_migrations where version in (7, 8)")
+    con.execute("drop table handoff_failure_reviews")
+    con.execute("delete from role_permissions where permission = 'handoff.register'")
+    con.execute("delete from role_permissions where role_id = 'planning' and permission = 'cr.approve'")
+PY
+"$CLI" --db "$V6_DB" migrate | grep 'schema=6->8 applied=7:handoff_failures,8:cr_body_integrity' >/dev/null
+"$CLI" --db "$V6_DB" handoff show "$V6_JOB" | grep 'Preserve v6 handoff' >/dev/null
+"$CLI" --db "$V6_DB" role permission-list legacy-registrar | grep 'handoff.register' >/dev/null
+if "$CLI" --db "$V6_DB" role permission-list planning | grep 'cr.approve' >/dev/null; then
+  echo "ERROR: schema v7 restored a previously revoked planning CR permission" >&2
+  exit 1
+fi
+"$CLI" --db "$V6_DB" claim "$V6_JOB" --role legacy-registrar >/dev/null
+"$CLI" --db "$V6_DB" fail "$V6_JOB" \
+  --role legacy-registrar \
+  --dir "$TMP/v6-failure-crs" \
+  --reason "Verify reviewer fallback." | grep 'reviewer=sm' >/dev/null
+
+V7_DB="$TMP/upgrade-v7.sqlite3"
+"$CLI" --db "$V7_DB" init >/dev/null
+V7_CR="$("$CLI" --db "$V7_DB" cr create \
+  --title "Legacy approved CR" \
+  --author-role planning \
+  --reviewer-role sm \
+  --dir "$TMP/v7-crs" | awk '{print $1}')"
+"$CLI" --db "$V7_DB" cr submit "$V7_CR" --role planning >/dev/null
+"$CLI" --db "$V7_DB" cr approve "$V7_CR" --role sm >/dev/null
+python3 - "$V7_DB" <<'PY'
+import sqlite3
+import sys
+
+with sqlite3.connect(sys.argv[1]) as con:
+    con.execute("delete from schema_migrations where version = 8")
+    con.execute("alter table change_requests drop column approved_body_hash")
+    con.execute("alter table change_requests drop column submitted_body_hash")
+PY
+if "$CLI" --db "$V7_DB" migrate --check >/dev/null 2>&1; then
+  echo "ERROR: migrate --check accepted a pending schema v7 database" >&2
+  exit 1
+fi
+"$CLI" --db "$V7_DB" migrate | grep 'schema=7->8 applied=8:cr_body_integrity' >/dev/null
+python3 - "$V7_DB" <<'PY'
+import sqlite3
+import sys
+
+with sqlite3.connect(sys.argv[1]) as con:
+    columns = {row[1] for row in con.execute("pragma table_info(change_requests)")}
+if not {"submitted_body_hash", "approved_body_hash"} <= columns:
+    raise SystemExit(f"schema v8 CR body hash columns are missing: {sorted(columns)}")
+PY
+"$CLI" --db "$V7_DB" cr status "$V7_CR" | grep 'body_integrity: legacy-unsealed' >/dev/null
+"$CLI" --db "$V7_DB" cr seal "$V7_CR" \
+  --role sm \
+  --evidence "Verified migrated approved CR body." >/dev/null
+"$CLI" --db "$V7_DB" cr status "$V7_CR" | grep 'body_integrity: ok' >/dev/null
 
 RACE_DB="$TMP/race.sqlite3"
 "$CLI" --db "$RACE_DB" init >/dev/null
@@ -278,7 +357,8 @@ import agents_baton.cli as cli
 
 db = sys.argv[2]
 with sqlite3.connect(db) as con:
-    con.execute("delete from schema_migrations where version in (5, 6)")
+    con.execute("delete from schema_migrations where version in (5, 6, 7, 8)")
+    con.execute("drop table handoff_failure_reviews")
     con.execute("drop table workspace_events")
     con.execute("drop table database_metadata")
 

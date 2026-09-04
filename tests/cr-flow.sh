@@ -74,7 +74,16 @@ if grep "active_revision_job_id: $REVISION_JOB" "$CR_FILE" >/dev/null; then
 fi
 "$CLI" --db "$DB" finish "$REVISION_JOB" --role planning --evidence "CR resubmitted." >/dev/null
 
+cp "$CR_FILE" "$TMP/submitted-cr.md"
+printf "\nUnreviewed change.\n" >>"$CR_FILE"
+if "$CLI" --db "$DB" cr approve "$CR_ID" --role sm --evidence "Changed after review." >/dev/null 2>&1; then
+  echo "ERROR: changed submitted CR was unexpectedly approved" >&2
+  exit 1
+fi
+cp "$TMP/submitted-cr.md" "$CR_FILE"
 "$CLI" --db "$DB" cr approve "$CR_ID" --role sm --evidence "Ready for implementation." >/dev/null
+"$CLI" --db "$DB" cr status "$CR_ID" | grep 'body_integrity: ok' >/dev/null
+"$CLI" --db "$DB" cr show "$CR_ID" | grep 'Clarified acceptance criteria.' >/dev/null
 if "$CLI" --db "$DB" cr mark-implemented "$CR_ID" --role sm --evidence "No implementation handoff." >/dev/null 2>&1; then
   echo "ERROR: CR without implementation handoff was unexpectedly marked implemented" >&2
   exit 1
@@ -89,6 +98,18 @@ if "$CLI" --db "$DB" cr create-handoff "$CR_ID" \
   echo "ERROR: non-reviewer role unexpectedly created implementation handoff" >&2
   exit 1
 fi
+cp "$CR_FILE" "$TMP/approved-cr.md"
+printf "\nChanged after approval.\n" >>"$CR_FILE"
+if "$CLI" --db "$DB" cr create-handoff "$CR_ID" \
+  --by-role sm \
+  --role frontend \
+  --title "Changed implementation assignment" \
+  --objective "This command should fail." \
+  --exit-criteria "Approved body integrity is enforced." >/dev/null 2>&1; then
+  echo "ERROR: changed approved CR created an implementation handoff" >&2
+  exit 1
+fi
+cp "$TMP/approved-cr.md" "$CR_FILE"
 IMPLEMENT_LINE="$("$CLI" --db "$DB" cr create-handoff "$CR_ID" \
   --by-role sm \
   --role frontend \
@@ -96,16 +117,28 @@ IMPLEMENT_LINE="$("$CLI" --db "$DB" cr create-handoff "$CR_ID" \
   --objective "Implement the approved upload policy UI." \
   --exit-criteria "UI behavior matches the approved CR.")"
 IMPLEMENT_JOB="$(awk '{print $2}' <<<"$IMPLEMENT_LINE")"
+"$CLI" --db "$DB" handoff show "$IMPLEMENT_JOB" | grep "source_ref: cr:$CR_ID" >/dev/null
+printf "\nChanged before claim.\n" >>"$CR_FILE"
+if "$CLI" --db "$DB" claim "$IMPLEMENT_JOB" --role frontend --claimed-by frontend-main >/dev/null 2>&1; then
+  echo "ERROR: implementation handoff claimed a changed approved CR" >&2
+  exit 1
+fi
+cp "$TMP/approved-cr.md" "$CR_FILE"
 "$CLI" --db "$DB" claim "$IMPLEMENT_JOB" --role frontend --claimed-by frontend-main >/dev/null
 if "$CLI" --db "$DB" cr mark-implemented "$CR_ID" --role sm --evidence "Implementation still active." >/dev/null 2>&1; then
   echo "ERROR: CR with unfinished implementation handoff was unexpectedly marked implemented" >&2
   exit 1
 fi
+printf "\nChanged before finish.\n" >>"$CR_FILE"
+if "$CLI" --db "$DB" finish "$IMPLEMENT_JOB" --role frontend --evidence "Changed source." >/dev/null 2>&1; then
+  echo "ERROR: implementation handoff finished against a changed approved CR" >&2
+  exit 1
+fi
+cp "$TMP/approved-cr.md" "$CR_FILE"
 "$CLI" --db "$DB" finish "$IMPLEMENT_JOB" --role frontend --evidence "Implementation complete." >/dev/null
 "$CLI" --db "$DB" cr mark-implemented "$CR_ID" --role sm --evidence "Implementation handoff finished." >/dev/null
 "$CLI" --db "$DB" cr events "$CR_ID" | grep implemented >/dev/null
 grep "status: implemented" "$CR_FILE" >/dev/null
-printf '\nRecovery body marker.\n' >>"$CR_FILE"
 python3 - "$CR_FILE" <<'PY'
 import sys
 from pathlib import Path
@@ -115,7 +148,13 @@ path.write_text(path.read_text(encoding="utf-8").replace("status: implemented", 
 PY
 "$CLI" --db "$DB" cr sync "$CR_ID" | grep 'synced' >/dev/null
 grep "status: implemented" "$CR_FILE" >/dev/null
-grep "Recovery body marker." "$CR_FILE" >/dev/null
+grep "Clarified acceptance criteria." "$CR_FILE" >/dev/null
+printf '\nUnauthorized implemented-body change.\n' >>"$CR_FILE"
+if "$CLI" --db "$DB" cr sync "$CR_ID" >/dev/null 2>&1; then
+  echo "ERROR: CR sync accepted a changed implemented body" >&2
+  exit 1
+fi
+"$CLI" --db "$DB" cr status "$CR_ID" | grep 'body_integrity: mismatch' >/dev/null
 
 ARCH_CR_LINE="$("$CLI" --db "$DB" cr create \
   --title "Architecture reviewed change" \
@@ -125,6 +164,21 @@ ARCH_CR_LINE="$("$CLI" --db "$DB" cr create \
 ARCH_CR_ID="$(awk '{print $1}' <<<"$ARCH_CR_LINE")"
 "$CLI" --db "$DB" cr submit "$ARCH_CR_ID" --role planning >/dev/null
 "$CLI" --db "$DB" cr approve "$ARCH_CR_ID" --role architecture --evidence "Architecture approved." >/dev/null
+python3 - "$DB" "$ARCH_CR_ID" <<'PY'
+import sqlite3
+import sys
+
+with sqlite3.connect(sys.argv[1]) as con:
+    con.execute(
+        "update change_requests set submitted_body_hash = null, approved_body_hash = null where cr_id = ?",
+        (sys.argv[2],),
+    )
+PY
+"$CLI" --db "$DB" cr status "$ARCH_CR_ID" | grep 'body_integrity: legacy-unsealed' >/dev/null
+"$CLI" --db "$DB" cr seal "$ARCH_CR_ID" \
+  --role architecture \
+  --evidence "Seal CR created before body integrity enforcement." >/dev/null
+"$CLI" --db "$DB" cr status "$ARCH_CR_ID" | grep 'body_integrity: ok' >/dev/null
 
 PRODUCT_CR_LINE="$("$CLI" --db "$DB" cr create \
   --title "Product reviewed change" \

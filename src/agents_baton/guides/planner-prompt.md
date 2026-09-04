@@ -10,6 +10,8 @@ Examples use the pipx-installed `baton` command from `PATH`. From a Baton source
 - Delegate execution only by registering Baton handoffs for configured project roles. Parallel Baton handoffs are allowed when they satisfy the safety rules below; directly invoking their workers is not.
 - If no eligible role is available, report the blocker to the SM or user instead of bypassing Baton with a subagent.
 - If the project enables Git workspace policy, run `workspace check` before registration and do not bypass a `strict` mismatch without an authorized, audited reason.
+- For isolated Git worktrees, verify that every agent reports the same `baton project info` database path. Never initialize one Baton database per worktree.
+- Keep mutable CR bodies in the shared Baton control root. Use `cr:<cr-id>` for CR-backed handoffs and `<commit-sha>:<path>` for immutable Git design documents.
 - Build the dependency graph before registering handoffs.
 - Treat work as parallel only after confirming that the jobs do not depend on the same unfinished decision and do not write the same files, schema, API contract, generated artifact, migration, or shared runtime state.
 - When independence is uncertain, serialize the jobs. Register the upstream handoff first and add its ID to each downstream handoff with `--depends-on`.
@@ -17,6 +19,7 @@ Examples use the pipx-installed `baton` command from `PATH`. From a Baton source
 - Give each handoff one target role, a bounded objective, concrete exit criteria, and the source reference that defines its scope.
 - Do not create duplicate handoffs for the same output. Use `baton handoff list` and `baton handoff show` to inspect existing status and payload before replacing or retrying work.
 - Do not use execution speed as evidence that jobs are independent.
+- A predecessor marked `finished` does not prove that its commit exists in a downstream worktree. Before releasing integration-dependent work, merge or cherry-pick the required commit into its base, or hold the work behind an integration Gate.
 
 ## Parallel-Safety Decision
 
@@ -38,14 +41,14 @@ Independent work can be registered without dependency edges:
 baton register \
   --title "Frontend copy update" \
   --role frontend \
-  --source-ref "docs/change-requests/CR-YYYY-MM-DD-example.md" \
+  --source-ref "cr:CR-YYYY-MM-DD-example" \
   --objective "Update the approved frontend copy only." \
   --exit-criteria "The approved copy is rendered and verified."
 
 baton register \
   --title "Backend retention cleanup" \
   --role backend \
-  --source-ref "docs/change-requests/CR-YYYY-MM-DD-example.md" \
+  --source-ref "cr:CR-YYYY-MM-DD-example" \
   --objective "Implement the approved retention cleanup without changing the frontend contract." \
   --exit-criteria "Retention behavior is covered by backend tests."
 ```
@@ -56,7 +59,7 @@ Sequential work must carry an explicit dependency:
 baton register \
   --title "Implement API contract" \
   --role backend \
-  --source-ref "docs/change-requests/CR-YYYY-MM-DD-example.md" \
+  --source-ref "cr:CR-YYYY-MM-DD-example" \
   --objective "Implement the approved API contract." \
   --exit-criteria "The contract and backend tests pass."
 
@@ -64,7 +67,7 @@ baton register \
   --title "Integrate API client" \
   --role frontend \
   --depends-on HO-YYYY-MM-DD-001 \
-  --source-ref "docs/change-requests/CR-YYYY-MM-DD-example.md" \
+  --source-ref "cr:CR-YYYY-MM-DD-example" \
   --objective "Integrate the completed API contract." \
   --exit-criteria "The client uses the completed contract and tests pass."
 ```
@@ -78,12 +81,21 @@ baton register \
   --title "Integrate final API contract" \
   --role frontend \
   --depends-on-gate api-contract-final \
-  --source-ref "docs/change-requests/CR-YYYY-MM-DD-example.md" \
+  --source-ref "cr:CR-YYYY-MM-DD-example" \
   --objective "Integrate the planning-approved API contract." \
   --exit-criteria "The client matches the released contract."
 ```
 
 Release the Gate only with evidence that the shared decision is final. Baton then promotes eligible blocked work transactionally.
+
+## Failed Upstream Decisions
+
+A failed handoff is not completed work. Its dependency descendants remain blocked while the automatically submitted failure CR is reviewed.
+
+- Approve the failure CR only when retrying the original handoff is the chosen recovery. Then run `baton retry` and let the target role claim the reopened job.
+- Reject the failure CR when the attempted approach must not be retried. Then use authorized `baton cancel` to cancel that failed job and its blocked dependency branch.
+- Request a CR revision when the failure report lacks enough evidence to decide. Do not create a parallel replacement that leaves the original dependency unresolved.
+- Never use `promote-ready`, Gate release, or a replacement handoff to bypass a failed required dependency.
 
 ## Runtime Guarantees And Limits
 
