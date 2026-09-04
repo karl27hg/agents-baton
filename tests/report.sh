@@ -17,6 +17,16 @@ JOB="$("$CLI" --db "$DB" register \
 
 "$CLI" --db "$DB" claim "$JOB" --role frontend --claimed-by report-agent >/dev/null
 "$CLI" --db "$DB" finish "$JOB" --role frontend --evidence "Report evidence." >/dev/null
+FAILED_JOB="$("$CLI" --db "$DB" register \
+  --title "Report failed handoff" \
+  --role backend \
+  --objective "Expose pending failure review counts." \
+  --exit-criteria "The failure is visible in reports." | awk '{print $1}')"
+"$CLI" --db "$DB" claim "$FAILED_JOB" --role backend >/dev/null
+"$CLI" --db "$DB" fail "$FAILED_JOB" \
+  --role backend \
+  --dir "$TMP/failure-cr" \
+  --reason "Report a pending failure review." >/dev/null
 python3 - "$DB" "$JOB" <<'PY'
 import sqlite3
 import sys
@@ -44,8 +54,11 @@ test "$("$REPORT" --db "$DB" audit --job "$JOB" | awk -F'\t' '{printf "%s%s", se
 "$REPORT" --db "$DB" summary | grep "finished: 1" >/dev/null
 "$REPORT" --db "$DB" summary | grep "Gates:" >/dev/null
 "$REPORT" --db "$DB" summary | grep "released: 1" >/dev/null
+"$REPORT" --db "$DB" summary | grep "Failure Reviews:" >/dev/null
+"$REPORT" --db "$DB" summary | grep "pending: 1" >/dev/null
 "$REPORT" --db "$DB" summary --format json | grep '"handoffs"' >/dev/null
 "$REPORT" --db "$DB" summary --format json | grep '"gates"' >/dev/null
+"$REPORT" --db "$DB" summary --format json | grep '"failure_reviews"' >/dev/null
 
 PENDING_DB="$TMP/pending.sqlite3"
 python3 - "$DB" "$PENDING_DB" <<'PY'
@@ -55,8 +68,8 @@ import sys
 with sqlite3.connect(sys.argv[1]) as source, sqlite3.connect(sys.argv[2]) as target:
     source.backup(target)
 with sqlite3.connect(sys.argv[2]) as con:
-    con.execute("delete from schema_migrations where version = 6")
-    con.execute("drop table workspace_events")
+    con.execute("delete from schema_migrations where version in (7, 8)")
+    con.execute("drop table handoff_failure_reviews")
 PY
 if "$REPORT" --db "$PENDING_DB" summary >/dev/null 2>&1; then
   echo "ERROR: report accepted a database with pending migrations" >&2

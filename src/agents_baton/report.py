@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -193,6 +194,17 @@ def command_summary(args: argparse.Namespace) -> int:
             "handoffs": count_by_status(con, "handoff_jobs"),
             "change_requests": count_by_status(con, "change_requests"),
             "gates": count_by_status(con, "workflow_gates"),
+            "failure_reviews": [
+                row_dict(row)
+                for row in con.execute(
+                    """
+                    select coalesce(resolution, 'pending') as status, count(*) as count
+                    from handoff_failure_reviews
+                    group by coalesce(resolution, 'pending')
+                    order by status
+                    """
+                ).fetchall()
+            ],
             "events": {
                 "handoff_events": con.execute("select count(*) from handoff_events").fetchone()[0],
                 "cr_events": con.execute("select count(*) from cr_events").fetchone()[0],
@@ -215,6 +227,10 @@ def command_summary(args: argparse.Namespace) -> int:
     for row in summary["gates"]:
         print(f"{row['status']}: {row['count']}")
     print("")
+    print("Failure Reviews:")
+    for row in summary["failure_reviews"]:
+        print(f"{row['status']}: {row['count']}")
+    print("")
     print("Events:")
     print(f"handoff_events: {summary['events']['handoff_events']}")
     print(f"cr_events: {summary['events']['cr_events']}")
@@ -227,8 +243,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Read-only Baton reporting CLI")
     parser.add_argument(
         "--db",
-        default="",
-        help="SQLite database path; default: <nearest-baton-marker>/.baton/baton.sqlite3",
+        default=os.environ.get("BATON_DB", ""),
+        help=(
+            "SQLite database path; default: BATON_DB or "
+            "<nearest-baton-marker>/.baton/baton.sqlite3"
+        ),
     )
     sub = parser.add_subparsers(dest="command", required=True)
 

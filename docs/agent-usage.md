@@ -35,7 +35,7 @@ The final `wait` starts the next work cycle. A timeout is not completion; repeat
 
 ## Optional Git Workspace Checks
 
-When the tracked project `baton.toml` enables Git integration, inspect the current source context and handoff baseline with:
+When the shared project `baton.toml` enables Git integration, inspect the current source context and handoff baseline with:
 
 ```bash
 bin/baton workspace check
@@ -45,9 +45,12 @@ bin/baton workspace events --job HO-YYYY-MM-DD-001
 
 No config means `off`; `provider = "git"` defaults to `warn`. In `strict`, report a mismatch instead of bypassing it. Only a role with `workspace.override` may authorize an intentional transition, and the command must include a concrete `--workspace-reason`. See `docs/git-integration.md` for the full policy and checkout procedure.
 
+With isolated worktrees, set `BATON_DB` to one common control database and
+`BATON_WORKSPACE_ROOT` to the current checkout. Do not initialize a DB in each worktree.
+
 ## Creating Downstream Work
 
-Any role may register downstream work when it has a valid source reference and does not expand product scope.
+A role may register downstream work only when it has `handoff.register`, a valid source reference, and no unapproved product-scope expansion. New projects grant this permission to `sm` and `planning`. Schema v7 migration grants it to existing active roles to preserve their previous implicit access; review and revoke those compatibility grants when the project requires centralized planning.
 
 The planning agent must follow `docs/planner-prompt.md` before registering parallel work. Jobs are parallel only when their inputs, write sets, contracts, shared state, and accepted completion order are independent. Unknown independence is a dependency, not permission to run concurrently.
 
@@ -55,7 +58,7 @@ The planning agent must follow `docs/planner-prompt.md` before registering paral
 bin/baton --db /tmp/baton.sqlite3 register \
   --title "Backend follow-up" \
   --role backend \
-  --source-ref "docs/change-requests/CR-YYYY-MM-DD-example.md" \
+  --source-ref "cr:CR-YYYY-MM-DD-example" \
   --objective "Apply the approved API contract." \
   --exit-criteria "Backend behavior matches the approved API contract."
 ```
@@ -81,13 +84,14 @@ bin/baton --db /tmp/baton.sqlite3 role alias-add cd content-design
 bin/baton --db /tmp/baton.sqlite3 next --role cd
 ```
 
-Workflow authority is configured with role permissions. `sm` is seeded with all CR permissions, `handoff.cancel`, emergency `gate.manage`, and `workspace.override` authority.
+Workflow authority is configured with role permissions. `sm` is seeded with all CR permissions, `handoff.cancel`, `handoff.register`, emergency `gate.manage`, and `workspace.override` authority. `planning` is seeded with the CR review, retry registration, and cancellation permissions required for failure decisions.
 
 ```bash
 bin/baton --db /tmp/baton.sqlite3 role permission-list sm
 bin/baton --db /tmp/baton.sqlite3 role permission-add architecture cr.review
 bin/baton --db /tmp/baton.sqlite3 role permission-add architecture cr.approve
 bin/baton --db /tmp/baton.sqlite3 role permission-add architecture handoff.cancel
+bin/baton --db /tmp/baton.sqlite3 role permission-add architecture handoff.register
 bin/baton --db /tmp/baton.sqlite3 role permission-add architecture gate.manage
 bin/baton --db /tmp/baton.sqlite3 role permission-add architecture workspace.override
 bin/baton --db /tmp/baton.sqlite3 role permission-remove sm cr.approve
@@ -96,6 +100,38 @@ bin/baton --db /tmp/baton.sqlite3 role permission-remove sm cr.approve
 Use `permission-remove` rather than editing SQLite when project policy revokes a seeded permission. Baton preserves that revocation across later migrations unless a migration explicitly introduces that same permission as a new default.
 
 Do not change active project roles based on Baton results without SM/user approval.
+
+## Handoff Failure And Retry
+
+Failure is not completion. A worker that cannot satisfy the claimed handoff's exit criteria reports it with a reason and available evidence:
+
+```bash
+bin/baton --db /tmp/baton.sqlite3 fail HO-YYYY-MM-DD-001 \
+  --role backend \
+  --reason "The approved contract cannot represent the required state." \
+  --evidence "Contract validation failed."
+```
+
+Baton changes the original job from `in_progress` to `failed`, creates a failure CR authored by the target role, submits it to `planning` by default, and leaves every dependent job `blocked`. A planning failure defaults to reviewer `sm`; an explicit reviewer needs `handoff.register`, `cr.review`, `cr.request_revision`, `cr.approve`, `cr.reject`, and `cr.mark_implemented`.
+
+The reviewer chooses one of these paths:
+
+```bash
+# Retry the same logical job and preserve its dependency edges.
+bin/baton --db /tmp/baton.sqlite3 cr approve CR-YYYY-MM-DD-001 \
+  --role planning --evidence "Retry with the corrected contract."
+bin/baton --db /tmp/baton.sqlite3 retry HO-YYYY-MM-DD-001 \
+  --role planning --cr-id CR-YYYY-MM-DD-001 \
+  --reason "Apply the reviewed correction."
+
+# Abandon the failed branch.
+bin/baton --db /tmp/baton.sqlite3 cr reject CR-YYYY-MM-DD-001 \
+  --role planning --reason "Do not retry this approach."
+bin/baton --db /tmp/baton.sqlite3 cancel HO-YYYY-MM-DD-001 \
+  --role planning --reason "Failure review rejected retry."
+```
+
+`retry` returns the original job to `open`; the target role must claim it again. Finishing the retry is the only action that can release its blocked dependents. After a successful retry, the reviewer may use `cr mark-implemented` because Baton links the retried job as the failure CR implementation. Cancellation requires the failure CR to be rejected or administratively cancelled first. Administrative `cr cancel` also cancels the linked failed job and its blocked descendants.
 
 ## Handoff Cancellation
 
@@ -144,7 +180,9 @@ Read `docs/gates.md` before operating Gates in a live project. It is the canonic
 
 ## CR Author Flow
 
-CR Markdown is the editable request body. Baton owns workflow state and synchronizes only the Markdown frontmatter.
+CR Markdown is the editable request body. New CRs default to the branch-independent
+`.baton/change-requests/` directory in the Baton control root. Baton owns workflow state,
+synchronizes Markdown frontmatter, and hashes the body at submission and approval.
 
 ```bash
 bin/baton --db /tmp/baton.sqlite3 cr create \
@@ -153,6 +191,12 @@ bin/baton --db /tmp/baton.sqlite3 cr create \
   --reviewer-role sm
 
 bin/baton --db /tmp/baton.sqlite3 cr submit CR-YYYY-MM-DD-001 --role planning
+```
+
+Use `cr show` to resolve and read the shared document from any source worktree:
+
+```bash
+bin/baton --db /tmp/baton.sqlite3 cr show CR-YYYY-MM-DD-001
 ```
 
 When a reviewer requests revision, claim the generated handoff, edit the CR Markdown body, resubmit the CR, then finish the handoff.
@@ -172,7 +216,7 @@ bin/baton --db /tmp/baton.sqlite3 finish HO-YYYY-MM-DD-001 \
 
 Revision handoffs always return to the CR author role. `cr request-revision --assign-back` may state that same role explicitly, but Baton rejects a different role because only the author may resubmit. The review reason is included in the handoff objective. Baton atomically replaces managed Markdown frontmatter and fails without overwriting the document when it detects a concurrent edit.
 
-If a process crash leaves Markdown frontmatter inconsistent with SQLite, use `cr sync CR-ID` to restore only the managed header from authoritative DB state. It preserves the request body.
+If a process crash leaves Markdown frontmatter inconsistent with SQLite, use `cr sync CR-ID` to restore only the managed header from authoritative DB state. It preserves the request body. `cr sync` refuses to hide a changed approved body.
 
 ## CR Reviewer Flow
 
@@ -198,6 +242,20 @@ bin/baton --db /tmp/baton.sqlite3 cr approve CR-YYYY-MM-DD-001 \
 bin/baton --db /tmp/baton.sqlite3 cr reject CR-YYYY-MM-DD-001 \
   --role sm \
   --reason "Out of scope."
+```
+
+Approval fails when the current body differs from the submitted hash. Request revision so
+the author can resubmit the exact reviewed body. Do not edit an approved CR. `cr status`
+and `cr show` report body integrity; implementation assignment, claim, finish, and final
+implementation marking stop on an approved-body mismatch.
+
+An existing approved CR migrated without a hash reports `legacy-unsealed`. Its assigned
+reviewer must inspect and seal it before new implementation work:
+
+```bash
+bin/baton --db /tmp/baton.sqlite3 cr seal CR-YYYY-MM-DD-001 \
+  --role sm \
+  --evidence "Verified legacy approved body."
 ```
 
 Administrative remediation:

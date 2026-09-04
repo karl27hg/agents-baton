@@ -6,25 +6,47 @@ This guide explains how to add Baton to another repository as a local workflow t
 
 ## Recommended Layout
 
-Use Baton as a project-local tool and keep runtime state inside the consuming project.
+For one checkout, keep Baton control data inside the consuming project:
 
 ```text
 your-project/
 ├── .baton/
+│   ├── .gitignore
+│   ├── change-requests/
 │   ├── project.json
 │   └── baton.sqlite3
 ├── baton.toml
-├── docs/change-requests/
 ├── tools/baton/
 └── AGENTS.md
 ```
 
 - `.baton/project.json`: project boundary marker used by both installed commands.
 - `.baton/baton.sqlite3`: project-local workflow authority.
-- `baton.toml`: optional tracked Baton version and Git workspace policy.
-- `docs/change-requests/`: CR Markdown files created or managed by Baton.
+- `.baton/change-requests/`: branch-independent, editable CR bodies created by default.
+- `.baton/.gitignore`: generated protection that keeps control data out of Git.
+- `baton.toml`: optional shared Baton version and Git workspace policy.
 - `tools/baton/`: Baton repository, usually as a submodule.
 - `AGENTS.md`: project-specific agent rules.
+
+When implementation agents use isolated Git worktrees, put one Baton control root outside
+those checkouts and point every agent at the same database:
+
+```text
+your-project-control/
+├── .baton/
+│   ├── change-requests/
+│   ├── project.json
+│   └── baton.sqlite3
+├── baton.toml
+└── worktrees/
+    ├── integration/
+    ├── task-HO-001/
+    └── task-HO-002/
+```
+
+Use one control root per logical project. Do not run `baton init` independently in each
+worktree; that creates split workflow databases. The control root does not need to be a
+Git checkout.
 
 ## Recommended Distribution Model
 
@@ -168,7 +190,7 @@ This is less convenient for updates than a submodule, but it keeps the consuming
 
 ## Runtime State
 
-Baton defaults to this database path when run from the project root:
+Baton defaults to this database path when run under a discovered Baton project root:
 
 ```text
 .baton/baton.sqlite3
@@ -180,17 +202,34 @@ The default local agent identity file is:
 .baton/agent-id
 ```
 
-Use `--db` only for diagnostics or isolated testing:
+For isolated worktrees, set the shared control database and the source checkout explicitly:
+
+```bash
+export BATON_DB=/absolute/path/to/your-project-control/.baton/baton.sqlite3
+export BATON_WORKSPACE_ROOT="$PWD"
+baton project info
+baton workspace check
+```
+
+`BATON_DB` is equivalent to the global `--db` option. `BATON_WORKSPACE_ROOT` selects the
+Git checkout inspected by optional VCS policy and defaults to the current directory. Use
+a distinct `BATON_AGENT_ID` for each active agent profile sharing the database.
+
+An arbitrary external database remains useful for diagnostics or isolated testing:
 
 ```bash
 tools/baton/bin/baton --db /tmp/baton.sqlite3 init
 ```
 
-External databases have no implicit project root. Use absolute CR file paths with them. Baton rejects a relative CR path for an external DB so two callers in different directories cannot synchronize the same CR into different files. `init --project-root` always uses that root's `.baton/baton.sqlite3` and cannot be combined with an external DB.
+An external database at `<control-root>/.baton/baton.sqlite3` resolves files against that
+control root. Arbitrarily named external databases have no implicit project root, so use
+absolute CR file paths with them. `init --project-root` always uses that root's canonical
+database and cannot be combined with a different external DB.
 
 ## Git Ignore
 
-Add Baton runtime files to the consuming project's `.gitignore`:
+`baton init` creates `.baton/.gitignore` with `*`, so new control data and mutable CRs are
+not added to Git accidentally. A repository-level ignore remains acceptable:
 
 ```gitignore
 .baton/
@@ -199,7 +238,38 @@ Add Baton runtime files to the consuming project's `.gitignore`:
 *.sqlite3-wal
 ```
 
-Do not ignore CR Markdown files if they are part of the project workflow. They should usually be reviewed and committed like other project documents.
+Do not place the mutable CR body in a task branch. If an approved requirement must become
+part of repository history, commit a reviewed snapshot to the integration branch and refer
+to its immutable commit SHA; the shared `.baton/change-requests/` file remains the Baton
+workflow artifact.
+
+## CR Body Integrity
+
+SQLite remains authoritative for CR workflow state, while the shared Markdown file is the
+editable body. Baton hashes only the body, excluding managed frontmatter:
+
+1. `cr submit` and `cr resubmit` record the exact submitted body hash.
+2. `cr approve` refuses approval if the body changed after submission.
+3. Approval records an immutable approved body hash.
+4. `cr create-handoff`, implementation `claim`, `finish`, and `cr mark-implemented` refuse
+   to proceed if the approved body is missing or changed.
+5. `cr status` and `cr show` report `ok`, `mismatch`, `missing`, `unreadable`,
+   `editable`, or `legacy-unsealed` integrity.
+
+Use `baton cr show CR-ID` from any worktree to resolve the shared absolute path and read the
+body. After approval, restore an accidental edit from the reviewed copy or create a new CR;
+do not silently reseal changed requirements. Schema migration does not guess hashes for
+already approved CRs. Their assigned reviewer must explicitly seal the current legacy body:
+
+```bash
+baton cr seal CR-YYYY-MM-DD-001 \
+  --role sm \
+  --evidence "Verified legacy approved body before implementation."
+```
+
+New implementation and revision handoffs use the stable `cr:CR-ID` source reference instead
+of a branch-relative file path. General design documents remain Git artifacts and should use
+an immutable reference such as `<commit-sha>:docs/design.md`.
 
 ## AGENTS.md
 
@@ -247,15 +317,20 @@ Use `tools/baton/bin/baton` for role handoff and CR workflow state.
 - Do not report ordinary wait timeouts or unchanged waiting state; report actual state transitions once.
 - Start a shift before long-running waits.
 - Finish already-claimed work even if the shift expires.
+- If claimed work cannot satisfy its exit criteria, use `fail` instead of `finish`; the linked failure CR keeps downstream work blocked until a reviewed retry finishes or the branch is cancelled.
 - Do not create CRs with the same author and reviewer role.
 - Ask an SM/admin role to use `cr reassign-reviewer` or `cr cancel` for stuck legacy CRs.
 - Configure least privilege with `role permission-add` and `role permission-remove`; do not edit permission rows directly.
+- Grant `handoff.register` only to roles allowed to create or retry work. Schema v7 preserves this formerly implicit access for existing roles, so review compatibility grants after migration.
 - Use handoff `cancel` only with explicit user/SM intent and a role granted `handoff.cancel`.
 - Handoff cancellation affects only the selected job and its blocked dependency descendants; unrelated queues remain active.
 - Use a named Gate when work must wait for a future stage whose handoff ID does not exist yet.
 - Treat Gate release as a workflow decision requiring evidence, not as a routine worker action.
 - Use `gate transfer` only for an explicit ownership change or emergency recovery.
-- Keep CR Markdown files under `docs/change-requests/` unless the user specifies another path.
+- Read CR handoff references such as `cr:CR-...` with `baton cr show <cr-id>`; do not resolve them relative to a task worktree.
+- Keep mutable CR Markdown under the shared `.baton/change-requests/` directory unless the user specifies an absolute branch-independent path.
+- Treat `body_integrity: mismatch` as a stop condition. Do not implement or finish work against a changed approved body.
+- After migrating an existing approved CR without a hash, ask its assigned reviewer to run `cr seal` before creating or claiming implementation work.
 ```
 
 ## Prompting Agents
@@ -287,8 +362,9 @@ Do not use repeated next commands as a substitute for wait, and do not stop when
 Exit 2 means only that the bounded wait timed out: check the shift and run wait again silently while it remains active.
 Do not send periodic or duplicate waiting updates. Report once when work becomes ready, a claim or completion changes state, waiting stops or the shift expires, an error needs intervention, or the user asks for status.
 When work appears, re-check with next, claim it, complete only the claimed task, then finish it with concrete evidence.
-After finish, return to bounded wait while the shift remains active.
-Blocked handoffs are promoted automatically after their dependencies finish. Cancelled dependency branches will not become ready, while unrelated queue branches remain active.
+If the exit criteria cannot be met, report it with baton fail and the available evidence. Never use finish for unsuccessful work.
+After finish or failure reporting, return to bounded wait while the shift remains active.
+Blocked handoffs are promoted automatically after their dependencies finish. A failed dependency remains blocked pending its failure CR decision; cancelled dependency branches will not become ready, while unrelated queue branches remain active.
 Do not edit Baton SQLite records directly.
 ```
 
@@ -444,7 +520,7 @@ tools/baton/bin/baton --version
 tools/baton/bin/baton role permission-list sm
 ```
 
-`migrate` applies pending migrations in one transaction, records them in `schema_migrations`, validates database and foreign-key integrity, and seeds newly introduced default roles or permissions. It does not rewrite existing handoff, CR, event, control, role, or permission content. Permissions removed with `role permission-remove` remain revoked across later migrations unless a migration explicitly introduces that same permission as a new default. Re-running `migrate` is safe.
+`migrate` applies pending migrations in one transaction, records them in `schema_migrations`, validates database and foreign-key integrity, and seeds newly introduced default roles or permissions. It does not rewrite existing handoff, CR, event, control, role, or permission content. Permissions removed with `role permission-remove` remain revoked across later migrations unless a migration explicitly introduces that same permission as a new default. Migration 7 is the deliberate exception for the newly explicit `handoff.register`: it grants the permission to existing active roles so an upgrade does not silently remove their former ability to register work. Review and revoke those compatibility grants after migration when the project requires centralized registration. Re-running `migrate` is safe.
 
 If migration fails, Baton rolls back the transaction and leaves the previous database records in place. A Baton binary also refuses to open a database containing migration versions it does not recognize, which prevents an older checkout from modifying a newer database.
 

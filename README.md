@@ -62,7 +62,7 @@ baton project info
 baton status
 ```
 
-`baton init` creates `.baton/project.json` and `.baton/baton.sqlite3` in the selected directory. Later commands walk upward to the nearest Baton marker, so nested-directory execution, project moves, and full directory copies do not depend on Git. Use `baton init --project-root PATH` when initialization is launched from another directory.
+`baton init` creates `.baton/project.json`, `.baton/baton.sqlite3`, and a nested `.baton/.gitignore` in the selected directory. New mutable CR bodies default to `.baton/change-requests/`. Later commands walk upward to the nearest Baton marker, so nested-directory execution, project moves, and full directory copies do not depend on Git. Use `baton init --project-root PATH` when initialization is launched from another directory.
 
 A marker without its database is treated as recovery-required state. `init` refuses to create a replacement DB that would silently discard workflow history.
 
@@ -339,13 +339,27 @@ The project boundary is identified by:
 
 Inspect resolved paths and version metadata with `bin/baton project info`.
 
-Use a different database with `--db` for diagnostics or isolated testing:
+For isolated Git worktrees belonging to one logical project, use one branch-independent
+control database and identify the current source checkout:
+
+```bash
+export BATON_DB=/absolute/path/to/project-control/.baton/baton.sqlite3
+export BATON_WORKSPACE_ROOT="$PWD"
+export BATON_AGENT_ID=backend-main
+```
+
+Do not run `baton init` in every worktree. `BATON_DB` is equivalent to `--db`, while
+`BATON_WORKSPACE_ROOT` controls optional Git inspection and defaults to the current directory.
+
+Use an arbitrary database path for diagnostics or isolated testing:
 
 ```bash
 bin/baton --db /tmp/baton.sqlite3 init
 ```
 
-An external DB has no implicit project root. CR paths used with it must be absolute; Baton rejects relative project files rather than resolving them differently from each caller's working directory.
+A canonical external `<control-root>/.baton/baton.sqlite3` resolves config and CR files
+against that control root. An arbitrarily named external DB has no implicit project root;
+CR paths used with it must be absolute.
 
 ## Role Management
 
@@ -376,7 +390,7 @@ bin/baton role alias-add fe frontend
 bin/baton next --role fe
 ```
 
-Workflow permissions are stored separately from role membership. `sm` is seeded with all CR permissions, `handoff.cancel`, emergency `gate.manage`, and `workspace.override` authority.
+Workflow permissions are stored separately from role membership. `sm` is seeded with all CR permissions, `handoff.cancel`, `handoff.register`, emergency `gate.manage`, and `workspace.override` authority. New projects also give `planning` the registration, cancellation, and CR review permissions required to decide failed handoffs. Schema v7 upgrades preserve existing registration behavior by granting `handoff.register` to every active role already present; an SM can revoke compatibility grants afterward.
 
 ```bash
 bin/baton role permission-list sm
@@ -384,6 +398,7 @@ bin/baton role permission-add architecture cr.review
 bin/baton role permission-add architecture cr.approve
 bin/baton role permission-add architecture cr.admin
 bin/baton role permission-add architecture handoff.cancel
+bin/baton role permission-add architecture handoff.register
 bin/baton role permission-add architecture gate.manage
 bin/baton role permission-add architecture workspace.override
 bin/baton role permission-remove sm cr.approve
@@ -453,7 +468,7 @@ If multiple agents share one workspace, do not let them share the same default i
 
 ## Optional Git Workspace Integration
 
-Baton remains Git-independent. Add a tracked `baton.toml` only when the project should record commit provenance and detect likely checkout mismatches:
+Baton remains Git-independent. Add a shared `baton.toml` only when the project should record commit provenance and detect likely checkout mismatches. In a worktree layout, keep this file beside the common control DB rather than maintaining branch-specific copies:
 
 ```toml
 [baton]
@@ -473,7 +488,9 @@ bin/baton workspace events --job HO-YYYY-MM-DD-001
 bin/baton-report audit --job HO-YYYY-MM-DD-001
 ```
 
-Configured projects record HEAD, branch, dirty state, and the ancestry baseline at handoff registration, claim, and finish. `warn` allows a mismatch and audits one warning; `strict` blocks it unless a role with `workspace.override` supplies `--accept-workspace-change`, a reason, and its authorizing role. Git checks never run in wait polling loops, and Baton never stores Git history, diffs, or source contents.
+Configured projects record HEAD, branch, dirty state, and the ancestry baseline at handoff registration, claim, finish, and failure reporting. `warn` allows a mismatch and audits one warning; `strict` blocks incompatible register, claim, and finish transitions unless a role with `workspace.override` supplies an audited override. Failure reporting remains allowed under `strict` and records a warning so unsuccessful work cannot remain trapped in `in_progress`. Git checks never run in wait polling loops, and Baton never stores Git history, diffs, or source contents.
+
+A `finished` handoff does not prove that its commit was integrated into a downstream branch. The planner or integrator must merge or cherry-pick the recorded commit before releasing dependent implementation work.
 
 See [Optional Git Workspace Integration](docs/git-integration.md) for policy semantics, version constraints, strict override syntax, checkout procedure, limits, and the [Korean guide](docs/git-integration.ko.md).
 
@@ -487,7 +504,7 @@ Register a ready handoff:
 bin/baton register \
   --title "Frontend upload follow-up" \
   --role frontend \
-  --source-ref "docs/change-requests/CR-YYYY-MM-DD-example.md" \
+  --source-ref "cr:CR-YYYY-MM-DD-example" \
   --objective "Implement the approved upload follow-up." \
   --exit-criteria "The approved UI behavior is implemented and verified."
 ```
@@ -518,6 +535,31 @@ bin/baton claim HO-YYYY-MM-DD-001 --role frontend
 bin/baton finish HO-YYYY-MM-DD-001 --role frontend --evidence "Manual verification passed."
 ```
 
+If claimed work cannot meet its exit criteria, report failure instead of calling `finish`:
+
+```bash
+bin/baton fail HO-YYYY-MM-DD-001 \
+  --role frontend \
+  --reason "The approved API contract cannot represent the required state." \
+  --evidence "Contract test failure: tests/api-contract.sh"
+```
+
+`fail` changes the job to `failed`, automatically submits a linked failure CR, and leaves every dependent handoff `blocked`. The default reviewer is `planning`; a planning failure defaults to `sm` to prevent self-review. A different `--reviewer-role` must have `handoff.register` and the required CR review permissions.
+
+After reviewing the generated CR, approve and retry the original job:
+
+```bash
+bin/baton cr approve CR-YYYY-MM-DD-001 \
+  --role planning \
+  --evidence "Retry with the revised contract."
+bin/baton retry HO-YYYY-MM-DD-001 \
+  --role planning \
+  --cr-id CR-YYYY-MM-DD-001 \
+  --reason "Apply the reviewed correction."
+```
+
+The target role must claim the reopened job again. If retry should not proceed, reject the failure CR first and then use `cancel`; cancellation recursively closes only that blocked dependency branch. Cancelling a submitted failure CR administratively also cancels its failed job and blocked descendants.
+
 `next` is a queue hint, not the full work contract. Before claiming, use `handoff show` to read the objective, source reference, dependencies, Gates, and exit criteria. Use `handoff list` for read-only queue inspection:
 
 ```bash
@@ -539,7 +581,7 @@ bin/baton cancel HO-YYYY-MM-DD-001 \
   --reason "Work is no longer required."
 ```
 
-Cancellation is scoped. Baton cancels the selected handoff and recursively cancels only `blocked` handoffs that depend on it. Independent `open`, `blocked`, or `in_progress` jobs in other queue branches are unchanged. It does not stop wait loops or clear a role queue; use `stop` for wait control. Finished and already-cancelled handoffs cannot be cancelled again.
+Cancellation is scoped. Baton cancels the selected handoff and recursively cancels only `blocked` handoffs that depend on it. A failed handoff must first have a rejected or administratively cancelled failure CR. Independent `open`, `blocked`, `in_progress`, or `failed` jobs in other queue branches are unchanged. It does not stop wait loops or clear a role queue; use `stop` for wait control. Finished and already-cancelled handoffs cannot be cancelled again.
 
 ## Named Gates
 
@@ -592,7 +634,10 @@ See `docs/gates.md` for the complete operational procedure and cautions, includi
 
 ## Change Request Flow
 
-CR Markdown files hold the editable request body. SQLite is the authority for workflow state and Baton keeps only the Markdown frontmatter in sync.
+CR Markdown files hold the editable request body. SQLite is the authority for workflow
+state. New CRs live under the shared `.baton/change-requests/` directory by default, outside
+task branches. Baton synchronizes managed frontmatter and records body hashes at submission
+and approval.
 
 Create and submit a CR:
 
@@ -603,6 +648,12 @@ bin/baton cr create \
   --reviewer-role sm
 
 bin/baton cr submit CR-YYYY-MM-DD-001 --role planning
+```
+
+Read the shared body and its integrity state from any worktree:
+
+```bash
+bin/baton cr show CR-YYYY-MM-DD-001
 ```
 
 The author role and reviewer role must be different. Baton rejects self-review CRs before submission so they cannot become stuck in the review queue.
@@ -635,10 +686,24 @@ bin/baton finish HO-YYYY-MM-DD-001 \
 
 Baton owns CR workflow state in SQLite and rewrites only managed Markdown frontmatter. Markdown replacement is atomic; if the file changes during synchronization, the command fails and preserves the concurrent human edit instead of silently overwriting it.
 
+Approval applies to the exact submitted body. Baton refuses approval after an unreviewed
+body edit, and blocks implementation handoff creation, claim, finish, and final implementation
+marking when an approved body is missing or changed. Requirement changes after approval use
+a new CR rather than editing the approved body.
+
 SQLite and the filesystem cannot share one transaction. After a process crash or suspected frontmatter mismatch, reconcile the managed header from authoritative DB state without changing the body:
 
 ```bash
 bin/baton cr sync CR-YYYY-MM-DD-001
+```
+
+After schema migration, an older approved CR may report `legacy-unsealed`. The assigned
+reviewer must verify and seal its current body before new implementation work:
+
+```bash
+bin/baton cr seal CR-YYYY-MM-DD-001 \
+  --role sm \
+  --evidence "Verified legacy approved body."
 ```
 
 Approval and implementation assignment are separate decisions:
@@ -694,6 +759,8 @@ State-changing commands run inside `BEGIN IMMEDIATE` transactions:
 - `gate transfer`
 - `claim`
 - `finish`
+- `fail`
+- `retry`
 - `promote-ready`
 - `wait`
 - `stop`
@@ -804,6 +871,8 @@ bin/baton-report summary
 bin/baton-report summary --format json
 ```
 
+The summary includes handoff, CR, Gate, and failure-review counts. Unresolved failure reviews appear as `pending`.
+
 ## Wait
 
 `wait` repeatedly promotes ready work and checks the target role queue.
@@ -839,9 +908,10 @@ Required agent loop:
 3. On exit `0`, run `next`, claim the returned job, complete it, and report it with `finish`.
 4. On exit `2`, check the shift and immediately start another bounded wait without reporting while the shift remains active.
 5. On exit `3`, stop waiting until the role is resumed.
-6. After `finish`, return to step 2 while the shift remains active.
+6. If the work cannot satisfy its exit criteria, use `fail`; never report unsuccessful work with `finish`.
+7. After `finish` or failure reporting, return to step 2 while the shift remains active.
 
-A blocked handoff is not returned by `next`. `wait` keeps checking required upstream jobs and named Gates, then returns after every requirement is resolved and the handoff is promoted to `open`. If a required upstream handoff or Gate is cancelled, Baton recursively marks that blocked dependency branch as `cancelled`; unrelated branches remain active.
+A blocked handoff is not returned by `next`. `wait` keeps checking required upstream jobs and named Gates, then returns after every requirement is resolved and the handoff is promoted to `open`. A failed upstream keeps descendants blocked until its approved retry finishes. If a required upstream handoff or Gate is cancelled, Baton recursively marks that blocked dependency branch as `cancelled`; unrelated branches remain active.
 
 `--timeout 0` means wait forever, but that should be used only in explicit experiments. Normal workers must repeat bounded waits until their shift expires or a stop control is set.
 
@@ -910,7 +980,7 @@ Inspect shift state:
 bin/baton shift status --role frontend
 ```
 
-When a shift expires, Baton marks the matching control scope stopped. Future `wait`, `cr wait-review`, and `claim` attempts stop or fail, while `finish` and CR reporting commands remain allowed.
+When a shift expires, Baton marks the matching control scope stopped. Future `wait`, `cr wait-review`, and `claim` attempts stop or fail, while `finish`, `fail`, and CR reporting commands remain allowed.
 
 ## Stop And Resume
 
@@ -975,10 +1045,11 @@ Token and auth files are stored under `.baton/gh/config/`, which is ignored by g
 ## Limitations
 
 - It does not import or export Markdown handoff files.
-- Handoff claim/finish authorization remains target-role based; administrative cancellation uses the separate `handoff.cancel` permission.
+- Handoff claim/finish/fail authorization remains target-role based; registration and reviewed retry use `handoff.register`, while administrative cancellation uses `handoff.cancel`.
 - CR review actions use role permissions, but user-level authentication is outside Baton.
 - A pipx executable is user-global, but workflow state is project-local. Updating the pipx installation changes the executable used by every project, so migrate and verify each project separately before resuming agents.
 - Do not point unrelated projects at one explicit `--db` path. SQLite serializes transactions within that shared file, but project-relative CR paths, IDs, controls, and workflow ownership would also become shared.
+- Separate Git worktrees for the same logical project should point to one canonical local DB. Source files remain isolated; Baton does not merge commits or detect overlapping edits.
 - Baton does not scan the filesystem, maintain a global project registry, or migrate every project after an executable update. Each project is checked when it is next used.
 - Keep active Baton databases on a local filesystem. Network mounts and file-synchronization tools may not preserve SQLite locking semantics and must not be used to coordinate agents across machines.
 - It is not the active repository handoff workflow.

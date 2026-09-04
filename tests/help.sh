@@ -15,6 +15,8 @@ grep 'help.*show command help' "$TMP/root-command.txt" >/dev/null
 grep "baton guide list" "$TMP/root-command.txt" >/dev/null
 grep "baton guide show" "$TMP/root-command.txt" >/dev/null
 grep "bootstrap|worker|planner" "$TMP/root-command.txt" >/dev/null
+grep -- '--workspace-root WORKSPACE_ROOT' "$TMP/root-command.txt" >/dev/null
+grep 'BATON_DB' "$TMP/root-command.txt" >/dev/null
 
 "$CLI" project migrate -h >"$TMP/migrate-short.txt"
 "$CLI" help project migrate >"$TMP/migrate-command.txt"
@@ -25,6 +27,10 @@ grep -- '--plan-token PLAN_TOKEN' "$TMP/migrate-command.txt" >/dev/null
 "$CLI" help guide show | grep '{bootstrap,worker,planner,git}' >/dev/null
 "$CLI" help workspace check | grep -- '--job JOB_ID' >/dev/null
 "$CLI" help workspace events | grep -- '--limit LIMIT' >/dev/null
+"$CLI" help fail | grep -- '--reviewer-role REVIEWER_ROLE' >/dev/null
+"$CLI" help retry | grep -- '--cr-id CR_ID' >/dev/null
+"$CLI" help cr show | grep 'CR_ID' >/dev/null
+"$CLI" help cr seal | grep -- '--evidence EVIDENCE' >/dev/null
 if "$CLI" help unknown-command >/dev/null 2>&1; then
   echo "ERROR: help accepted an unknown command" >&2
   exit 1

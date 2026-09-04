@@ -22,6 +22,7 @@ Tables:
 - `handoff_gate_dependencies`: Gate requirements attached to handoff jobs
 - `gate_events`: Gate ownership and lifecycle audit log
 - `handoff_events`: audit log of state changes and operational events
+- `handoff_failure_reviews`: failed handoff links to decision CRs and their resolution
 - `handoff_controls`: stop/resume controls for wait loops
 - `waiter_leases`: short-lived handoff and CR waiter heartbeats for automatic polling intervals
 - `workspace_events`: optional Git commit provenance and policy outcomes for handoff transitions
@@ -60,6 +61,7 @@ Released migrations:
 4 waiter_leases
 5 database_metadata
 6 workspace_provenance
+7 handoff_failures
 ```
 
 `baton migrate --check` performs a read-only check that the database is at the latest known schema version.
@@ -188,7 +190,9 @@ Primary key:
 
 Seed permissions:
 
-- `sm` receives all CR permissions, `handoff.cancel`, `gate.manage`, and `workspace.override` on `init` or the migration that introduces each permission.
+- `sm` receives all CR permissions, `handoff.cancel`, `handoff.register`, `gate.manage`, and `workspace.override` on `init` or the migration that introduces each permission.
+- `planning` receives the CR review permissions needed for failure decisions plus `handoff.cancel` and `handoff.register` in a new project.
+- Migration 7 grants `handoff.register` to every active role already present in an upgraded project, preserving the registration access that was implicit before the permission existed. An SM may revoke those compatibility grants after reviewing project policy.
 
 Known permissions:
 
@@ -201,6 +205,7 @@ cr.reject
 cr.assign_implementation
 cr.mark_implemented
 handoff.cancel
+handoff.register
 gate.manage
 workspace.override
 ```
@@ -214,6 +219,7 @@ Purpose:
 - Stores the main handoff queue record.
 - Replaces file-location state such as `jobs/`, `blocked/`, and `finished/`.
 - Provides the data used by `register`, `next`, `claim`, `finish`, and `status`.
+- Records an explicit unsuccessful outcome through `fail` without releasing dependent work.
 
 Columns:
 
@@ -239,6 +245,7 @@ Allowed `status` values:
 blocked
 open
 in_progress
+failed
 finished
 cancelled
 ```
@@ -248,10 +255,13 @@ Status meaning:
 - `blocked`: Waiting for required upstream jobs to finish.
 - `open`: Ready to be claimed by `target_role`.
 - `in_progress`: Claimed by an agent profile.
+- `failed`: The claimed work did not meet its exit criteria. Its failure CR awaits or records a planning decision.
 - `finished`: Completed with closure evidence.
 - `cancelled`: Intentionally stopped as a job, not merely paused.
 
-An authorized `cancel` operation changes a selected `blocked`, `open`, or `in_progress` job to `cancelled`. It then recursively cancels only blocked dependency descendants. Unrelated queue branches are unchanged. `finished` and already-`cancelled` jobs are terminal for this operation.
+An authorized `cancel` operation changes a selected `blocked`, `open`, `in_progress`, or reviewed `failed` job to `cancelled`. It then recursively cancels only blocked dependency descendants. A failed job must have its failure CR rejected or cancelled first. Unrelated queue branches are unchanged. `finished` and already-`cancelled` jobs are terminal for this operation.
+
+`fail` changes only an `in_progress` job to `failed`, creates and submits a linked failure CR, and leaves dependency descendants `blocked`. An approved failure CR allows its reviewer to use `retry`, which returns the original job to `open`. A rejected failure CR allows an authorized cancellation. Dependents become ready only after the retried original job reaches `finished`.
 
 Minimal ready job example:
 
@@ -260,7 +270,7 @@ job_id=HO-2026-06-02-001
 title=Frontend upload follow-up
 status=open
 target_role=frontend
-source_ref=docs/change-requests/CR-2026-06-02-example.md
+source_ref=cr:CR-2026-06-02-example
 objective=Implement the approved upload follow-up.
 exit_criteria=The approved behavior is implemented and verified.
 created_at=2026-06-02 09:00:00 UTC
@@ -296,11 +306,36 @@ depends_on_job_id=HO-2026-06-02-001
 Promotion rule:
 
 - A `blocked` job is promoted only when every `depends_on_job_id` is `finished`.
+- A `failed` upstream is not successful completion. Its dependents remain `blocked` while its failure CR is reviewed and while a retry is pending.
 - If any required upstream job is `cancelled`, Baton recursively changes its blocked dependents to `cancelled`.
 - Each propagated transition records one `dependency_cancelled` handoff event with the immediate upstream job as its cause.
 - A new handoff registered with an already-cancelled dependency starts as `cancelled`, not `blocked`.
 - `promote-ready` also reconciles older database records that still contain a blocked job behind a cancelled dependency.
 - Independent jobs and dependency branches are never cancelled by this propagation.
+
+## `handoff_failure_reviews`
+
+Purpose:
+
+- Links each failed handoff attempt to the automatically submitted decision CR.
+- Keeps retry and cancellation decisions auditable without treating failure as successful completion.
+- Supports multiple failure/retry attempts for the same handoff.
+
+Each row records `job_id`, unique `cr_id`, failure role, reason, optional evidence, failure time, and an optional `retry` or `cancelled` resolution with its deciding role, time, and message. An unresolved row is the active failure review for that job. The CR reviewer must have `handoff.register` and the required CR review permissions. The default reviewer is `planning`, except a failure by `planning` defaults to `sm` to prevent self-review.
+
+| Column | Type | Required | Purpose |
+| --- | --- | --- | --- |
+| `id` | `integer primary key` | yes | Monotonic failure-attempt identifier. |
+| `job_id` | `text` | yes | Failed handoff. |
+| `cr_id` | `text unique` | yes | Automatically submitted failure CR. |
+| `failed_by_role` | `text` | yes | Target role reporting failure. |
+| `reason` | `text` | yes | Concrete failure reason. |
+| `evidence` | `text` | no | Test output or other supporting evidence. |
+| `failed_at` | `text` | yes | UTC failure time. |
+| `resolution` | `text` | no | `retry`, `cancelled`, or null while under review. |
+| `resolved_by_role` | `text` | no | Role applying the reviewed decision. |
+| `resolved_at` | `text` | no | UTC resolution time. |
+| `resolution_message` | `text` | no | Required retry or cancellation reason. |
 
 ## Named Gate Tables
 
@@ -481,6 +516,8 @@ Columns:
 | `implemented_at` | `text` | no | Implementation completion timestamp. |
 | `revision_count` | `integer` | yes | Number of revision requests. |
 | `active_revision_job_id` | `text` | no | Open revision handoff, if any. |
+| `submitted_body_hash` | `text` | no | SHA-256 of the Markdown body captured by the latest submit or resubmit. |
+| `approved_body_hash` | `text` | no | SHA-256 of the immutable body approved by the reviewer. Null identifies a legacy unsealed approval. |
 
 Allowed `status` values:
 
@@ -499,6 +536,9 @@ State rules:
 - `draft -> submitted` is performed by the author role.
 - `submitted -> revision_requested`, `approved`, or `rejected` is performed by the reviewer role.
 - `revision_requested -> submitted` is performed by the author role after editing the Markdown body.
+- Approval requires the current body to match `submitted_body_hash` and records `approved_body_hash`.
+- Implementation handoff creation, claim, finish, and final implementation marking require the approved body hash to remain unchanged.
+- Existing approved CRs migrated without a hash require an explicit reviewer `cr seal` before new implementation work.
 - `approved -> implemented` requires at least one linked implementation handoff and all linked implementation handoffs must be `finished`.
 - `cancelled` is performed by a role with `cr.admin` and records an audit event.
 - `reviewer_role` can be reassigned before terminal review by a role with `cr.admin`.
@@ -531,6 +571,7 @@ submitted
 resubmitted
 revision_requested
 approved
+body_sealed
 rejected
 reviewer_reassigned
 cancelled
