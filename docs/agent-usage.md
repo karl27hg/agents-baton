@@ -154,7 +154,15 @@ bin/baton --db /tmp/baton.sqlite3 cancel-ack HO-YYYY-MM-DD-001 \
   --evidence "Stopped before commit; local changes retained for inspection."
 ```
 
-Acknowledgement finalizes cancellation and propagates it to blocked descendants. Use `cancel --force` only when the claimant cannot acknowledge. Unrelated queue branches remain unchanged. `stop` controls wait loops and is not job cancellation.
+The claimant first pauses and inspects `events` for the request reason. If review confirms that the existing work remains valid, an authorized planner/SM may restore the existing claim without a new claim:
+
+```bash
+bin/baton --db /tmp/baton.sqlite3 cancel-withdraw HO-YYYY-MM-DD-001 \
+  --role sm \
+  --reason "The implementation is compatible with the reviewed design."
+```
+
+The claimant resumes only after `handoff show` reports `in_progress`. A request tied to a cancelled or superseded CR cannot be withdrawn. If cancellation is confirmed, acknowledgement finalizes it and propagates it to blocked descendants. Use `cancel --force` only when the claimant cannot acknowledge. Unrelated queue branches remain unchanged. `stop` controls wait loops and is not job cancellation.
 
 ## Named Gate Flow
 

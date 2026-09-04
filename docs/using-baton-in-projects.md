@@ -323,7 +323,7 @@ Use `tools/baton/bin/baton` for role handoff and CR workflow state.
 - Configure least privilege with `role permission-add` and `role permission-remove`; do not edit permission rows directly.
 - Grant `handoff.register` only to roles allowed to create or retry work. Schema v7 preserves this formerly implicit access for existing roles, so review compatibility grants after migration.
 - Use handoff `cancel` only with explicit user/SM intent and a role granted `handoff.cancel`.
-- An `in_progress` cancellation becomes `cancel_requested`. The claimant must stop before commit or integration and run `cancel-ack` with evidence; use `cancel --force` only when acknowledgement is impossible.
+- An `in_progress` cancellation becomes `cancel_requested`. The claimant pauses before commit or integration and inspects the request reason in `events`. If review finds no issue, a role with `handoff.cancel` uses `cancel-withdraw --reason ...`, preserving the existing claim; the claimant resumes only after `handoff show` returns to `in_progress`. Retired CR implementation work cannot be restored. If cancellation is confirmed, the claimant runs `cancel-ack` with evidence; use `cancel --force` only when acknowledgement is impossible.
 - Handoff cancellation affects only the selected job and its blocked dependency descendants; unrelated queues remain active.
 - Use a named Gate when work must wait for a future stage whose handoff ID does not exist yet.
 - Treat Gate release as a workflow decision requiring evidence, not as a routine worker action.
@@ -364,7 +364,7 @@ Do not use repeated next commands as a substitute for wait, and do not stop when
 Exit 2 means only that the bounded wait timed out: check the shift and run wait again silently while it remains active.
 Do not send periodic or duplicate waiting updates. Report once when work becomes ready, a claim or completion changes state, waiting stops or the shift expires, an error needs intervention, or the user asks for status.
 When work appears, re-check with next, claim it, complete only the claimed task, then finish it with concrete evidence.
-Before commit, integration, or finish, inspect the handoff again. If it is cancel_requested, stop and run cancel-ack with evidence instead of finish or fail.
+Before commit, integration, or finish, inspect the handoff again. If it is `cancel_requested`, pause and inspect `events`; resume only after an authorized `cancel-withdraw` restores `in_progress`, otherwise use `cancel-ack` with evidence once cancellation is confirmed instead of `finish` or `fail`.
 If the exit criteria cannot be met, report it with baton fail and the available evidence. Never use finish for unsuccessful work.
 After finish or failure reporting, return to bounded wait while the shift remains active.
 Blocked handoffs are promoted automatically after their dependencies finish. A failed dependency remains blocked pending its failure CR decision; cancelled dependency branches will not become ready, while unrelated queue branches remain active.

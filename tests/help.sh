@@ -31,6 +31,7 @@ grep -- '--plan-token PLAN_TOKEN' "$TMP/migrate-command.txt" >/dev/null
 "$CLI" help retry | grep -- '--cr-id CR_ID' >/dev/null
 "$CLI" help cancel | grep -- '--force' >/dev/null
 "$CLI" help cancel-ack | grep -- '--evidence EVIDENCE' >/dev/null
+"$CLI" help cancel-withdraw | grep -- '--reason REASON' >/dev/null
 "$CLI" help watch | grep 'CR review first' >/dev/null
 "$CLI" help cr show | grep 'CR_ID' >/dev/null
 "$CLI" help cr seal | grep -- '--evidence EVIDENCE' >/dev/null

@@ -592,7 +592,15 @@ bin/baton cancel-ack HO-YYYY-MM-DD-001 \
   --evidence "Stopped before commit; retained local changes for inspection."
 ```
 
-The acknowledgement finalizes cancellation and recursively cancels blocked descendants. Use `cancel --force` only when the claimant cannot acknowledge, and record that reason. Independent queue branches remain unchanged. `stop` controls wait loops and does not cancel jobs.
+If review shows that cancellation is unnecessary, a role with `handoff.cancel` may withdraw the request before acknowledgement. The original claim and start time are preserved, and the reason is audited:
+
+```bash
+bin/baton cancel-withdraw HO-YYYY-MM-DD-001 \
+  --role sm \
+  --reason "Review confirmed that the existing implementation remains valid."
+```
+
+The claimant resumes only after `handoff show` reports `in_progress`; it does not claim the job again. A cancellation linked to a cancelled or superseded CR cannot be withdrawn because its implementation source is retired. The acknowledgement finalizes cancellation and recursively cancels blocked descendants. Use `cancel --force` only when the claimant cannot acknowledge, and record that reason. Independent queue branches remain unchanged. `stop` controls wait loops and does not cancel jobs.
 
 ## Named Gates
 
@@ -786,6 +794,7 @@ State-changing commands run inside `BEGIN IMMEDIATE` transactions:
 - `migrate`
 - `cancel`
 - `cancel-ack`
+- `cancel-withdraw`
 - `register`
 - `gate create`
 - `gate release`

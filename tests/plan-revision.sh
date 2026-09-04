@@ -72,6 +72,11 @@ if "$CLI" --db "$DB" finish "$ACTIVE_JOB" --role backend --evidence "Stale compl
   echo "ERROR: superseded implementation was finished" >&2
   exit 1
 fi
+if "$CLI" --db "$DB" cancel-withdraw "$ACTIVE_JOB" --role sm \
+  --reason "Unsafe attempt to restore retired design work." >/dev/null 2>&1; then
+  echo "ERROR: cancellation tied to a superseded CR was withdrawn" >&2
+  exit 1
+fi
 "$CLI" --db "$DB" cancel-ack "$ACTIVE_JOB" \
   --role backend \
   --claimed-by backend-main \

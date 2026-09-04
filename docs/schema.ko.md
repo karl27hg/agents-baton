@@ -258,12 +258,12 @@ cancelled
 - `blocked`: 필수 upstream job이 완료되기를 기다리는 상태입니다.
 - `open`: `target_role`이 claim할 수 있는 ready 상태입니다.
 - `in_progress`: agent profile이 claim한 상태입니다.
-- `cancel_requested`: 권한 있는 role이 취소를 요청했으며 원래 claimant의 중단 확인을 기다리는 상태입니다.
+- `cancel_requested`: 권한 있는 role이 취소를 요청했으며 원래 claimant가 작업을 멈춘 상태에서 검토 후 철회 또는 최종 취소 확인을 기다리는 상태입니다.
 - `failed`: claim한 작업이 exit criteria를 충족하지 못해 실패 CR의 결정을 기다리거나 기록한 상태입니다.
 - `finished`: closure evidence와 함께 완료된 상태입니다.
 - `cancelled`: 단순 pause가 아니라 job 자체가 의도적으로 취소된 상태입니다.
 
-권한이 있는 `cancel` 명령은 선택한 `blocked`, `open` 또는 심사가 끝난 `failed` job을 즉시 `cancelled`로 바꾸고 blocked 하위 job을 재귀적으로 취소합니다. `in_progress` job은 `cancel_requested`로 바뀌며 원래 claimant가 `cancel-ack`를 실행해야 최종 취소와 하위 전파가 확정됩니다. claimant가 확인할 수 없을 때만 감사되는 복구 경로인 `cancel --force`를 사용합니다. 실패 job은 먼저 연결된 실패 CR이 `rejected` 또는 `cancelled` 상태여야 합니다.
+권한이 있는 `cancel` 명령은 선택한 `blocked`, `open` 또는 심사가 끝난 `failed` job을 즉시 `cancelled`로 바꾸고 blocked 하위 job을 재귀적으로 취소합니다. `in_progress` job은 `cancel_requested`로 바뀝니다. claimant가 확인하기 전에 `handoff.cancel` 권한이 있는 role이 `cancel-withdraw`를 실행하면 검토 사유를 기록하면서 기존 `claimed_by`와 `started_at`을 유지한 채 `in_progress`로 돌아갑니다. 연결된 구현 CR이 이미 `cancelled` 또는 `superseded`이면 원 설계가 폐기되었으므로 철회를 거부합니다. 원래 claimant가 `cancel-ack`를 실행해야 최종 취소와 하위 전파가 확정됩니다. claimant가 확인할 수 없을 때만 감사되는 복구 경로인 `cancel --force`를 사용합니다. 실패 job은 먼저 연결된 실패 CR이 `rejected` 또는 `cancelled` 상태여야 합니다.
 
 `fail`은 `in_progress` job만 `failed`로 바꾸고 연결된 실패 CR을 생성·제출하며, 하위 dependency는 `blocked`로 유지합니다. 실패 CR이 승인되면 reviewer가 `retry`로 원래 job을 `open`으로 되돌릴 수 있습니다. 실패 CR이 거절되면 권한 있는 role이 해당 job과 하위 branch를 취소할 수 있습니다. 하위 작업은 재시도된 원래 job이 `finished`가 된 이후에만 ready 상태가 됩니다.
 
@@ -404,6 +404,7 @@ finished
 promoted
 cancelled
 cancellation_requested
+cancellation_withdrawn
 cancellation_acknowledged
 cancellation_forced
 dependency_cancelled
@@ -467,7 +468,7 @@ Wait 동작:
 Claim 동작:
 
 - `claim`은 새 작업 착수 전에 같은 control을 확인합니다.
-- `finish`는 shift control을 확인하지 않으므로 이미 claim한 작업은 shift 만료 후에도 완료 보고할 수 있습니다. 단, `cancel_requested` 작업은 거부하며 claimant가 `cancel-ack`를 사용해야 합니다.
+- `finish`는 shift control을 확인하지 않으므로 이미 claim한 작업은 shift 만료 후에도 완료 보고할 수 있습니다. 단, `cancel_requested` 작업은 거부하며 검토 결과에 따라 `cancel-withdraw`로 `in_progress`를 복구하거나 취소가 확정된 후 claimant가 `cancel-ack`를 사용해야 합니다.
 
 ## `waiter_leases`
 

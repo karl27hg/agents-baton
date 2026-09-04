@@ -258,12 +258,12 @@ Status meaning:
 - `blocked`: Waiting for required upstream jobs to finish.
 - `open`: Ready to be claimed by `target_role`.
 - `in_progress`: Claimed by an agent profile.
-- `cancel_requested`: An authorized role requested cancellation; the original claimant must stop and acknowledge it.
+- `cancel_requested`: An authorized role requested cancellation; the original claimant must pause while the request is reviewed, then either resume after withdrawal or acknowledge a confirmed cancellation.
 - `failed`: The claimed work did not meet its exit criteria. Its failure CR awaits or records a planning decision.
 - `finished`: Completed with closure evidence.
 - `cancelled`: Intentionally stopped as a job, not merely paused.
 
-An authorized `cancel` operation immediately changes a selected `blocked`, `open`, or reviewed `failed` job to `cancelled`, then recursively cancels blocked dependency descendants. An `in_progress` job changes to `cancel_requested`; only `cancel-ack` by its claimant finalizes cancellation and descendant propagation. `cancel --force` is the audited recovery path when acknowledgement is impossible. A failed job must have its failure CR rejected or cancelled first. Unrelated queue branches are unchanged.
+An authorized `cancel` operation immediately changes a selected `blocked`, `open`, or reviewed `failed` job to `cancelled`, then recursively cancels blocked dependency descendants. An `in_progress` job changes to `cancel_requested`. Before claimant acknowledgement, `cancel-withdraw` by a role with `handoff.cancel` returns it to `in_progress`, preserving `claimed_by` and `started_at` and recording the review reason. Withdrawal is rejected when a linked implementation CR is already `cancelled` or `superseded`. Only `cancel-ack` by the claimant finalizes cancellation and descendant propagation. `cancel --force` is the audited recovery path when acknowledgement is impossible. A failed job must have its failure CR rejected or cancelled first. Unrelated queue branches are unchanged.
 
 `fail` changes only an `in_progress` job to `failed`, creates and submits a linked failure CR, and leaves dependency descendants `blocked`. An approved failure CR allows its reviewer to use `retry`, which returns the original job to `open`. A rejected failure CR allows an authorized cancellation. Dependents become ready only after the retried original job reaches `finished`.
 
@@ -404,6 +404,7 @@ finished
 promoted
 cancelled
 cancellation_requested
+cancellation_withdrawn
 cancellation_acknowledged
 cancellation_forced
 dependency_cancelled
@@ -467,7 +468,7 @@ Wait behavior:
 Claim behavior:
 
 - `claim` checks the same controls before starting new work.
-- `finish` does not check shift controls, so already-claimed work can be reported after shift expiry. It rejects `cancel_requested`; the claimant must use `cancel-ack` instead.
+- `finish` does not check shift controls, so already-claimed work can be reported after shift expiry. It rejects `cancel_requested`; review must either restore `in_progress` with `cancel-withdraw` or the claimant must use `cancel-ack` after cancellation is confirmed.
 
 ## `waiter_leases`
 
