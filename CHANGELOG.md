@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.6.0rc1
+
 - Added schema migration v11 with optional workstream routing for handoffs and CR reviews, concrete CR review claims, audited review release, and one-active-unit capacity per agent identity.
 - Added integration fan-in guidance: parallelize independent evidence workstreams while serializing the final merge, acceptance, and Gate release decision.
 - Added schema migration v10 with opt-in Codex peer session/model metadata, direct-successor notification planning, audited delivery results, duplicate-success suppression, and polling fallback guidance.
