@@ -38,13 +38,16 @@ Do not send a final response merely because the current planning action complete
 
 ## Opt-In Peer Dispatch Policy
 
+- Use `handoff successors <finished-job>` for transport-neutral workflow inspection. It reports required roles and existing claimants; an `open` and `unassigned` successor is not assigned to the inspecting agent.
 - Every reachable Codex task registers a stable agent profile, runtime thread ID, role, host, and model with `agent session-set`. Runtime metadata never grants permissions.
-- After finishing a predecessor, use `notify targets <finished-job>` to promote and inspect only its eligible direct dependents.
+- `finish` immediately opens eligible direct dependents. After finishing a predecessor, use `notify targets <finished-job>` only to inspect opt-in Codex delivery candidates.
 - Send the Baton handoff ID to one existing candidate thread. Do not send the full job as an unaudited replacement contract and do not create a new thread.
 - Record the actual host result with `notify record --status sent|failed`. After failure, try another candidate or preserve the receiver's `wait`/`watch` fallback.
+- Treat `outside_shift` as a delivery prohibition, not as a missing assignment. Leave the ready handoff `open`; the target role will discover it after its project-local shift resumes.
 - Do not notify work that is blocked, cancelled, failed, or waiting on a Gate. The receiver must run `handoff show` and win `claim` before editing.
 - One successful delivery record per handoff is the default duplicate-suppression boundary. Additional agents discover the job through Baton rather than repeated broadcast messages.
 - Keep a session active while its existing Codex task remains addressable by follow-up messages, even when it is not currently executing. End or replace stale endpoints explicitly.
+- Do not require peer delivery from non-Codex hosts or other models. Their interoperable baseline is Baton state plus `next`, `wait`, `watch`, and `claim`.
 
 ## Parallel-Safety Decision
 

@@ -54,7 +54,7 @@ TARGET_JOB="$("$CLI" --db "$DB" register \
 
 "$CLI" --db "$DB" claim "$SOURCE_JOB" --role frontend --claimed-by frontend-main >/dev/null
 "$CLI" --db "$DB" finish "$SOURCE_JOB" --role frontend --evidence "Contract ready." >/dev/null
-"$CLI" --db "$DB" handoff show "$TARGET_JOB" | grep 'status: blocked' >/dev/null
+"$CLI" --db "$DB" handoff show "$TARGET_JOB" | grep 'status: open' >/dev/null
 
 BUSY_JOB="$("$CLI" --db "$DB" register \
   --title "Existing backend work" \
@@ -67,6 +67,19 @@ BUSY_JOB="$("$CLI" --db "$DB" register \
   --from-agent frontend-main \
   | grep "$TARGET_JOB.*backend.*no_active_peer_session" >/dev/null
 "$CLI" --db "$DB" finish "$BUSY_JOB" --role backend --evidence "Peer is available again." >/dev/null
+
+"$CLI" --db "$DB" shift end --role backend --reason "Backend shift ended." >/dev/null
+"$CLI" --db "$DB" notify targets "$SOURCE_JOB" \
+  --role frontend \
+  --from-agent frontend-main \
+  | grep "$TARGET_JOB.*backend.*outside_shift" >/dev/null
+"$CLI" --db "$DB" shift start --role backend --duration 1s >/dev/null
+sleep 2
+"$CLI" --db "$DB" notify targets "$SOURCE_JOB" \
+  --role frontend \
+  --from-agent frontend-main \
+  | grep "$TARGET_JOB.*backend.*outside_shift" >/dev/null
+"$CLI" --db "$DB" shift start --role backend --duration 1h >/dev/null
 
 "$CLI" --db "$DB" notify targets "$SOURCE_JOB" \
   --role frontend \

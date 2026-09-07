@@ -110,6 +110,7 @@ Shift handling:
 - If work was already claimed, finish or report failure even if the shift expires before the report is submitted, unless the handoff changed to `cancel_requested`.
 - After a successful `finish`, `fail`, or CR review action, report the transition once, check shift status, and re-enter the appropriate bounded wait only if the shift is still active.
 - In opt-in Codex peer-notification mode, a successful notification of ready successor work removes the need for the sender to wait solely to wake that successor. Keep waiting only for the sender's own remaining role obligations, CR monitoring, or notification fallback.
+- After `finish`, `baton handoff successors <finished-job>` may be used to inspect direct workflow successors. Its `target_role` is eligibility, not assignment; `unassigned` work belongs to no concrete agent until `claim` succeeds.
 
 A global shift uses `shift start --all`, `shift extend --all`, and `shift end --all`. Global and role scopes are cumulative controls: either scope can stop a role. Changing one scope does not clear an expired or stopped state on the other scope.
 
@@ -136,7 +137,7 @@ baton notify targets <finished-job-id> \
   --from-agent <profile-name>
 ```
 
-`notify targets` promotes only eligible direct dependents of the finished job and excludes peer profiles that already own active work. It never bypasses unfinished dependencies or pending Gates. Send one existing peer task a concise message such as:
+`finish` opens eligible direct dependents atomically. `notify targets` lists only open direct dependents and excludes peer profiles that already own active work; it retains promotion as a compatibility reconciliation path. A project-local global or target-role stop, including shift expiry, produces `outside_shift` with no delivery candidate. Do not send a host message for that state. It never bypasses unfinished dependencies or pending Gates. Send one existing peer task a concise message only for a `candidate` result:
 
 ```text
 Baton handoff HO-... is ready. Run `baton handoff show HO-...`, verify the source and dependencies, then claim it before editing.
@@ -154,7 +155,7 @@ baton notify record HO-... \
   --detail "Codex accepted the follow-up."
 ```
 
-For an error, use `--status failed --detail <reason>`, then try the next listed candidate or fall back to the receiver's normal `wait`/`watch` loop. Baton permits only one successful notification record per handoff to suppress duplicate wake-ups. A delivered message never changes the handoff to `in_progress`; only `claim` does that.
+For an error, use `--status failed --detail <reason>`, then try the next listed candidate or fall back to the receiver's normal `wait`/`watch` loop. Codex peer messaging is an optional transport optimization, not a protocol assumed to exist in other model hosts. Baton permits only one successful notification record per handoff to suppress duplicate wake-ups. A delivered message never changes the handoff to `in_progress`; only `claim` does that.
 
 ## Claim Rules
 

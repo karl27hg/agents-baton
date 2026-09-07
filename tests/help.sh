@@ -27,6 +27,7 @@ grep -- '--plan-token PLAN_TOKEN' "$TMP/migrate-command.txt" >/dev/null
 "$CLI" help guide show | grep '{bootstrap,worker,planner,git}' >/dev/null
 "$CLI" help workspace check | grep -- '--job JOB_ID' >/dev/null
 "$CLI" help workspace events | grep -- '--limit LIMIT' >/dev/null
+"$CLI" help handoff successors | grep 'without assigning work' >/dev/null
 "$CLI" help agent session-set | grep -- '--thread-id THREAD_ID' >/dev/null
 "$CLI" help agent session-set | grep -- '--model MODEL' >/dev/null
 "$CLI" help agent session-end | grep -- '--reason REASON' >/dev/null
@@ -37,6 +38,7 @@ grep -- '--plan-token PLAN_TOKEN' "$TMP/migrate-command.txt" >/dev/null
 "$CLI" help cancel-ack | grep -- '--evidence EVIDENCE' >/dev/null
 "$CLI" help cancel-withdraw | grep -- '--reason REASON' >/dev/null
 "$CLI" help notify targets | grep -- '--from-agent FROM_AGENT' >/dev/null
+"$CLI" help notify targets | grep 'outside_shift' >/dev/null
 "$CLI" help notify record | grep -- '--status {sent,failed}' >/dev/null
 "$CLI" help notify list | grep -- '--job JOB_ID' >/dev/null
 "$CLI" help watch | grep 'CR review first' >/dev/null

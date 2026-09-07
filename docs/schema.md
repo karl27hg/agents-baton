@@ -288,7 +288,8 @@ created_at=2026-06-02 09:00:00 UTC
 Purpose:
 
 - Stores dependency edges between jobs.
-- Allows `promote-ready` to determine when a `blocked` job can become `open`.
+- Allows `finish`, Gate release, and reconciliation commands to determine when a `blocked` job can become `open`.
+- Supports reverse inspection through `handoff successors` without assigning the downstream work.
 
 Columns:
 
@@ -313,6 +314,7 @@ depends_on_job_id=HO-2026-06-02-001
 Promotion rule:
 
 - A `blocked` job is promoted only when every `depends_on_job_id` is `finished`.
+- `finish` promotes eligible direct successors in the same transaction as the upstream completion.
 - A `failed` upstream is not successful completion. Its dependents remain `blocked` while its failure CR is reviewed and while a retry is pending.
 - If any required upstream job is `cancelled`, Baton recursively changes its blocked dependents to `cancelled`.
 - Each propagated transition records one `dependency_cancelled` handoff event with the immediate upstream job as its cause.
@@ -559,7 +561,7 @@ Columns:
 | `detail` | `text` | no | Result detail; required by CLI for failures. |
 | `created_at` | `text` | yes | Attempt time. |
 
-A partial unique index permits at most one `sent` row per handoff. Failed attempts remain available for fallback diagnosis. `notify targets` may promote only ready direct dependents of its finished source and returns active peer candidates that do not currently own an `in_progress` or `cancel_requested` handoff; it does not send a message. `notify record` records what the agent reports after using a host messaging tool. Neither operation claims the handoff. Authentication tokens and message bodies are not stored.
+A partial unique index permits at most one `sent` row per handoff. Failed attempts remain available for fallback diagnosis. `finish` normally promotes ready direct dependents; `notify targets` retains the same scoped promotion as a compatibility reconciliation path and returns active Codex peer candidates that do not currently own an `in_progress` or `cancel_requested` handoff. An applicable project-local global or target-role stop, including an expired shift, returns `outside_shift` without a candidate and leaves the handoff `open`. It does not send a message, and compatible peer messaging is not assumed for other model hosts. `notify record` records what the agent reports after using a host messaging tool. Neither operation claims the handoff. Authentication tokens and message bodies are not stored.
 
 ## `change_requests`
 
@@ -763,7 +765,8 @@ Blocked dependency flow:
 ```text
 handoff_jobs.status=blocked
 handoff_dependencies records dependency edges
-promote-ready updates status to open after dependencies are finished
+finish updates eligible direct successors to open after dependencies are finished
+promote-ready reconciles older or externally restored state
 handoff_events.event_type=promoted
 ```
 

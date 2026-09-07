@@ -468,7 +468,13 @@ If multiple agents share one workspace, do not let them share the same default i
 
 ## Opt-In Codex Peer Notifications
 
-Baton remains a persistent queue and does not call Codex itself. A project opts in when its existing Codex tasks register runtime endpoints. The agent sends the host message, then records the delivery result in Baton.
+Baton remains a persistent, host-neutral queue and does not call Codex itself. `finish` immediately opens each eligible direct successor. Inspect that transition without assigning work:
+
+```bash
+bin/baton handoff successors HO-FINISHED
+```
+
+The output shows status, required role, and the current claimant. `unassigned` means no concrete agent owns the handoff, even when it is `open`; only `claim` assigns it. A project may separately opt in to Codex peer notifications when its existing Codex tasks register runtime endpoints. Other model hosts are not assumed to implement the same message protocol.
 
 Register the stable profile's current Codex task and model:
 
@@ -483,7 +489,7 @@ bin/baton agent session-set \
 
 `agent_id` remains the durable identity used by claims. Thread IDs and model names are local runtime metadata; they do not grant role permissions. One profile has one active endpoint. Use `--replace` only after verifying a new thread, and deactivate an unreachable endpoint with `agent session-end --reason ...`. An active endpoint may be idle or completed in the UI as long as the host can still deliver a follow-up to it.
 
-After finishing a handoff, inspect its ready direct successors:
+After finishing a handoff, inspect optional Codex delivery candidates for its ready direct successors:
 
 ```bash
 bin/baton notify targets HO-FINISHED \
@@ -491,7 +497,7 @@ bin/baton notify targets HO-FINISHED \
   --from-agent frontend-main
 ```
 
-This promotes only direct dependents whose job dependencies are finished and whose Gates are released. Candidates with no active claim are ranked by their most recent session update. Send the handoff ID to one existing candidate Codex task, requiring it to run `handoff show` and `claim`. Then record the real host result:
+`finish` already promotes direct dependents whose job dependencies are finished and whose Gates are released. `notify targets` retains promotion as a compatibility reconciliation path and ranks active candidates with no current claim by their most recent session update. When the receiving role is stopped by a project-local global or role control, including shift expiry, it returns `outside_shift` and no delivery candidate. The ready handoff remains `open`. Send the handoff ID to one existing candidate Codex task only when the state is `candidate`, requiring it to run `handoff show` and `claim`. Then record the real host result:
 
 ```bash
 bin/baton notify record HO-READY \
@@ -581,6 +587,7 @@ bin/baton next --role frontend
 bin/baton handoff show HO-YYYY-MM-DD-001
 bin/baton claim HO-YYYY-MM-DD-001 --role frontend
 bin/baton finish HO-YYYY-MM-DD-001 --role frontend --evidence "Manual verification passed."
+bin/baton handoff successors HO-YYYY-MM-DD-001
 ```
 
 If claimed work cannot meet its exit criteria, report failure instead of calling `finish`:
@@ -608,11 +615,12 @@ bin/baton retry HO-YYYY-MM-DD-001 \
 
 The target role must claim the reopened job again. If retry should not proceed, reject the failure CR first and then use `cancel`; cancellation recursively closes only that blocked dependency branch. Cancelling a submitted failure CR administratively also cancels its failed job and blocked descendants.
 
-`next` is a queue hint, not the full work contract. Before claiming, use `handoff show` to read the objective, source reference, dependencies, Gates, and exit criteria. Use `handoff list` for read-only queue inspection:
+`next` is a queue hint, not the full work contract. Before claiming, use `handoff show` to read the objective, source reference, dependencies, Gates, and exit criteria. Use `handoff list` for read-only queue inspection, and `handoff successors` to inspect direct downstream state without assigning it:
 
 ```bash
 bin/baton handoff list --role frontend --status open
 bin/baton handoff show HO-YYYY-MM-DD-001 --format json
+bin/baton handoff successors HO-YYYY-MM-DD-001
 ```
 
 Inspect events:
@@ -886,6 +894,7 @@ Read-only commands do not claim ownership:
 - `next`
 - `handoff list`
 - `handoff show`
+- `handoff successors`
 - `events`
 - `gate status`
 - `gate events`
@@ -1014,7 +1023,7 @@ Required agent loop:
 6. If the work cannot satisfy its exit criteria, use `fail`; never report unsuccessful work with `finish`.
 7. After `finish` or failure reporting, return to step 2 while the shift remains active.
 
-A blocked handoff is not returned by `next`. `wait` keeps checking required upstream jobs and named Gates, then returns after every requirement is resolved and the handoff is promoted to `open`. A failed upstream keeps descendants blocked until its approved retry finishes. If a required upstream handoff or Gate is cancelled, Baton recursively marks that blocked dependency branch as `cancelled`; unrelated branches remain active.
+A blocked handoff is not returned by `next`. `finish` immediately promotes eligible direct successors, and Gate release does the same for its eligible dependents. `wait`, `watch`, and `promote-ready` retain reconciliation for older or externally restored state. A failed upstream keeps descendants blocked until its approved retry finishes. If a required upstream handoff or Gate is cancelled, Baton recursively marks that blocked dependency branch as `cancelled`; unrelated branches remain active.
 
 `--timeout 0` means wait forever, but that should be used only in explicit experiments. Normal workers must repeat bounded waits until their shift expires or a stop control is set.
 
