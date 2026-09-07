@@ -347,6 +347,14 @@ If multiple agents share one workspace, prefer explicit `--claimed-by <profile-n
 
 ## Opt-In Codex Peer Notification
 
+`finish` immediately promotes each direct successor whose other handoff dependencies are finished and whose Gates are released. Inspect the workflow transition without assigning the work:
+
+```bash
+bin/baton handoff successors <finished-job>
+```
+
+The output reports each direct successor's status, required role, and current claimant. `unassigned` means exactly that: an `open` successor is available to its `target_role`, but it does not belong to the inspecting or finishing agent. Only a successful `claim` establishes the concrete worker.
+
 Register an existing Codex task only when the project chooses peer notification:
 
 ```bash
@@ -357,7 +365,7 @@ bin/baton --db /tmp/baton.sqlite3 agent session-set \
   --model <model-id>
 ```
 
-After `finish`, inspect ready direct successors with `notify targets <finished-job> --role <role> --from-agent <profile>`. Send one candidate task the handoff ID and instructions to run `handoff show` and `claim`, then record `notify record <ready-job> --status sent|failed`. A successful message is not a claim. Failed or unavailable delivery falls back to the recipient's normal wait loop. Do not create a new task for notification.
+After `finish`, optionally inspect active Codex delivery candidates with `notify targets <finished-job> --role <role> --from-agent <profile>`. If the target role is stopped by the applicable project-local global or role control, including shift expiry, the command returns `outside_shift` without a candidate; do not send a host message. The successor remains `open` and becomes discoverable when its role resumes. Send one candidate task the handoff ID and instructions to run `handoff show` and `claim`, then record `notify record <ready-job> --status sent|failed`. A successful message is not a claim. Other hosts and models are not assumed to provide a compatible peer-message protocol; failed, unavailable, or unsupported delivery falls back to the recipient's normal `wait`/`watch` loop. Do not create a new task for notification.
 
 ## Wait Usage
 
@@ -371,7 +379,7 @@ bin/baton --db /tmp/baton.sqlite3 watch --role planning --timeout 900
 
 Use `watch` for planner/SM roles that receive both kinds of work. It checks assigned CR reviews first and then ready handoffs; a role without `cr.review` uses it as a handoff-only wait.
 
-`next` checks the queue once and exits immediately; it does not wait. If no ready handoff exists, run `wait`. A blocked handoff becomes visible after all required upstream handoffs finish and either `wait`/`watch`, `promote-ready`, or opt-in `notify targets` promotes it to `open`.
+`next` checks the queue once and exits immediately; it does not wait. If no ready handoff exists, run `wait`. `finish` immediately promotes eligible direct successors to `open`; `wait`, `watch`, and `promote-ready` retain reconciliation for previously written or externally restored state.
 
 No-op polling is silent. CLI output is produced for a ready job, an actual promotion or cancellation, timeout, or stop result. A worker must not relay an ordinary timeout as a user-facing update while its shift remains active.
 

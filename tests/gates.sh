@@ -80,27 +80,29 @@ fi
 UNRELATED_UPSTREAM="$($CLI --db "$DB" register \
   --title "Unrelated release scope" \
   --role backend \
-  --objective "Finish without global promotion." \
+  --objective "Finish with direct-successor promotion." \
   --exit-criteria "The job is finished." | awk '{print $1}')"
 UNRELATED_BLOCKED="$($CLI --db "$DB" register \
   --title "Unrelated blocked release scope" \
   --role ui-design \
   --depends-on "$UNRELATED_UPSTREAM" \
-  --objective "Require explicit global promotion." \
+  --objective "Open when its direct upstream finishes." \
   --exit-criteria "The upstream is finished." | awk '{print $1}')"
 "$CLI" --db "$DB" claim "$UNRELATED_UPSTREAM" --role backend --claimed-by gate-test >/dev/null
 "$CLI" --db "$DB" finish "$UNRELATED_UPSTREAM" --role backend --evidence "Finished." >/dev/null
+"$CLI" --db "$DB" next --role ui-design | grep "$UNRELATED_BLOCKED" >/dev/null
 "$CLI" --db "$DB" gate release planning-triage-complete \
   --role architecture \
   --evidence "Planning triage approved." \
   | grep 'promoted=1' >/dev/null
 "$CLI" --db "$DB" next --role qa | grep "$GATED" >/dev/null
-if "$CLI" --db "$DB" next --role ui-design >/dev/null 2>&1; then
-  echo "ERROR: gate release promoted an unrelated dependency branch" >&2
+"$CLI" --db "$DB" next --role ui-design | grep "$UNRELATED_BLOCKED" >/dev/null
+UNRELATED_PROMOTED_COUNT="$("$CLI" --db "$DB" events "$UNRELATED_BLOCKED" \
+  | awk -F '\t' '$2 == "promoted" { count++ } END { print count + 0 }')"
+if [[ "$UNRELATED_PROMOTED_COUNT" -ne 1 ]]; then
+  echo "ERROR: gate release changed an unrelated successor promotion" >&2
   exit 1
 fi
-"$CLI" --db "$DB" promote-ready >/dev/null
-"$CLI" --db "$DB" next --role ui-design | grep "$UNRELATED_BLOCKED" >/dev/null
 "$CLI" --db "$DB" gate events planning-triage-complete \
   | grep 'ownership_transferred' >/dev/null
 "$CLI" --db "$DB" gate events planning-triage-complete \

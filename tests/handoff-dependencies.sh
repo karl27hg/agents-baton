@@ -54,6 +54,37 @@ if [[ "$PROMOTED_COUNT" -ne 1 ]]; then
   exit 1
 fi
 
+MULTI_DB="$TMP/multiple.sqlite3"
+"$CLI" --db "$MULTI_DB" init >/dev/null
+FIRST="$("$CLI" --db "$MULTI_DB" register \
+  --title "First prerequisite" \
+  --role backend \
+  --objective "Complete the first prerequisite." \
+  --exit-criteria "The first result is recorded." | awk '{print $1}')"
+SECOND="$("$CLI" --db "$MULTI_DB" register \
+  --title "Second prerequisite" \
+  --role qa \
+  --objective "Complete the second prerequisite." \
+  --exit-criteria "The second result is recorded." | awk '{print $1}')"
+JOINED="$("$CLI" --db "$MULTI_DB" register \
+  --title "Joined successor" \
+  --role frontend \
+  --depends-on "$FIRST" \
+  --depends-on "$SECOND" \
+  --objective "Start only after both prerequisites." \
+  --exit-criteria "Both finished results are consumed." | awk '{print $1}')"
+"$CLI" --db "$MULTI_DB" claim "$FIRST" --role backend --claimed-by backend-main >/dev/null
+"$CLI" --db "$MULTI_DB" finish "$FIRST" --role backend --evidence "First prerequisite complete." >/dev/null
+"$CLI" --db "$MULTI_DB" handoff show "$JOINED" | grep 'status: blocked' >/dev/null
+"$CLI" --db "$MULTI_DB" claim "$SECOND" --role qa --claimed-by qa-main >/dev/null
+"$CLI" --db "$MULTI_DB" finish "$SECOND" --role qa --evidence "Second prerequisite complete." >/dev/null
+"$CLI" --db "$MULTI_DB" handoff show "$JOINED" | grep 'status: open' >/dev/null
+MULTI_PROMOTED_COUNT="$("$CLI" --db "$MULTI_DB" events "$JOINED" | awk -F '\t' '$2 == "promoted" { count++ } END { print count + 0 }')"
+if [[ "$MULTI_PROMOTED_COUNT" -ne 1 ]]; then
+  echo "ERROR: expected one multi-dependency promoted event, got $MULTI_PROMOTED_COUNT" >&2
+  exit 1
+fi
+
 CANCEL_DB="$TMP/cancel.sqlite3"
 CR_DIR="$TMP/change-requests"
 "$CLI" --db "$CANCEL_DB" init >/dev/null

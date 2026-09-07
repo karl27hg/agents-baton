@@ -549,9 +549,11 @@ Automatic discovery recognizes `.baton/baton.sqlite3`, `tools/baton/.baton/baton
 
 The installed CLI does not call Codex or hold Codex credentials. Existing Codex tasks opt in by recording their stable profile, role, thread ID, and model with `agent session-set`. The thread and model are runtime metadata only; Baton permissions and claims continue to use role and stable `agent_id`.
 
-After a handoff finishes, its agent can run `notify targets <finished-job> --role <role> --from-agent <profile>`. Baton promotes only ready direct dependents and lists existing peer candidates, ranked by recent session update. The agent sends one candidate a host follow-up containing the receiving handoff ID, then records the actual result with `notify record --status sent|failed`. The receiver must inspect and claim the handoff before editing.
+`finish` immediately opens eligible direct dependents. Any agent may inspect direct downstream state with `handoff successors <finished-job>`; the reported role is eligibility, and `unassigned` never means the inspecting agent owns the work. Only `claim` establishes the concrete worker.
 
-Registration itself is the opt-in switch; projects that do not register sessions retain the existing polling behavior. Keep `wait`/`watch` for CR monitoring, unassigned role queues, inaccessible or stale tasks, failed messages, and non-Codex environments. Do not create new Codex tasks as part of this flow. End stale endpoints explicitly, and use `--replace` only after verifying the replacement task. Baton stores no host token or message body.
+After a handoff finishes, its agent can optionally run `notify targets <finished-job> --role <role> --from-agent <profile>` to list existing Codex peer candidates, ranked by recent session update. A project-local global or target-role stop, including shift expiry, returns `outside_shift` instead of a candidate; the handoff stays `open` and no host message should be sent. The agent sends one `candidate` a host follow-up containing the receiving handoff ID, then records the actual result with `notify record --status sent|failed`. The receiver must inspect and claim the handoff before editing.
+
+Registration itself is the opt-in switch; projects that do not register sessions retain the existing polling behavior. Baton does not assume that other models or hosts provide a compatible task-message protocol. Keep `wait`/`watch` for CR monitoring, unassigned role queues, inaccessible or stale tasks, failed messages, and non-Codex environments. Do not create new Codex tasks as part of this flow. End stale endpoints explicitly, and use `--replace` only after verifying the replacement task. Baton stores no host token or message body.
 
 ## When To Avoid Sharing One Database
 

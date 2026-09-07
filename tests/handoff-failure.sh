@@ -51,7 +51,9 @@ fi
 "$CLI" handoff show "$UPSTREAM" | grep '^status: open$' >/dev/null
 "$CLI" claim "$UPSTREAM" --role backend --claimed-by failure-retry >/dev/null
 "$CLI" finish "$UPSTREAM" --role backend --evidence "Corrected contract validated." >/dev/null
-"$CLI" promote-ready | grep "$DEPENDENT" >/dev/null
+"$CLI" handoff show "$DEPENDENT" | grep '^status: open$' >/dev/null
+"$CLI" events "$DEPENDENT" \
+  | awk -F '\t' '$2 == "promoted" { count++ } END { exit count != 1 }'
 "$CLI" cr mark-implemented "$CR_ID" --role planning --evidence "Retry completed successfully." >/dev/null
 
 CANCEL_ROOT="$("$CLI" register \

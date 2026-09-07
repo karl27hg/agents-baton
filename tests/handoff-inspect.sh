@@ -29,6 +29,12 @@ printf '%s\n' "$SHOW_OUTPUT" | grep "source_ref: docs/downstream.md" >/dev/null
 printf '%s\n' "$SHOW_OUTPUT" | grep "depends_on: $UPSTREAM" >/dev/null
 "$CLI" --db "$DB" handoff show "$DOWNSTREAM" --format json | grep '"status": "blocked"' >/dev/null
 
+SUCCESSORS_OUTPUT="$("$CLI" --db "$DB" handoff successors "$UPSTREAM")"
+printf '%s\n' "$SUCCESSORS_OUTPUT" \
+  | grep "$DOWNSTREAM.*status=blocked.*target_role=frontend.*claimed_by=unassigned" >/dev/null
+"$CLI" --db "$DB" handoff successors "$UPSTREAM" --format json \
+  | grep '"claimed_by": null' >/dev/null
+
 "$CLI" --db "$DB" handoff list --role frontend --status blocked | grep "$DOWNSTREAM" >/dev/null
 if "$CLI" --db "$DB" handoff list --role backend --status blocked | grep "$DOWNSTREAM" >/dev/null; then
   echo "ERROR: handoff list role filter leaked another role" >&2
@@ -36,6 +42,20 @@ if "$CLI" --db "$DB" handoff list --role backend --status blocked | grep "$DOWNS
 fi
 if "$CLI" --db "$DB" handoff list --limit 0 >/dev/null 2>&1; then
   echo "ERROR: handoff list accepted a non-positive limit" >&2
+  exit 1
+fi
+
+"$CLI" --db "$DB" claim "$UPSTREAM" --role backend --claimed-by backend-main >/dev/null
+"$CLI" --db "$DB" finish "$UPSTREAM" --role backend --evidence "Upstream inspection complete." >/dev/null
+"$CLI" --db "$DB" handoff successors "$UPSTREAM" \
+  | grep "$DOWNSTREAM.*status=open.*target_role=frontend.*claimed_by=unassigned" >/dev/null
+"$CLI" --db "$DB" claim "$DOWNSTREAM" --role frontend --claimed-by frontend-main >/dev/null
+"$CLI" --db "$DB" handoff successors "$UPSTREAM" \
+  | grep "$DOWNSTREAM.*status=in_progress.*target_role=frontend.*claimed_by=frontend-main" >/dev/null
+
+if ! "$CLI" --db "$DB" handoff successors "$DOWNSTREAM" \
+  | grep "No direct successor handoffs for $DOWNSTREAM." >/dev/null; then
+  echo "ERROR: leaf successor inspection did not report an empty result" >&2
   exit 1
 fi
 

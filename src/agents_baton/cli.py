@@ -4220,6 +4220,42 @@ def command_handoff_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_handoff_successors(args: argparse.Namespace) -> int:
+    with connect(args.db) as con:
+        init_schema(con)
+        source = con.execute(
+            "select 1 from handoff_jobs where job_id = ?",
+            (args.job_id,),
+        ).fetchone()
+        if not source:
+            raise SystemExit(f"ERROR: unknown job: {args.job_id}")
+        rows = con.execute(
+            """
+            select job.job_id, job.status, job.target_role, job.claimed_by, job.title
+            from handoff_jobs job
+            join handoff_dependencies dependency on dependency.job_id = job.job_id
+            where dependency.depends_on_job_id = ?
+            order by job.created_at, job.job_id
+            """,
+            (args.job_id,),
+        ).fetchall()
+    payload = [{key: row[key] for key in row.keys()} for row in rows]
+    if args.format == "json":
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0
+    if not rows:
+        print(f"No direct successor handoffs for {args.job_id}.")
+        return 0
+    for row in rows:
+        claimant = row["claimed_by"] or "unassigned"
+        print(
+            f"{row['job_id']}\tstatus={row['status']}\t"
+            f"target_role={row['target_role']}\tclaimed_by={claimant}\t"
+            f"title={row['title']}"
+        )
+    return 0
+
+
 def command_next(args: argparse.Namespace) -> int:
     with connect(args.db) as con:
         init_schema(con)
@@ -4347,6 +4383,7 @@ def command_finish(args: argparse.Namespace) -> int:
             (utc_now(), evidence, args.commit, args.job_id),
         )
         event(con, "finished", job_id=args.job_id, actor_role=role, from_status="in_progress", to_status="finished", message=evidence)
+        promote_ready_direct_dependents(con, args.job_id, role)
         con.commit()
     print(f"Finished {args.job_id}")
     return 0
@@ -4794,7 +4831,7 @@ def promote_ready_direct_dependents(
             actor_role=actor_role,
             from_status="blocked",
             to_status="open",
-            message=f"Ready after {source_job_id}; opt-in notification planning.",
+            message=f"Ready after {source_job_id}.",
         )
         promoted.append(row["job_id"])
     return promoted
@@ -4869,6 +4906,21 @@ def command_notify_targets(args: argparse.Namespace) -> int:
                         "host": notified["transport"],
                         "thread_id": notified["recipient_thread_id"],
                         "model": notified["recipient_model"],
+                    }
+                )
+                continue
+            stopped = get_stop_control(con, job["target_role"])
+            if stopped:
+                payload.append(
+                    {
+                        "job_id": job["job_id"],
+                        "target_role": job["target_role"],
+                        "title": job["title"],
+                        "state": "outside_shift",
+                        "agent_id": "",
+                        "host": "",
+                        "thread_id": "",
+                        "model": "",
                     }
                 )
                 continue
@@ -5543,6 +5595,14 @@ def build_parser() -> argparse.ArgumentParser:
     handoff_list.add_argument("--limit", type=int, default=100)
     handoff_list.add_argument("--format", choices=("text", "json"), default="text")
     handoff_list.set_defaults(func=command_handoff_list)
+    handoff_successors = handoff_sub.add_parser(
+        "successors",
+        help="inspect direct successor handoffs without assigning work",
+        description="Inspect direct successor handoffs without assigning work.",
+    )
+    handoff_successors.add_argument("job_id", help="upstream handoff")
+    handoff_successors.add_argument("--format", choices=("text", "json"), default="text")
+    handoff_successors.set_defaults(func=command_handoff_successors)
     sub.add_parser("promote-ready", help="promote dependency-ready handoffs").set_defaults(
         func=command_promote_ready,
         actor_role="sm",
@@ -5877,6 +5937,10 @@ def build_parser() -> argparse.ArgumentParser:
     notify_targets = notify_sub.add_parser(
         "targets",
         help="show ready direct dependents and ranked active peer sessions",
+        description=(
+            "Show ready direct dependents and ranked active peer sessions. "
+            "A stopped or expired target role returns outside_shift with no delivery candidate."
+        ),
     )
     notify_targets.add_argument("job_id", help="finished source handoff")
     notify_targets.add_argument("--role", required=True, help="role planning the notification")

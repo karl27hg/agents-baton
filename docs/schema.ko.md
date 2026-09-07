@@ -288,7 +288,8 @@ created_at=2026-06-02 09:00:00 UTC
 용도:
 
 - job 사이의 의존성 edge를 저장합니다.
-- `promote-ready`가 `blocked` job을 언제 `open`으로 바꿀 수 있는지 판단하게 합니다.
+- `finish`, Gate release 및 reconciliation 명령이 `blocked` job을 언제 `open`으로 바꿀 수 있는지 판단하게 합니다.
+- `handoff successors`가 하위 작업을 배정하지 않고 역방향으로 조회할 수 있게 합니다.
 
 컬럼:
 
@@ -313,6 +314,7 @@ depends_on_job_id=HO-2026-06-02-001
 승격 규칙:
 
 - `blocked` job은 모든 `depends_on_job_id`가 `finished` 상태일 때만 `open`으로 승격됩니다.
+- `finish`는 upstream 완료와 같은 transaction에서 조건을 충족한 직접 하위 job을 승격합니다.
 - upstream이 `failed`이면 성공 완료가 아니므로 실패 CR 심사와 재시도 동안 하위 job은 `blocked`로 유지됩니다.
 - 필수 upstream job 중 하나라도 `cancelled`가 되면 Baton은 이를 기다리는 blocked job을 재귀적으로 `cancelled`로 변경합니다.
 - 전파된 각 상태 변경에는 직접적인 upstream job을 원인으로 기록한 `dependency_cancelled` handoff event가 한 번 남습니다.
@@ -559,7 +561,7 @@ Claim 동작:
 | `detail` | `text` | 아니오 | 결과 상세이며 CLI는 실패 시 필수로 요구합니다. |
 | `created_at` | `text` | 예 | 전달 시도 시각입니다. |
 
-partial unique index는 handoff마다 최대 하나의 `sent` row만 허용합니다. 실패 시도는 fallback 진단을 위해 보존합니다. `notify targets`는 finished source의 ready 직접 하위 작업만 promote하고 현재 `in_progress` 또는 `cancel_requested` handoff를 소유하지 않은 active peer 후보를 반환하며 message를 보내지 않습니다. `notify record`는 agent가 host messaging tool을 사용한 후 보고한 결과를 기록합니다. 어느 명령도 handoff를 claim하지 않습니다. 인증 token과 message 본문은 저장하지 않습니다.
+partial unique index는 handoff마다 최대 하나의 `sent` row만 허용합니다. 실패 시도는 fallback 진단을 위해 보존합니다. 일반적으로 `finish`가 ready 직접 하위 작업을 승격하며, `notify targets`는 호환성 reconciliation을 위해 동일한 범위의 승격을 유지하고 현재 `in_progress` 또는 `cancel_requested` handoff를 소유하지 않은 active Codex peer 후보를 반환합니다. 프로젝트 로컬 global 또는 대상 role stop이 적용되거나 shift가 만료된 경우에는 후보 없이 `outside_shift`를 반환하며 handoff는 `open`으로 유지됩니다. 이 명령은 message를 보내지 않으며 다른 model host가 호환되는 peer messaging을 제공한다고 가정하지 않습니다. `notify record`는 agent가 host messaging tool을 사용한 후 보고한 결과를 기록합니다. 어느 명령도 handoff를 claim하지 않습니다. 인증 token과 message 본문은 저장하지 않습니다.
 
 ## `change_requests`
 
@@ -763,7 +765,8 @@ Blocked dependency flow:
 ```text
 handoff_jobs.status=blocked
 handoff_dependencies records dependency edges
-promote-ready updates status to open after dependencies are finished
+finish updates eligible direct successors to open after dependencies are finished
+promote-ready reconciles older or externally restored state
 handoff_events.event_type=promoted
 ```
 
