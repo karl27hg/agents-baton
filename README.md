@@ -192,7 +192,7 @@ baton migrate --check
 baton project info
 ```
 
-Only `baton migrate`, its deprecated `update` alias, and the checked project migration flow may change the schema. Normal workflow commands reject a pending migration. `baton migrate` writes a validated backup under the database's `backups/` directory before applying pending migrations, then performs the migration transactionally. Avoid downgrading to an older Baton after a schema migration because an older executable may not support the newer database schema.
+Only `baton migrate`, its deprecated `update` alias, and the checked project migration flow may change the schema. Normal workflow commands reject a pending migration. `baton migrate` writes a validated backup under the database's `backups/` directory before applying pending migrations, then performs the migration transactionally. Migration is refused while waiters, active handoffs, cancellation acknowledgements, or claimed submitted CR reviews remain active. Avoid downgrading to an older Baton after a schema migration because an older executable may not support the newer database schema.
 
 Released schema migrations are append-only and retained so a dormant project can upgrade directly across multiple tagged Baton versions when it is next used. Compatibility covers released Baton schemas and recognized unversioned legacy databases, not arbitrary development snapshots, manually edited schemas, or downgrade operations.
 
@@ -466,6 +466,29 @@ The default identity file is ignored by git:
 
 If multiple agents share one workspace, do not let them share the same default identity file unless they intentionally represent the same profile. In that case, use `--claimed-by` or `BATON_AGENT_ID` with the assigned profile name for each agent.
 
+### Workstream Routing
+
+`role` is the authorization boundary. An optional `workstream` narrows a handoff or CR review to agents that registered the matching specialization within that role. This avoids creating many near-duplicate roles such as separate integration roles for API, UI, and migrations.
+
+```bash
+bin/baton role add integration --display-name "Integration"
+bin/baton agent workstream-add api-contract \
+  --role integration \
+  --agent-id integration-api
+bin/baton agent workstream-list --role integration
+
+bin/baton register \
+  --title "Verify API compatibility" \
+  --role integration \
+  --workstream api-contract \
+  --objective "Verify the changed API contract." \
+  --exit-criteria "Compatibility evidence is recorded."
+```
+
+Use stable domain names for workstreams, not agent names. A handoff without `--workstream` remains eligible to every agent in its target role for backward compatibility. `next`, `wait`, `watch`, and CR review waiting use `--agent-id`, `BATON_AGENT_ID`, or the local identity file to match specialized work.
+
+Baton permits one active claimed handoff or submitted CR review per concrete agent identity. Finish, fail, cancel, decide, or release the current unit before claiming another. This is a workflow capacity guard, not a promise that source changes are conflict-free.
+
 ## Opt-In Codex Peer Notifications
 
 Baton remains a persistent, host-neutral queue and does not call Codex itself. `finish` immediately opens each eligible direct successor. Inspect that transition without assigning work:
@@ -518,6 +541,14 @@ bin/baton notify list --job HO-READY
 
 Successful delivery means the sender does not need to wait solely to wake that successor. Polling remains required for CR monitoring, unassigned role work, unavailable endpoints, delivery failures, and non-Codex hosts.
 
+### Converging Work and Message Pile-Up
+
+`notify targets` respects workstream registration and excludes agents that own an `in_progress` or `cancel_requested` handoff or a claimed submitted CR review. CR reviewers use `cr claim-review`, so a review has one visible concrete owner. Message delivery still does not reserve capacity; the receiver must inspect and claim the handoff before editing, and two senders can briefly observe the same idle recipient before either claim commits.
+
+An incoming message never preempts active work. The receiver completes or safely stops its current Baton unit first, then re-reads the queue with `watch`/`next`, inspects the referenced item, and claims it only if it is still eligible. Planners should represent convergence as one handoff depending on every required branch, or hold it behind a Gate, instead of dispatching a separate review message as each branch finishes.
+
+Integration is usually a deliberate fan-in bottleneck: evidence collection can run in parallel, but the final merge, acceptance decision, shared-environment mutation, and Gate release should have one owner. Split independent checks into workstreams such as `api-contract`, `ui-regression`, and `data-migration`; then make one integration handoff depend on all of them. Parallelizing the final decision itself risks conflicting merges, inconsistent baselines, and duplicate release actions.
+
 ## Optional Git Workspace Integration
 
 Baton remains Git-independent. Add a shared `baton.toml` only when the project should record commit provenance and detect likely checkout mismatches. In a worktree layout, keep this file beside the common control DB rather than maintaining branch-specific copies:
@@ -569,6 +600,7 @@ Register a dependent handoff:
 bin/baton register \
   --title "QA regression" \
   --role qa \
+  --workstream ui-regression \
   --depends-on HO-YYYY-MM-DD-001 \
   --objective "Verify the completed implementation." \
   --exit-criteria "QA evidence is recorded."
@@ -736,6 +768,23 @@ Reviewer roles can wait for submitted CRs:
 ```bash
 bin/baton cr wait-review --role sm --timeout 900
 ```
+
+For a specialized review queue, route the CR and claim it as one concrete reviewer:
+
+```bash
+bin/baton cr create \
+  --title "API compatibility decision" \
+  --author-role planning \
+  --reviewer-role integration \
+  --reviewer-workstream api-contract
+
+bin/baton cr wait-review --role integration --agent-id integration-api --timeout 900
+bin/baton cr claim-review CR-YYYY-MM-DD-001 \
+  --role integration \
+  --claimed-by integration-api
+```
+
+Only the claimant may approve, reject, or request revision for a claimed review. Use `cr release-review --reason ...` to yield an undecided submitted review. Role-only CRs retain the earlier unclaimed review flow for compatibility.
 
 If the CR needs more work, request a revision. Baton creates a revision handoff for the CR author role, includes the review reason in its objective, and prevents another revision request until the CR is resubmitted. `--assign-back` may only name that author role; delegated resubmission is not supported.
 
@@ -924,6 +973,7 @@ tests/auto-interval.sh
 tests/agent-id.sh
 tests/cr-flow.sh
 tests/gates.sh
+tests/workstream-routing.sh
 tests/handoff-cancel.sh
 tests/handoff-dependencies.sh
 tests/migrate.sh

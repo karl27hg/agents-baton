@@ -88,7 +88,7 @@ FAILURE_REVIEW_PERMISSIONS = {
 KNOWN_PERMISSIONS = (
     REVIEW_PERMISSIONS | HANDOFF_PERMISSIONS | GATE_PERMISSIONS | WORKSPACE_PERMISSIONS
 )
-LATEST_SCHEMA_VERSION = 10
+LATEST_SCHEMA_VERSION = 11
 PROJECT_FORMAT_VERSION = 1
 PROJECT_MARKER_NAME = "project.json"
 PROJECT_CONFIG_NAME = "baton.toml"
@@ -219,6 +219,15 @@ def normalize_gate_name(name: str) -> str:
     return normalized
 
 
+def normalize_workstream(name: str) -> str:
+    normalized = name.strip().lower().replace("_", "-").replace(" ", "-")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9.-]*", normalized):
+        raise SystemExit(
+            "ERROR: workstream must contain only lowercase letters, digits, dots, and hyphens"
+        )
+    return normalized
+
+
 def slugify(value: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", value.strip().lower())
     return slug.strip("-") or "change-request"
@@ -323,6 +332,84 @@ def agent_id_value(args: argparse.Namespace, option_name: str = "agent_id") -> s
             "or 'baton agent init'"
         )
     return agent_id
+
+
+def optional_agent_id(args: argparse.Namespace, option_name: str = "agent_id") -> str:
+    explicit = getattr(args, option_name, "") or ""
+    return explicit.strip() or read_agent_id(args)
+
+
+def agent_has_workstream(
+    con: sqlite3.Connection,
+    agent_id: str,
+    role: str,
+    workstream: str,
+) -> bool:
+    return bool(
+        con.execute(
+            """
+            select 1
+            from agent_workstreams
+            where agent_id = ? and role_id = ? and workstream = ?
+            """,
+            (agent_id, role, workstream),
+        ).fetchone()
+    )
+
+
+def require_workstream_assignment(
+    con: sqlite3.Connection,
+    agent_id: str,
+    role: str,
+    workstream: str | None,
+) -> None:
+    if not workstream:
+        return
+    if not agent_has_workstream(con, agent_id, role, workstream):
+        raise SystemExit(
+            f"ERROR: agent {agent_id} is not registered for "
+            f"role={role} workstream={workstream}"
+        )
+
+
+def require_agent_capacity(
+    con: sqlite3.Connection,
+    agent_id: str,
+    *,
+    handoff_id: str = "",
+    cr_id: str = "",
+) -> None:
+    handoff = con.execute(
+        """
+        select job_id
+        from handoff_jobs
+        where claimed_by = ? and status in ('in_progress', 'cancel_requested')
+          and job_id != ?
+        order by created_at, job_id
+        limit 1
+        """,
+        (agent_id, handoff_id),
+    ).fetchone()
+    if handoff:
+        raise SystemExit(
+            f"ERROR: agent {agent_id} already owns active handoff {handoff['job_id']}; "
+            "finish, fail, or release it before claiming more work"
+        )
+    review = con.execute(
+        """
+        select cr_id
+        from change_requests
+        where review_claimed_by = ? and status = 'submitted' and cr_id != ?
+        order by submitted_at, created_at, cr_id
+        limit 1
+        """,
+        (agent_id, cr_id),
+    ).fetchone()
+    if review:
+        raise SystemExit(
+            f"ERROR: agent {agent_id} already owns active CR review {review['cr_id']}; "
+            "complete or release it before claiming more work"
+        )
 
 
 SCHEMA_V1_SQL = """
@@ -842,6 +929,41 @@ def migration_v10_opt_in_thread_notifications(con: sqlite3.Connection) -> None:
     )
 
 
+def migration_v11_workstream_routing(con: sqlite3.Connection) -> None:
+    handoff_columns = {
+        row["name"] for row in con.execute("PRAGMA table_info(handoff_jobs)").fetchall()
+    }
+    if "workstream" not in handoff_columns:
+        con.execute("alter table handoff_jobs add column workstream text")
+    cr_columns = {
+        row["name"] for row in con.execute("PRAGMA table_info(change_requests)").fetchall()
+    }
+    for column in ("reviewer_workstream", "review_claimed_by", "review_started_at"):
+        if column not in cr_columns:
+            con.execute(f"alter table change_requests add column {column} text")
+    execute_sql_script(
+        con,
+        """
+        create table if not exists agent_workstreams (
+          agent_id text not null,
+          role_id text not null references roles(role_id) on delete cascade,
+          workstream text not null,
+          created_at text not null,
+          primary key (agent_id, role_id, workstream)
+        );
+
+        create index if not exists idx_agent_workstreams_route
+          on agent_workstreams(role_id, workstream, agent_id);
+        create index if not exists idx_handoff_jobs_workstream
+          on handoff_jobs(status, target_role, workstream);
+        create index if not exists idx_cr_reviewer_workstream
+          on change_requests(status, reviewer_role, reviewer_workstream);
+        create index if not exists idx_cr_review_claim
+          on change_requests(review_claimed_by, status);
+        """,
+    )
+
+
 MIGRATIONS = (
     (1, "initial_schema", migration_v1_initial_schema),
     (2, "handoff_cancel_permission", migration_v2_handoff_cancel_permission),
@@ -853,6 +975,7 @@ MIGRATIONS = (
     (8, "cr_body_integrity", migration_v8_cr_body_integrity),
     (9, "plan_revision_controls", migration_v9_plan_revision_controls),
     (10, "opt_in_thread_notifications", migration_v10_opt_in_thread_notifications),
+    (11, "workstream_routing", migration_v11_workstream_routing),
 )
 
 
@@ -1585,6 +1708,25 @@ def in_progress_handoff_count(con: sqlite3.Connection) -> int:
     )
 
 
+def active_cr_review_count(con: sqlite3.Connection) -> int:
+    if "change_requests" not in database_table_names(con):
+        return 0
+    columns = {
+        row["name"] for row in con.execute("PRAGMA table_info(change_requests)").fetchall()
+    }
+    if "review_claimed_by" not in columns:
+        return 0
+    return int(
+        con.execute(
+            """
+            select count(*)
+            from change_requests
+            where status = 'submitted' and review_claimed_by is not null
+            """
+        ).fetchone()[0]
+    )
+
+
 def global_stop_is_active(con: sqlite3.Connection) -> bool:
     if "handoff_controls" not in database_table_names(con):
         return False
@@ -1620,6 +1762,7 @@ def inspect_project_migration(root: Path, source: Path, target: Path) -> dict[st
                 applied_migration_versions(source_con)
             waiters = active_waiter_count(source_con)
             in_progress = in_progress_handoff_count(source_con)
+            active_reviews = active_cr_review_count(source_con)
             globally_stopped = global_stop_is_active(source_con)
             probe = sqlite3.connect(":memory:")
             probe.row_factory = sqlite3.Row
@@ -1656,6 +1799,7 @@ def inspect_project_migration(root: Path, source: Path, target: Path) -> dict[st
         "layout_move": source.resolve() != target.resolve(),
         "active_waiters": waiters,
         "in_progress_handoffs": in_progress,
+        "active_cr_reviews": active_reviews,
         "global_stop": globally_stopped,
         "project_marker": marker_exists,
         "token": token,
@@ -1676,6 +1820,7 @@ def print_project_migration_plan(plan: dict[str, object]) -> None:
     print(f"layout_move: {'yes' if plan['layout_move'] else 'no'}")
     print(f"active_waiters: {plan['active_waiters']}")
     print(f"in_progress_handoffs: {plan['in_progress_handoffs']}")
+    print(f"active_cr_reviews: {plan['active_cr_reviews']}")
     print(f"global_stop: {'yes' if plan['global_stop'] else 'no'}")
     print(f"project_marker: {'present' if plan['project_marker'] else 'missing'}")
     print(f"plan_token: {plan['token']}")
@@ -1724,6 +1869,11 @@ def command_project_migrate(args: argparse.Namespace) -> int:
         raise MigrationError(
             f"cannot migrate while {plan['in_progress_handoffs']} handoff(s) are in progress; "
             "finish or cancel them and check again"
+        )
+    if plan["active_cr_reviews"]:
+        raise MigrationError(
+            f"cannot migrate while {plan['active_cr_reviews']} CR review(s) are claimed; "
+            "decide or release them and check again"
         )
     if plan["layout_move"] and not plan["global_stop"]:
         raise MigrationError(
@@ -2337,6 +2487,8 @@ def cr_frontmatter(row: sqlite3.Row) -> str:
         "status": row["status"],
         "author_role": row["author_role"],
         "reviewer_role": row["reviewer_role"],
+        "reviewer_workstream": row["reviewer_workstream"] or "",
+        "review_claimed_by": row["review_claimed_by"] or "",
         "revision_count": str(row["revision_count"]),
         "active_revision_job_id": row["active_revision_job_id"] or "",
         "submitted_body_hash": row["submitted_body_hash"] or "",
@@ -2734,6 +2886,12 @@ def command_migrate(args: argparse.Namespace) -> int:
                 f"cannot migrate while {active_handoffs} handoff(s) are in progress or awaiting "
                 "cancellation acknowledgement; finish or cancel them and retry"
             )
+        active_reviews = active_cr_review_count(con)
+        if active_reviews:
+            raise MigrationError(
+                f"cannot migrate while {active_reviews} CR review(s) are claimed; "
+                "decide or release them and retry"
+            )
         signature = database_content_signature(con)
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -2899,6 +3057,102 @@ def command_agent_show(args: argparse.Namespace) -> int:
         print("No agent id configured.")
         return 1
     print(agent_id)
+    return 0
+
+
+def command_agent_workstream_add(args: argparse.Namespace) -> int:
+    agent_id = agent_id_value(args)
+    workstream = normalize_workstream(args.workstream)
+    with connect(args.db) as con:
+        init_schema(con)
+        begin_immediate(con)
+        role = resolve_role(con, args.role)
+        added = con.execute(
+            """
+            insert into agent_workstreams(agent_id, role_id, workstream, created_at)
+            values (?, ?, ?, ?)
+            on conflict(agent_id, role_id, workstream) do nothing
+            """,
+            (agent_id, role, workstream, utc_now()),
+        ).rowcount
+        if added:
+            event(
+                con,
+                "agent_workstream_added",
+                actor_role=role,
+                actor_id=agent_id,
+                message=workstream,
+            )
+        con.commit()
+    print(f"{agent_id}\t{role}\t{workstream}\t{'added' if added else 'exists'}")
+    return 0
+
+
+def command_agent_workstream_remove(args: argparse.Namespace) -> int:
+    agent_id = agent_id_value(args)
+    workstream = normalize_workstream(args.workstream)
+    with connect(args.db) as con:
+        init_schema(con)
+        begin_immediate(con)
+        role = resolve_role(con, args.role)
+        removed = con.execute(
+            "delete from agent_workstreams where agent_id = ? and role_id = ? and workstream = ?",
+            (agent_id, role, workstream),
+        ).rowcount
+        if removed != 1:
+            raise SystemExit(
+                f"ERROR: workstream registration does not exist: "
+                f"agent={agent_id} role={role} workstream={workstream}"
+            )
+        event(
+            con,
+            "agent_workstream_removed",
+            actor_role=role,
+            actor_id=agent_id,
+            message=workstream,
+        )
+        con.commit()
+    print(f"{agent_id}\t{role}\t{workstream}\tremoved")
+    return 0
+
+
+def command_agent_workstream_list(args: argparse.Namespace) -> int:
+    agent_id = args.agent_id.strip()
+    conditions: list[str] = []
+    params: list[str] = []
+    with connect(args.db) as con:
+        init_schema(con)
+        if agent_id:
+            conditions.append("agent_id = ?")
+            params.append(agent_id)
+        if args.role:
+            conditions.append("role_id = ?")
+            params.append(resolve_role(con, args.role))
+        where = f"where {' and '.join(conditions)}" if conditions else ""
+        rows = con.execute(
+            f"""
+            select agent_id, role_id, workstream, created_at
+            from agent_workstreams
+            {where}
+            order by agent_id, role_id, workstream
+            """,
+            params,
+        ).fetchall()
+    if args.format == "json":
+        print(
+            json.dumps(
+                [{key: row[key] for key in row.keys()} for row in rows],
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+    elif not rows:
+        print("No agent workstreams.")
+    else:
+        for row in rows:
+            print(
+                f"{row['agent_id']}\t{row['role_id']}\t{row['workstream']}\t{row['created_at']}"
+            )
     return 0
 
 
@@ -3076,8 +3330,10 @@ def create_handoff_job(
     depends_on: list[str],
     depends_on_gates: list[str],
     actor_role: str,
+    workstream: str = "",
 ) -> tuple[str, str, str]:
     target_role = resolve_role(con, role)
+    normalized_workstream = normalize_workstream(workstream) if workstream.strip() else None
     dependency_statuses: dict[str, str] = {}
     for dep in depends_on:
         dependency = con.execute(
@@ -3114,10 +3370,23 @@ def create_handoff_job(
     )
     con.execute(
         """
-        insert into handoff_jobs(job_id, title, status, target_role, source_ref, objective, exit_criteria, created_at)
-        values (?, ?, ?, ?, ?, ?, ?, ?)
+        insert into handoff_jobs(
+          job_id, title, status, target_role, workstream,
+          source_ref, objective, exit_criteria, created_at
+        )
+        values (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (job_id, title, status, target_role, source_ref, objective, exit_criteria, utc_now()),
+        (
+            job_id,
+            title,
+            status,
+            target_role,
+            normalized_workstream,
+            source_ref,
+            objective,
+            exit_criteria,
+            utc_now(),
+        ),
     )
     for dep in depends_on:
         con.execute(
@@ -3155,6 +3424,7 @@ def command_register(args: argparse.Namespace) -> int:
             depends_on,
             args.depends_on_gate or [],
             actor_role,
+            args.workstream,
         )
         apply_workspace_policy(
             con,
@@ -3166,7 +3436,8 @@ def command_register(args: argparse.Namespace) -> int:
             actor_role=actor_role,
         )
         con.commit()
-    print(f"{job_id}\t{status}\t{role}")
+    route = f"\t{normalize_workstream(args.workstream)}" if args.workstream.strip() else ""
+    print(f"{job_id}\t{status}\t{role}{route}")
     return 0
 
 
@@ -3389,6 +3660,11 @@ def command_cr_create(args: argparse.Namespace) -> int:
         begin_immediate(con)
         author_role = resolve_role(con, args.author_role)
         reviewer_role = resolve_role(con, args.reviewer_role)
+        reviewer_workstream = (
+            normalize_workstream(args.reviewer_workstream)
+            if args.reviewer_workstream.strip()
+            else None
+        )
         require_distinct_cr_roles(author_role, reviewer_role)
         cr_id = next_cr_id(con)
         file_path = args.file_path.strip()
@@ -3400,10 +3676,22 @@ def command_cr_create(args: argparse.Namespace) -> int:
         now = utc_now()
         con.execute(
             """
-            insert into change_requests(cr_id, title, status, author_role, reviewer_role, file_path, created_at, updated_at)
-            values (?, ?, 'draft', ?, ?, ?, ?, ?)
+            insert into change_requests(
+              cr_id, title, status, author_role, reviewer_role, reviewer_workstream,
+              file_path, created_at, updated_at
+            )
+            values (?, ?, 'draft', ?, ?, ?, ?, ?, ?)
             """,
-            (cr_id, args.title, author_role, reviewer_role, file_path, now, now),
+            (
+                cr_id,
+                args.title,
+                author_role,
+                reviewer_role,
+                reviewer_workstream,
+                file_path,
+                now,
+                now,
+            ),
         )
         cr_event(con, cr_id, "created", actor_role=author_role, to_status="draft")
         sync_cr_file(con, cr_id)
@@ -3434,7 +3722,8 @@ def transition_cr_to_submitted(args: argparse.Namespace, resubmit: bool) -> int:
             update change_requests
             set status = 'submitted', submitted_at = ?, updated_at = ?,
                 active_revision_job_id = null, submitted_body_hash = ?,
-                approved_body_hash = null
+                approved_body_hash = null, review_claimed_by = null,
+                review_started_at = null
             where cr_id = ?
             """,
             (now, now, body_hash, args.cr_id),
@@ -3455,7 +3744,13 @@ def command_cr_resubmit(args: argparse.Namespace) -> int:
     return transition_cr_to_submitted(args, resubmit=True)
 
 
-def assert_reviewer_action(con: sqlite3.Connection, cr_id: str, role: str, permission: str) -> tuple[sqlite3.Row, str]:
+def assert_reviewer_action(
+    con: sqlite3.Connection,
+    cr_id: str,
+    role: str,
+    permission: str,
+    claimant: str = "",
+) -> tuple[sqlite3.Row, str]:
     actor_role = require_permission(con, role, "cr.review")
     if permission != "cr.review":
         actor_role = require_permission(con, role, permission)
@@ -3466,7 +3761,123 @@ def assert_reviewer_action(con: sqlite3.Connection, cr_id: str, role: str, permi
         raise SystemExit(f"ERROR: CR reviewer role is {row['reviewer_role']}, not {actor_role}")
     if row["author_role"] == actor_role:
         raise SystemExit("ERROR: reviewer role cannot review its own CR")
+    effective_claimant = claimant or actor_role
+    if (
+        row["status"] == "submitted"
+        and row["review_claimed_by"]
+        and row["review_claimed_by"] != effective_claimant
+    ):
+        raise SystemExit(
+            f"ERROR: CR review is claimed by {row['review_claimed_by']}, not {effective_claimant}"
+        )
+    if row["status"] == "submitted" and row["reviewer_workstream"] and not row["review_claimed_by"]:
+        raise SystemExit(
+            f"ERROR: workstream-routed CR review must be claimed first: {cr_id}; "
+            "run 'baton cr claim-review'"
+        )
     return row, actor_role
+
+
+def command_cr_claim_review(args: argparse.Namespace) -> int:
+    with connect(args.db) as con:
+        init_schema(con)
+        begin_immediate(con)
+        role = require_permission(con, args.role, "cr.review")
+        claimant = claimed_by_value(args, role)
+        row = con.execute(
+            "select * from change_requests where cr_id = ?",
+            (args.cr_id,),
+        ).fetchone()
+        if not row:
+            raise SystemExit(f"ERROR: unknown CR: {args.cr_id}")
+        if row["reviewer_role"] != role:
+            raise SystemExit(f"ERROR: CR reviewer role is {row['reviewer_role']}, not {role}")
+        if row["status"] != "submitted":
+            raise SystemExit(f"ERROR: CR must be submitted: {args.cr_id} status={row['status']}")
+        if row["review_claimed_by"]:
+            raise SystemExit(
+                f"ERROR: CR review is already claimed by {row['review_claimed_by']}: {args.cr_id}"
+            )
+        require_workstream_assignment(
+            con,
+            claimant,
+            role,
+            row["reviewer_workstream"],
+        )
+        require_agent_capacity(con, claimant, cr_id=args.cr_id)
+        now = utc_now()
+        changed = con.execute(
+            """
+            update change_requests
+            set review_claimed_by = ?, review_started_at = ?, updated_at = ?
+            where cr_id = ? and status = 'submitted' and review_claimed_by is null
+            """,
+            (claimant, now, now, args.cr_id),
+        ).rowcount
+        if changed != 1:
+            raise SystemExit(
+                f"ERROR: review claim failed due to concurrent state change: {args.cr_id}"
+            )
+        cr_event(
+            con,
+            args.cr_id,
+            "review_claimed",
+            actor_role=role,
+            from_status="submitted",
+            to_status="submitted",
+            message=claimant,
+        )
+        sync_cr_file(con, args.cr_id)
+        con.commit()
+    print(f"{args.cr_id}\treview_claimed\t{claimant}")
+    return 0
+
+
+def command_cr_release_review(args: argparse.Namespace) -> int:
+    reason = args.reason.strip()
+    if not reason:
+        raise SystemExit("ERROR: --reason cannot be blank")
+    with connect(args.db) as con:
+        init_schema(con)
+        begin_immediate(con)
+        role = require_permission(con, args.role, "cr.review")
+        claimant = claimed_by_value(args, role)
+        row = con.execute(
+            "select * from change_requests where cr_id = ?",
+            (args.cr_id,),
+        ).fetchone()
+        if not row:
+            raise SystemExit(f"ERROR: unknown CR: {args.cr_id}")
+        if row["reviewer_role"] != role:
+            raise SystemExit(f"ERROR: CR reviewer role is {row['reviewer_role']}, not {role}")
+        if row["status"] != "submitted":
+            raise SystemExit(f"ERROR: CR must be submitted: {args.cr_id} status={row['status']}")
+        if row["review_claimed_by"] != claimant:
+            raise SystemExit(
+                f"ERROR: CR review is claimed by {row['review_claimed_by'] or 'nobody'}, not {claimant}"
+            )
+        now = utc_now()
+        con.execute(
+            """
+            update change_requests
+            set review_claimed_by = null, review_started_at = null, updated_at = ?
+            where cr_id = ?
+            """,
+            (now, args.cr_id),
+        )
+        cr_event(
+            con,
+            args.cr_id,
+            "review_released",
+            actor_role=role,
+            from_status="submitted",
+            to_status="submitted",
+            message=f"{claimant}: {reason}",
+        )
+        sync_cr_file(con, args.cr_id)
+        con.commit()
+    print(f"{args.cr_id}\treview_released\t{claimant}")
+    return 0
 
 
 def command_cr_request_revision(args: argparse.Namespace) -> int:
@@ -3476,7 +3887,13 @@ def command_cr_request_revision(args: argparse.Namespace) -> int:
     with connect(args.db) as con:
         init_schema(con)
         begin_immediate(con)
-        row, actor_role = assert_reviewer_action(con, args.cr_id, args.role, "cr.request_revision")
+        row, actor_role = assert_reviewer_action(
+            con,
+            args.cr_id,
+            args.role,
+            "cr.request_revision",
+            optional_agent_id(args, "claimed_by"),
+        )
         if row["status"] != "submitted":
             raise SystemExit(f"ERROR: CR must be submitted: {args.cr_id} status={row['status']}")
         if row["active_revision_job_id"]:
@@ -3525,7 +3942,13 @@ def command_cr_approve(args: argparse.Namespace) -> int:
     with connect(args.db) as con:
         init_schema(con)
         begin_immediate(con)
-        row, actor_role = assert_reviewer_action(con, args.cr_id, args.role, "cr.approve")
+        row, actor_role = assert_reviewer_action(
+            con,
+            args.cr_id,
+            args.role,
+            "cr.approve",
+            optional_agent_id(args, "claimed_by"),
+        )
         if row["status"] != "submitted":
             raise SystemExit(f"ERROR: CR must be submitted: {args.cr_id} status={row['status']}")
         current_hash = cr_body_hash(project_file_path(con, row["file_path"]))
@@ -3559,7 +3982,12 @@ def command_cr_seal(args: argparse.Namespace) -> int:
     with connect(args.db) as con:
         init_schema(con)
         begin_immediate(con)
-        row, actor_role = assert_reviewer_action(con, args.cr_id, args.role, "cr.review")
+        row, actor_role = assert_reviewer_action(
+            con,
+            args.cr_id,
+            args.role,
+            "cr.review",
+        )
         if row["status"] not in {"approved", "implemented"}:
             raise SystemExit(
                 f"ERROR: CR must be approved or implemented: {args.cr_id} status={row['status']}"
@@ -3602,7 +4030,13 @@ def command_cr_reject(args: argparse.Namespace) -> int:
     with connect(args.db) as con:
         init_schema(con)
         begin_immediate(con)
-        row, actor_role = assert_reviewer_action(con, args.cr_id, args.role, "cr.reject")
+        row, actor_role = assert_reviewer_action(
+            con,
+            args.cr_id,
+            args.role,
+            "cr.reject",
+            optional_agent_id(args, "claimed_by"),
+        )
         if row["status"] != "submitted":
             raise SystemExit(f"ERROR: CR must be submitted: {args.cr_id} status={row['status']}")
         now = utc_now()
@@ -3633,12 +4067,26 @@ def command_cr_reassign_reviewer(args: argparse.Namespace) -> int:
             raise SystemExit(f"ERROR: CR reviewer cannot be reassigned after terminal review: {args.cr_id} status={row['status']}")
         require_distinct_cr_roles(row["author_role"], new_reviewer_role)
         old_reviewer_role = row["reviewer_role"]
-        if old_reviewer_role == new_reviewer_role:
-            raise SystemExit(f"ERROR: CR reviewer role is already {new_reviewer_role}")
+        new_workstream = (
+            normalize_workstream(args.reviewer_workstream)
+            if args.reviewer_workstream.strip()
+            else None
+        )
+        old_workstream = row["reviewer_workstream"]
+        if old_reviewer_role == new_reviewer_role and old_workstream == new_workstream:
+            raise SystemExit(
+                f"ERROR: CR reviewer route is already role={new_reviewer_role} "
+                f"workstream={new_workstream or '*'}"
+            )
         now = utc_now()
         con.execute(
-            "update change_requests set reviewer_role = ?, updated_at = ? where cr_id = ?",
-            (new_reviewer_role, now, args.cr_id),
+            """
+            update change_requests
+            set reviewer_role = ?, reviewer_workstream = ?, review_claimed_by = null,
+                review_started_at = null, updated_at = ?
+            where cr_id = ?
+            """,
+            (new_reviewer_role, new_workstream, now, args.cr_id),
         )
         cr_event(
             con,
@@ -3647,11 +4095,18 @@ def command_cr_reassign_reviewer(args: argparse.Namespace) -> int:
             actor_role=actor_role,
             from_status=row["status"],
             to_status=row["status"],
-            message=f"{old_reviewer_role}->{new_reviewer_role}: {reason}",
+            message=(
+                f"{old_reviewer_role}/{old_workstream or '*'}->"
+                f"{new_reviewer_role}/{new_workstream or '*'}: {reason}"
+            ),
         )
         sync_cr_file(con, args.cr_id)
         con.commit()
-    print(f"{args.cr_id}\treviewer_reassigned\t{old_reviewer_role}\t{new_reviewer_role}")
+    print(
+        f"{args.cr_id}\treviewer_reassigned\t"
+        f"{old_reviewer_role}/{old_workstream or '*'}\t"
+        f"{new_reviewer_role}/{new_workstream or '*'}"
+    )
     return 0
 
 
@@ -3835,7 +4290,12 @@ def command_cr_create_handoff(args: argparse.Namespace) -> int:
     with connect(args.db) as con:
         init_schema(con)
         begin_immediate(con)
-        row, actor_role = assert_reviewer_action(con, args.cr_id, args.by_role, "cr.assign_implementation")
+        row, actor_role = assert_reviewer_action(
+            con,
+            args.cr_id,
+            args.by_role,
+            "cr.assign_implementation",
+        )
         if row["status"] != "approved":
             raise SystemExit(f"ERROR: CR must be approved: {args.cr_id} status={row['status']}")
         require_cr_body_hash(con, row, "approved_body_hash", "approval")
@@ -3849,6 +4309,7 @@ def command_cr_create_handoff(args: argparse.Namespace) -> int:
             args.depends_on or [],
             args.depends_on_gate or [],
             actor_role,
+            args.workstream,
         )
         con.execute(
             "insert into cr_handoffs(cr_id, job_id, kind, created_at) values (?, ?, 'implementation', ?)",
@@ -3867,7 +4328,12 @@ def command_cr_mark_implemented(args: argparse.Namespace) -> int:
     with connect(args.db) as con:
         init_schema(con)
         begin_immediate(con)
-        row, actor_role = assert_reviewer_action(con, args.cr_id, args.role, "cr.mark_implemented")
+        row, actor_role = assert_reviewer_action(
+            con,
+            args.cr_id,
+            args.role,
+            "cr.mark_implemented",
+        )
         if row["status"] != "approved":
             raise SystemExit(f"ERROR: CR must be approved: {args.cr_id} status={row['status']}")
         require_cr_body_hash(con, row, "approved_body_hash", "approval")
@@ -3917,6 +4383,8 @@ def command_cr_status(args: argparse.Namespace) -> int:
     print(f"{row['cr_id']}\t{row['status']}\t{row['title']}\t{resolved_path}")
     print(f"author_role: {row['author_role']}")
     print(f"reviewer_role: {row['reviewer_role']}")
+    print(f"reviewer_workstream: {row['reviewer_workstream'] or ''}")
+    print(f"review_claimed_by: {row['review_claimed_by'] or ''}")
     print(f"revision_count: {row['revision_count']}")
     print(f"body_integrity: {integrity}")
     if expected_hash:
@@ -3944,6 +4412,8 @@ def command_cr_show(args: argparse.Namespace) -> int:
     print(f"title: {row['title']}")
     print(f"author_role: {row['author_role']}")
     print(f"reviewer_role: {row['reviewer_role']}")
+    print(f"reviewer_workstream: {row['reviewer_workstream'] or ''}")
+    print(f"review_claimed_by: {row['review_claimed_by'] or ''}")
     if row["superseded_by_cr_id"]:
         print(f"superseded_by_cr_id: {row['superseded_by_cr_id']}")
     if row["superseded_by_ref"]:
@@ -3985,25 +4455,43 @@ def command_cr_events(args: argparse.Namespace) -> int:
     return 0
 
 
+def next_review_for_agent(
+    con: sqlite3.Connection,
+    role: str,
+    agent_id: str,
+) -> sqlite3.Row | None:
+    return con.execute(
+        """
+        select cr_id, title, file_path, reviewer_workstream, review_claimed_by
+        from change_requests cr
+        where status = 'submitted' and reviewer_role = ?
+          and (review_claimed_by is null or review_claimed_by = ?)
+          and (
+            reviewer_workstream is null
+            or exists (
+              select 1 from agent_workstreams route
+              where route.agent_id = ? and route.role_id = cr.reviewer_role
+                and route.workstream = cr.reviewer_workstream
+            )
+          )
+        order by submitted_at, created_at, cr_id
+        limit 1
+        """,
+        (role, agent_id, agent_id),
+    ).fetchone()
+
+
 def command_cr_wait_review(args: argparse.Namespace) -> int:
     deadline = None if args.timeout == 0 else time.monotonic() + args.timeout
     waiter_id, role, active_waiters = start_waiter(args, "cr_review", "cr.review")
+    agent_id = optional_agent_id(args)
     try:
         while True:
             with connect(args.db) as con:
                 init_schema(con)
                 require_permission(con, role, "cr.review")
                 stopped = get_stop_control(con, role)
-                row = con.execute(
-                    """
-                    select cr_id, title, file_path
-                    from change_requests
-                    where status = 'submitted' and reviewer_role = ?
-                    order by submitted_at, created_at, cr_id
-                    limit 1
-                    """,
-                    (role,),
-                ).fetchone()
+                row = next_review_for_agent(con, role, agent_id)
             if stopped:
                 reason = f" reason={stopped['reason']}" if stopped["reason"] else ""
                 print(f"Stopped waiting for CR review role {role} by {stopped['scope']}.{reason}")
@@ -4011,7 +4499,10 @@ def command_cr_wait_review(args: argparse.Namespace) -> int:
             if row:
                 with connect(args.db) as con:
                     resolved_path = project_file_path(con, row["file_path"])
-                print(f"{row['cr_id']}\t{row['title']}\t{resolved_path}")
+                print(
+                    f"{row['cr_id']}\t{row['title']}\t{resolved_path}\t"
+                    f"{row['reviewer_workstream'] or ''}\t{row['review_claimed_by'] or ''}"
+                )
                 return 0
             if deadline is not None and time.monotonic() >= deadline:
                 print(f"Timed out waiting for CR review role {role}")
@@ -4032,6 +4523,7 @@ def command_cr_wait_review(args: argparse.Namespace) -> int:
 def command_watch(args: argparse.Namespace) -> int:
     deadline = None if args.timeout == 0 else time.monotonic() + args.timeout
     waiter_id, role, active_waiters = start_waiter(args, "watch")
+    agent_id = optional_agent_id(args)
     try:
         while True:
             with connect(args.db) as con:
@@ -4054,32 +4546,36 @@ def command_watch(args: argparse.Namespace) -> int:
                 )
                 review = None
                 if can_review:
-                    review = con.execute(
-                        """
-                        select cr_id, title, file_path
-                        from change_requests
-                        where status = 'submitted' and reviewer_role = ?
-                        order by submitted_at, created_at, cr_id
-                        limit 1
-                        """,
-                        (role,),
-                    ).fetchone()
+                    review = next_review_for_agent(con, role, agent_id)
                 if review:
                     path = project_file_path(con, review["file_path"])
-                    print(f"cr_review\t{review['cr_id']}\t{review['title']}\t{path}")
+                    print(
+                        f"cr_review\t{review['cr_id']}\t{review['title']}\t{path}\t"
+                        f"{review['reviewer_workstream'] or ''}\t"
+                        f"{review['review_claimed_by'] or ''}"
+                    )
                     return 0
                 handoff = con.execute(
                     """
-                    select job_id, title
-                    from handoff_jobs
+                    select job_id, title, workstream
+                    from handoff_jobs job
                     where status = 'open' and target_role = ?
+                      and (
+                        workstream is null
+                        or exists (
+                          select 1 from agent_workstreams route
+                          where route.agent_id = ? and route.role_id = job.target_role
+                            and route.workstream = job.workstream
+                        )
+                      )
                     order by created_at, job_id
                     limit 1
                     """,
-                    (role,),
+                    (role, agent_id),
                 ).fetchone()
             if handoff:
-                print(f"handoff\t{handoff['job_id']}\t{handoff['title']}")
+                route = f"\t{handoff['workstream']}" if handoff["workstream"] else ""
+                print(f"handoff\t{handoff['job_id']}\t{handoff['title']}{route}")
                 return 0
             if deadline is not None and time.monotonic() >= deadline:
                 print(f"Timed out watching role {role}")
@@ -4158,6 +4654,7 @@ def command_handoff_show(args: argparse.Namespace) -> int:
         "status",
         "title",
         "target_role",
+        "workstream",
         "claimed_by",
         "source_ref",
         "objective",
@@ -4200,7 +4697,7 @@ def command_handoff_list(args: argparse.Namespace) -> int:
         params.append(args.limit)
         rows = con.execute(
             f"""
-            select job_id, status, target_role, title, claimed_by, created_at
+            select job_id, status, target_role, workstream, title, claimed_by, created_at
             from handoff_jobs
             {where}
             order by created_at, job_id
@@ -4216,7 +4713,10 @@ def command_handoff_list(args: argparse.Namespace) -> int:
         return 0
     for row in rows:
         claimant = row["claimed_by"] or ""
-        print(f"{row['job_id']}\t{row['status']}\t{row['target_role']}\t{claimant}\t{row['title']}")
+        print(
+            f"{row['job_id']}\t{row['status']}\t{row['target_role']}\t"
+            f"{row['workstream'] or ''}\t{claimant}\t{row['title']}"
+        )
     return 0
 
 
@@ -4231,7 +4731,8 @@ def command_handoff_successors(args: argparse.Namespace) -> int:
             raise SystemExit(f"ERROR: unknown job: {args.job_id}")
         rows = con.execute(
             """
-            select job.job_id, job.status, job.target_role, job.claimed_by, job.title
+            select job.job_id, job.status, job.target_role, job.workstream,
+                   job.claimed_by, job.title
             from handoff_jobs job
             join handoff_dependencies dependency on dependency.job_id = job.job_id
             where dependency.depends_on_job_id = ?
@@ -4250,31 +4751,42 @@ def command_handoff_successors(args: argparse.Namespace) -> int:
         claimant = row["claimed_by"] or "unassigned"
         print(
             f"{row['job_id']}\tstatus={row['status']}\t"
-            f"target_role={row['target_role']}\tclaimed_by={claimant}\t"
+            f"target_role={row['target_role']}\tworkstream={row['workstream'] or '*'}\t"
+            f"claimed_by={claimant}\t"
             f"title={row['title']}"
         )
     return 0
 
 
 def command_next(args: argparse.Namespace) -> int:
+    agent_id = optional_agent_id(args)
     with connect(args.db) as con:
         init_schema(con)
         role = resolve_role(con, args.role)
         row = con.execute(
             """
-            select job_id, title
-            from handoff_jobs
+            select job_id, title, workstream
+            from handoff_jobs job
             where status = 'open' and target_role = ?
+              and (
+                workstream is null
+                or exists (
+                  select 1 from agent_workstreams route
+                  where route.agent_id = ? and route.role_id = job.target_role
+                    and route.workstream = job.workstream
+                )
+              )
             order by created_at, job_id
             limit 1
             """,
-            (role,),
+            (role, agent_id),
         ).fetchone()
     if not row:
         if not getattr(args, "quiet", False):
             print(f"No ready jobs for role {normalize_role(args.role)}.")
         return 1
-    print(f"{row['job_id']}\t{row['title']}")
+    route = f"\t{row['workstream']}" if row["workstream"] else ""
+    print(f"{row['job_id']}\t{row['title']}{route}")
     return 0
 
 
@@ -4305,7 +4817,10 @@ def command_claim(args: argparse.Namespace) -> int:
         init_schema(con)
         begin_immediate(con)
         role = resolve_role(con, args.role)
-        row = con.execute("select status, target_role from handoff_jobs where job_id = ?", (args.job_id,)).fetchone()
+        row = con.execute(
+            "select status, target_role, workstream from handoff_jobs where job_id = ?",
+            (args.job_id,),
+        ).fetchone()
         if not row:
             raise SystemExit(f"ERROR: unknown job: {args.job_id}")
         if row["target_role"] != role:
@@ -4318,6 +4833,8 @@ def command_claim(args: argparse.Namespace) -> int:
             reason = f" reason={stopped['reason']}" if stopped["reason"] else ""
             raise SystemExit(f"ERROR: role {role} is stopped by {stopped['scope']}.{reason}")
         claimant = claimed_by_value(args, role)
+        require_workstream_assignment(con, claimant, role, row["workstream"])
+        require_agent_capacity(con, claimant, handoff_id=args.job_id)
         apply_workspace_policy(
             con,
             args,
@@ -4436,6 +4953,11 @@ def command_fail(args: argparse.Namespace) -> int:
                 else require_failure_reviewer(con, "sm")
             )
         require_distinct_cr_roles(role, reviewer_role)
+        reviewer_workstream = (
+            normalize_workstream(args.reviewer_workstream)
+            if args.reviewer_workstream.strip()
+            else None
+        )
         apply_workspace_policy(
             con,
             args,
@@ -4468,12 +4990,22 @@ def command_fail(args: argparse.Namespace) -> int:
         con.execute(
             """
             insert into change_requests(
-              cr_id, title, status, author_role, reviewer_role, file_path,
+              cr_id, title, status, author_role, reviewer_role, reviewer_workstream, file_path,
               created_at, updated_at, submitted_at
             )
-            values (?, ?, 'submitted', ?, ?, ?, ?, ?, ?)
+            values (?, ?, 'submitted', ?, ?, ?, ?, ?, ?, ?)
             """,
-            (cr_id, title, role, reviewer_role, file_path, now, now, now),
+            (
+                cr_id,
+                title,
+                role,
+                reviewer_role,
+                reviewer_workstream,
+                file_path,
+                now,
+                now,
+                now,
+            ),
         )
         cr_event(con, cr_id, "created", actor_role=role, to_status="draft")
         cr_event(
@@ -4875,7 +5407,7 @@ def command_notify_targets(args: argparse.Namespace) -> int:
         promote_ready_direct_dependents(con, args.job_id, actor_role)
         jobs = con.execute(
             """
-            select distinct job.job_id, job.target_role, job.title
+            select distinct job.job_id, job.target_role, job.workstream, job.title
             from handoff_jobs job
             join handoff_dependencies direct on direct.job_id = job.job_id
             where direct.depends_on_job_id = ? and job.status = 'open'
@@ -4900,6 +5432,7 @@ def command_notify_targets(args: argparse.Namespace) -> int:
                     {
                         "job_id": job["job_id"],
                         "target_role": job["target_role"],
+                        "workstream": job["workstream"] or "",
                         "title": job["title"],
                         "state": "already_notified",
                         "agent_id": notified["recipient_agent_id"],
@@ -4915,6 +5448,7 @@ def command_notify_targets(args: argparse.Namespace) -> int:
                     {
                         "job_id": job["job_id"],
                         "target_role": job["target_role"],
+                        "workstream": job["workstream"] or "",
                         "title": job["title"],
                         "state": "outside_shift",
                         "agent_id": "",
@@ -4929,21 +5463,42 @@ def command_notify_targets(args: argparse.Namespace) -> int:
                 select agent_id, host, thread_id, model
                 from agent_sessions session
                 where role_id = ? and status = 'active' and agent_id != ?
+                  and (
+                    ? is null
+                    or exists (
+                      select 1 from agent_workstreams route
+                      where route.agent_id = session.agent_id
+                        and route.role_id = session.role_id
+                        and route.workstream = ?
+                    )
+                  )
                   and not exists (
                     select 1
                     from handoff_jobs busy
                     where busy.claimed_by = session.agent_id
                       and busy.status in ('in_progress', 'cancel_requested')
                   )
+                  and not exists (
+                    select 1
+                    from change_requests review
+                    where review.review_claimed_by = session.agent_id
+                      and review.status = 'submitted'
+                  )
                 order by updated_at desc, agent_id
                 """,
-                (job["target_role"], sender_agent_id),
+                (
+                    job["target_role"],
+                    sender_agent_id,
+                    job["workstream"],
+                    job["workstream"],
+                ),
             ).fetchall()
             if not sessions:
                 payload.append(
                     {
                         "job_id": job["job_id"],
                         "target_role": job["target_role"],
+                        "workstream": job["workstream"] or "",
                         "title": job["title"],
                         "state": "no_active_peer_session",
                         "agent_id": "",
@@ -4958,6 +5513,7 @@ def command_notify_targets(args: argparse.Namespace) -> int:
                     {
                         "job_id": job["job_id"],
                         "target_role": job["target_role"],
+                        "workstream": job["workstream"] or "",
                         "title": job["title"],
                         "state": "candidate",
                         "agent_id": session["agent_id"],
@@ -4974,7 +5530,8 @@ def command_notify_targets(args: argparse.Namespace) -> int:
     else:
         for item in payload:
             print(
-                f"{item['job_id']}\t{item['target_role']}\t{item['state']}\t"
+                f"{item['job_id']}\t{item['target_role']}\t{item['workstream']}\t"
+                f"{item['state']}\t"
                 f"{item['agent_id']}\t{item['host']}\t{item['thread_id']}\t"
                 f"{item['model']}\t{item['title']}"
             )
@@ -4995,7 +5552,7 @@ def command_notify_record(args: argparse.Namespace) -> int:
         begin_immediate(con)
         actor_role = resolve_role(con, args.role)
         job = con.execute(
-            "select status, target_role, claimed_by from handoff_jobs where job_id = ?",
+            "select status, target_role, workstream, claimed_by from handoff_jobs where job_id = ?",
             (args.job_id,),
         ).fetchone()
         if not job:
@@ -5015,9 +5572,16 @@ def command_notify_record(args: argparse.Namespace) -> int:
                 f"ERROR: recipient role is {recipient['role_id']}, "
                 f"but handoff target role is {job['target_role']}"
             )
+        require_workstream_assignment(
+            con,
+            recipient_agent_id,
+            recipient["role_id"],
+            job["workstream"],
+        )
         if sender["session_id"] == recipient["session_id"]:
             raise SystemExit("ERROR: opt-in notification requires a different recipient session")
         if args.status == "sent":
+            require_agent_capacity(con, recipient_agent_id, handoff_id=args.job_id)
             if job["status"] not in {"open", "in_progress"}:
                 raise SystemExit(
                     f"ERROR: cannot record a sent notification for {args.job_id} status={job['status']}"
@@ -5447,7 +6011,13 @@ def command_wait(args: argparse.Namespace) -> int:
                 return 3
             promote_args = argparse.Namespace(db=args.db, actor_role=role, quiet=True)
             command_promote_ready(promote_args)
-            next_args = argparse.Namespace(db=args.db, role=role, quiet=True)
+            next_args = argparse.Namespace(
+                db=args.db,
+                role=role,
+                agent_id=optional_agent_id(args),
+                agent_id_file=getattr(args, "agent_id_file", ""),
+                quiet=True,
+            )
             if command_next(next_args) == 0:
                 return 0
             if deadline is not None and time.monotonic() >= deadline:
@@ -5641,6 +6211,30 @@ def build_parser() -> argparse.ArgumentParser:
     agent_init.add_argument("--force", action="store_true")
     agent_init.set_defaults(func=command_agent_init)
     agent_sub.add_parser("show").set_defaults(func=command_agent_show)
+    agent_workstream_add = agent_sub.add_parser(
+        "workstream-add",
+        help="register an agent for a specialized route within a role",
+    )
+    agent_workstream_add.add_argument("workstream")
+    agent_workstream_add.add_argument("--role", required=True)
+    agent_workstream_add.add_argument("--agent-id", default="")
+    agent_workstream_add.set_defaults(func=command_agent_workstream_add)
+    agent_workstream_remove = agent_sub.add_parser(
+        "workstream-remove",
+        help="remove an agent's specialized route",
+    )
+    agent_workstream_remove.add_argument("workstream")
+    agent_workstream_remove.add_argument("--role", required=True)
+    agent_workstream_remove.add_argument("--agent-id", default="")
+    agent_workstream_remove.set_defaults(func=command_agent_workstream_remove)
+    agent_workstream_list = agent_sub.add_parser(
+        "workstream-list",
+        help="list agent workstream registrations",
+    )
+    agent_workstream_list.add_argument("--role", default="")
+    agent_workstream_list.add_argument("--agent-id", default="")
+    agent_workstream_list.add_argument("--format", choices=("text", "json"), default="text")
+    agent_workstream_list.set_defaults(func=command_agent_workstream_list)
     agent_session_set = agent_sub.add_parser(
         "session-set",
         help="register this agent's opt-in host thread and model",
@@ -5676,6 +6270,7 @@ def build_parser() -> argparse.ArgumentParser:
     register = sub.add_parser("register", help="register a handoff job")
     register.add_argument("--title", required=True)
     register.add_argument("--role", required=True)
+    register.add_argument("--workstream", default="")
     register.add_argument("--source-ref", default="")
     register.add_argument("--objective", required=True)
     register.add_argument("--exit-criteria", required=True)
@@ -5726,6 +6321,7 @@ def build_parser() -> argparse.ArgumentParser:
     cr_create.add_argument("--title", required=True)
     cr_create.add_argument("--author-role", required=True)
     cr_create.add_argument("--reviewer-role", default="sm")
+    cr_create.add_argument("--reviewer-workstream", default="")
     cr_create.add_argument(
         "--dir",
         default=DEFAULT_CR_DIRECTORY,
@@ -5751,6 +6347,7 @@ def build_parser() -> argparse.ArgumentParser:
     cr_request_revision = cr_sub.add_parser("request-revision")
     cr_request_revision.add_argument("cr_id")
     cr_request_revision.add_argument("--role", required=True)
+    cr_request_revision.add_argument("--claimed-by", default="")
     cr_request_revision.add_argument("--reason", required=True)
     cr_request_revision.add_argument("--assign-back", default="")
     cr_request_revision.add_argument("--title", default="")
@@ -5759,6 +6356,7 @@ def build_parser() -> argparse.ArgumentParser:
     cr_approve = cr_sub.add_parser("approve")
     cr_approve.add_argument("cr_id")
     cr_approve.add_argument("--role", required=True)
+    cr_approve.add_argument("--claimed-by", default="")
     cr_approve.add_argument("--evidence", default="")
     cr_approve.set_defaults(func=command_cr_approve)
 
@@ -5774,6 +6372,7 @@ def build_parser() -> argparse.ArgumentParser:
     cr_reject = cr_sub.add_parser("reject")
     cr_reject.add_argument("cr_id")
     cr_reject.add_argument("--role", required=True)
+    cr_reject.add_argument("--claimed-by", default="")
     cr_reject.add_argument("--reason", required=True)
     cr_reject.set_defaults(func=command_cr_reject)
 
@@ -5781,6 +6380,7 @@ def build_parser() -> argparse.ArgumentParser:
     cr_reassign_reviewer.add_argument("cr_id")
     cr_reassign_reviewer.add_argument("--role", required=True)
     cr_reassign_reviewer.add_argument("--reviewer-role", required=True)
+    cr_reassign_reviewer.add_argument("--reviewer-workstream", default="")
     cr_reassign_reviewer.add_argument("--reason", required=True)
     cr_reassign_reviewer.set_defaults(func=command_cr_reassign_reviewer)
 
@@ -5811,6 +6411,7 @@ def build_parser() -> argparse.ArgumentParser:
     cr_create_handoff.add_argument("cr_id")
     cr_create_handoff.add_argument("--by-role", required=True)
     cr_create_handoff.add_argument("--role", required=True)
+    cr_create_handoff.add_argument("--workstream", default="")
     cr_create_handoff.add_argument("--title", required=True)
     cr_create_handoff.add_argument("--objective", required=True)
     cr_create_handoff.add_argument("--exit-criteria", required=True)
@@ -5840,8 +6441,28 @@ def build_parser() -> argparse.ArgumentParser:
     cr_events.add_argument("cr_id")
     cr_events.set_defaults(func=command_cr_events)
 
+    cr_claim_review = cr_sub.add_parser(
+        "claim-review",
+        help="claim one submitted CR review for a concrete agent",
+    )
+    cr_claim_review.add_argument("cr_id")
+    cr_claim_review.add_argument("--role", required=True)
+    cr_claim_review.add_argument("--claimed-by", default="")
+    cr_claim_review.set_defaults(func=command_cr_claim_review)
+
+    cr_release_review = cr_sub.add_parser(
+        "release-review",
+        help="release a claimed submitted CR review without changing its status",
+    )
+    cr_release_review.add_argument("cr_id")
+    cr_release_review.add_argument("--role", required=True)
+    cr_release_review.add_argument("--claimed-by", default="")
+    cr_release_review.add_argument("--reason", required=True)
+    cr_release_review.set_defaults(func=command_cr_release_review)
+
     cr_wait_review = cr_sub.add_parser("wait-review")
     cr_wait_review.add_argument("--role", required=True)
+    cr_wait_review.add_argument("--agent-id", default="")
     cr_wait_review.add_argument("--timeout", type=int, default=900, help="seconds; default: 900; 0 means forever")
     cr_wait_review.add_argument(
         "--interval",
@@ -5853,6 +6474,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     next_parser = sub.add_parser("next", help="inspect the next ready handoff without waiting")
     next_parser.add_argument("--role", required=True)
+    next_parser.add_argument("--agent-id", default="")
     next_parser.set_defaults(func=command_next)
 
     claim = sub.add_parser("claim", help="claim an open handoff")
@@ -5876,6 +6498,7 @@ def build_parser() -> argparse.ArgumentParser:
     fail.add_argument("--reason", required=True)
     fail.add_argument("--evidence", default="")
     fail.add_argument("--reviewer-role", default="")
+    fail.add_argument("--reviewer-workstream", default="")
     fail.add_argument("--title", default="")
     fail.add_argument(
         "--dir",
@@ -6012,6 +6635,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     wait = sub.add_parser("wait", help="wait for a ready handoff")
     wait.add_argument("--role", required=True)
+    wait.add_argument("--agent-id", default="")
     wait.add_argument("--timeout", type=int, default=900, help="seconds; default: 900; 0 means forever")
     wait.add_argument(
         "--interval",
@@ -6027,6 +6651,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Wait for assigned CR review first, then a ready handoff.",
     )
     watch.add_argument("--role", required=True)
+    watch.add_argument("--agent-id", default="")
     watch.add_argument("--timeout", type=int, default=900, help="seconds; default: 900; 0 means forever")
     watch.add_argument(
         "--interval",

@@ -26,6 +26,7 @@ Tables:
 - `handoff_controls`: stop/resume controls for wait loops
 - `waiter_leases`: short-lived handoff and CR waiter heartbeats for automatic polling intervals
 - `agent_sessions`: opt-in runtime host thread and model metadata for stable agent profiles
+- `agent_workstreams`: specialized routing eligibility within a role
 - `handoff_notifications`: audited peer-thread message delivery results
 - `workspace_events`: optional Git commit provenance and policy outcomes for handoff transitions
 - `change_requests`: CR workflow state and Markdown file pointer
@@ -52,7 +53,7 @@ Columns:
 | `name` | `text` | yes | Stable migration name. |
 | `applied_at` | `text` | yes | UTC timestamp when the migration committed. |
 
-`baton migrate` creates a validated SQLite backup before running pending migrations, applicable seed updates, `PRAGMA quick_check`, and `PRAGMA foreign_key_check` in one transaction. Any failure rolls back schema changes, seed changes, and migration records together. Normal workflow commands reject pending migrations. Full default permissions are seeded only for a new or unversioned database; later migrations add only permissions introduced by that migration, preserving project-specific revocations.
+`baton migrate` creates a validated SQLite backup before running pending migrations, applicable seed updates, `PRAGMA quick_check`, and `PRAGMA foreign_key_check` in one transaction. Any failure rolls back schema changes, seed changes, and migration records together. Normal workflow commands reject pending migrations, and migration is refused while waiters, active handoffs, cancellation acknowledgements, or claimed submitted CR reviews remain active. Full default permissions are seeded only for a new or unversioned database; later migrations add only permissions introduced by that migration, preserving project-specific revocations.
 
 Known migrations:
 
@@ -67,6 +68,7 @@ Known migrations:
 8 cr_body_integrity
 9 plan_revision_controls
 10 opt_in_thread_notifications
+11 workstream_routing
 ```
 
 `baton migrate --check` performs a read-only check that the database is at the latest known schema version.
@@ -234,6 +236,7 @@ Columns:
 | `title` | `text` | yes | Short human-readable title. |
 | `status` | `text` | yes | Current queue state. |
 | `target_role` | `text` | yes | Canonical role that may claim and finish the job. |
+| `workstream` | `text` | no | Optional specialization that the claimant must register within `target_role`. |
 | `source_ref` | `text` | no | Source CR, QA report, user request, or document reference. |
 | `objective` | `text` | yes | What the target role must accomplish. |
 | `exit_criteria` | `text` | yes | Completion criteria for the target role. |
@@ -534,6 +537,24 @@ Columns:
 
 `unique(host, thread_id)` prevents one host thread from representing two profiles, and a partial unique index permits only one active endpoint per `agent_id`. Replacing a session requires explicit `--replace`. `active` means addressable by a future follow-up, not currently executing.
 
+## `agent_workstreams`
+
+Purpose:
+
+- Separates role authorization from specialized routing eligibility.
+- Lets agents in one broad role advertise stable domains such as `api-contract` or `ui-regression`.
+
+Columns:
+
+| Column | Type | Required | Purpose |
+| --- | --- | --- | --- |
+| `agent_id` | `text` | yes | Stable concrete agent profile. |
+| `role_id` | `text` | yes | Role in which the specialization applies. |
+| `workstream` | `text` | yes | Normalized domain route. |
+| `created_at` | `text` | yes | UTC registration timestamp. |
+
+The composite primary key is `(agent_id, role_id, workstream)`. A null workstream on a handoff or CR preserves role-only routing. Workstream registration grants no role permission.
+
 ## `handoff_notifications`
 
 Purpose:
@@ -561,7 +582,7 @@ Columns:
 | `detail` | `text` | no | Result detail; required by CLI for failures. |
 | `created_at` | `text` | yes | Attempt time. |
 
-A partial unique index permits at most one `sent` row per handoff. Failed attempts remain available for fallback diagnosis. `finish` normally promotes ready direct dependents; `notify targets` retains the same scoped promotion as a compatibility reconciliation path and returns active Codex peer candidates that do not currently own an `in_progress` or `cancel_requested` handoff. An applicable project-local global or target-role stop, including an expired shift, returns `outside_shift` without a candidate and leaves the handoff `open`. It does not send a message, and compatible peer messaging is not assumed for other model hosts. `notify record` records what the agent reports after using a host messaging tool. Neither operation claims the handoff. Authentication tokens and message bodies are not stored.
+A partial unique index permits at most one `sent` row per handoff. Failed attempts remain available for fallback diagnosis. `finish` normally promotes ready direct dependents; `notify targets` retains the same scoped promotion as a compatibility reconciliation path and returns active Codex peer candidates that match the optional workstream and do not currently own an `in_progress` or `cancel_requested` handoff or claimed submitted CR review. An applicable project-local global or target-role stop, including an expired shift, returns `outside_shift` without a candidate and leaves the handoff `open`. It does not send a message, and compatible peer messaging is not assumed for other model hosts. `notify record` records what the agent reports after using a host messaging tool. Neither operation claims the handoff. Authentication tokens and message bodies are not stored.
 
 ## `change_requests`
 
@@ -580,6 +601,9 @@ Columns:
 | `status` | `text` | yes | Current CR workflow state. |
 | `author_role` | `text` | yes | Role responsible for the CR body. |
 | `reviewer_role` | `text` | yes | Role allowed to review this CR. |
+| `reviewer_workstream` | `text` | no | Optional specialization required of the concrete reviewer. |
+| `review_claimed_by` | `text` | no | Concrete agent that currently owns or completed the review claim. |
+| `review_started_at` | `text` | no | UTC timestamp of the latest review claim. |
 | `file_path` | `text` | yes | Markdown body file path. |
 | `created_at` | `text` | yes | UTC creation timestamp. |
 | `updated_at` | `text` | yes | UTC update timestamp. |
@@ -611,6 +635,8 @@ State rules:
 
 - `draft -> submitted` is performed by the author role.
 - `submitted -> revision_requested`, `approved`, or `rejected` is performed by the reviewer role.
+- A workstream-routed submitted review must be claimed by an eligible concrete agent before a decision. Only that claimant may decide it.
+- Resubmission and reviewer reassignment clear the previous review claim. `cr release-review` clears an undecided submitted claim with an audited reason.
 - `revision_requested -> submitted` is performed by the author role after editing the Markdown body.
 - Approval requires the current body to match `submitted_body_hash` and records `approved_body_hash`.
 - Implementation handoff creation, claim, finish, and final implementation marking require the approved body hash to remain unchanged.

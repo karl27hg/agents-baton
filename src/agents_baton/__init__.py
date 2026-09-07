@@ -1,3 +1,3 @@
 """Baton command-line applications."""
 
-__version__ = "0.6.0.dev8"
+__version__ = "0.6.0.dev9"

@@ -103,6 +103,28 @@ Use `permission-remove` rather than editing SQLite when project policy revokes a
 
 Do not change active project roles based on Baton results without SM/user approval.
 
+## Workstream Routing
+
+Keep roles as permission boundaries. Use a workstream only to distinguish stable domain ownership among agents in the same broad role:
+
+```bash
+bin/baton --db /tmp/baton.sqlite3 role add integration --display-name "Integration"
+bin/baton --db /tmp/baton.sqlite3 agent workstream-add api-contract \
+  --role integration \
+  --agent-id integration-api
+
+bin/baton --db /tmp/baton.sqlite3 register \
+  --title "Verify API contract" \
+  --role integration \
+  --workstream api-contract \
+  --objective "Verify the changed API contract." \
+  --exit-criteria "Compatibility evidence is recorded."
+```
+
+Use `--agent-id`, `BATON_AGENT_ID`, or the local identity file with `next`, `wait`, `watch`, and CR review waiting so Baton can match specialized work. Role-only records remain compatible and do not require workstream registration.
+
+One concrete agent identity may own one active handoff or claimed submitted CR review. At integration fan-in, parallelize independent evidence checks across workstreams, then make one final integration handoff depend on all required checks. Keep the final merge, acceptance, shared-environment mutation, and Gate release under one owner.
+
 ## Handoff Failure And Retry
 
 Failure is not completion. A worker that cannot satisfy the claimed handoff's exit criteria reports it with a reason and available evidence:
@@ -246,6 +268,20 @@ The CR author role and reviewer role must be different. If an old CR is stuck be
 ```bash
 bin/baton --db /tmp/baton.sqlite3 cr wait-review --role sm --timeout 900
 ```
+
+For a workstream-routed CR, the eligible concrete reviewer claims it before inspection and decision:
+
+```bash
+bin/baton --db /tmp/baton.sqlite3 cr wait-review \
+  --role integration \
+  --agent-id integration-api \
+  --timeout 900
+bin/baton --db /tmp/baton.sqlite3 cr claim-review CR-YYYY-MM-DD-001 \
+  --role integration \
+  --claimed-by integration-api
+```
+
+Only that claimant may approve, reject, or request revision. Use `cr release-review --reason ...` to yield an undecided submitted review before taking other Baton work.
 
 Possible review actions:
 

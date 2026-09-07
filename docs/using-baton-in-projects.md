@@ -288,6 +288,8 @@ Use `baton` from `PATH` for role handoff and CR workflow state.
 - When `baton.toml` enables Git integration, read `baton guide show git` and run `baton workspace check`.
 - Do not create subagents, child tasks, parallel agent sessions, or delegated background agents while operating under Baton.
 - Delegate work only through Baton handoffs assigned to configured roles.
+- Keep roles as permission boundaries. Use workstreams only when agents in one broad role have different domain ownership.
+- Give each concrete agent at most one active handoff or CR review claim.
 - Do not initialize a new database when an existing Baton database may be in another path.
 - Do not edit Baton SQLite records directly.
 - If a Baton command, role authority, database path, or migration plan is unclear, stop and ask the user or SM.
@@ -307,6 +309,9 @@ Use `tools/baton/bin/baton` for role handoff and CR workflow state.
 - Do not edit Baton SQLite records directly.
 - Do not create subagents, child tasks, parallel agent sessions, or delegated background agents while operating under Baton.
 - Delegate work only through Baton handoffs assigned to configured roles. A planner may register safe parallel handoffs but must not directly invoke their workers.
+- Keep roles as permission boundaries. Register stable domain workstreams such as `api-contract` or `ui-regression` when one broad role contains distinct specialists.
+- At integration fan-in, run independent evidence checks in parallel workstreams and register one final handoff depending on every required result. Do not parallelize the final merge or release decision.
+- A concrete agent owns at most one active handoff or submitted CR review. A workstream-routed reviewer must use `cr claim-review`; use `cr release-review --reason ...` before yielding undecided work.
 - Use `tools/baton/docs/planner-prompt.md` for agents that decompose or register parallel work.
 - Use `tools/baton/docs/agent-prompt.md` as the worker prompt for role agents.
 - Treat work as parallel only after confirming independent inputs, write sets, contracts, shared state, and completion order; otherwise declare a dependency or Gate.
@@ -394,7 +399,7 @@ tools/baton/bin/baton watch --role sm --timeout 900
 
 On exit 2, check the shift and re-enter the wait silently while it remains active. Do not report unchanged waiting state.
 Do not send a final response while the shift remains active merely because one action completed or the queue is empty; Baton cannot create a new Codex turn after this one ends.
-The watcher returns assigned CRs before handoffs. When a CR appears, inspect the Markdown file, then approve, reject, or request revision through Baton.
+The watcher returns assigned CRs before handoffs. When a workstream-routed CR appears, claim it with `cr claim-review` before inspection, then approve, reject, request revision, or release the claim through Baton.
 If approved implementation should proceed, create implementation handoffs through Baton.
 If your role has direct design authority, do not create and self-review a CR. Record the authoritative contract and register implementation handoffs directly unless independent or user review is required.
 When worker results require planning reconciliation, register a planning handoff depending on every required worker job, then return to watch. Make that handoff complete enough for another planning agent to claim.
@@ -554,6 +559,21 @@ The installed CLI does not call Codex or hold Codex credentials. Existing Codex 
 After a handoff finishes, its agent can optionally run `notify targets <finished-job> --role <role> --from-agent <profile>` to list existing Codex peer candidates, ranked by recent session update. A project-local global or target-role stop, including shift expiry, returns `outside_shift` instead of a candidate; the handoff stays `open` and no host message should be sent. The agent sends one `candidate` a host follow-up containing the receiving handoff ID, then records the actual result with `notify record --status sent|failed`. The receiver must inspect and claim the handoff before editing.
 
 Registration itself is the opt-in switch; projects that do not register sessions retain the existing polling behavior. Baton does not assume that other models or hosts provide a compatible task-message protocol. Keep `wait`/`watch` for CR monitoring, unassigned role queues, inaccessible or stale tasks, failed messages, and non-Codex environments. Do not create new Codex tasks as part of this flow. End stale endpoints explicitly, and use `--replace` only after verifying the replacement task. Baton stores no host token or message body.
+
+### Known Fan-In Limitation
+
+Notification candidate selection is advisory and does not reserve an agent. It currently considers a profile busy only when `claimed_by` identifies it on an `in_progress` or `cancel_requested` handoff. CR reviews have a `reviewer_role` but no concrete reviewer claim, so an agent already reviewing a CR may still appear available. Parallel finishers can also select the same idle profile before the first notified handoff is claimed.
+
+Treat incoming messages as queue wake-ups, never as preemption:
+
+1. Continue the currently claimed handoff or CR review; do not replace its context with the newest message.
+2. After the current unit reaches a safe Baton transition, run `watch` or `next` again.
+3. Re-open the referenced handoff or CR from Baton because the message may now be stale.
+4. Start a handoff only after `claim` succeeds. A message alone grants no ownership.
+
+At a planned convergence point, prefer one fan-in handoff with every branch listed through `--depends-on`. When completion also requires an explicit review decision, place that handoff behind a Gate. This produces one readiness transition and one optional wake-up after all branches finish. If genuinely independent review jobs are required, leave them in the role queue and let the reviewer claim them serially.
+
+This remains an operational limitation until Baton has an atomic, expiring dispatch reservation and a concrete CR-review claim. Do not assume `candidate` means the recipient is still idle at message-delivery time.
 
 ## When To Avoid Sharing One Database
 
