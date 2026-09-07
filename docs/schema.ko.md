@@ -26,6 +26,7 @@
 - `handoff_controls`: wait loop 중지/재개 제어
 - `waiter_leases`: polling interval 자동 조절을 위한 handoff 및 CR waiter heartbeat
 - `agent_sessions`: stable agent profile의 opt-in runtime host thread 및 model metadata
+- `agent_workstreams`: role 내부의 세부 작업 라우팅 자격
 - `handoff_notifications`: peer thread message 전달 결과 감사 기록
 - `workspace_events`: handoff 전환의 선택적 Git commit provenance와 정책 결과
 - `change_requests`: CR workflow 상태와 Markdown 파일 참조
@@ -52,7 +53,7 @@
 | `name` | `text` | 예 | 변경되지 않는 migration 이름입니다. |
 | `applied_at` | `text` | 예 | migration이 commit된 UTC 시각입니다. |
 
-`baton migrate`는 검증된 SQLite backup을 먼저 만든 뒤 pending migration, 해당되는 seed 보강, `PRAGMA quick_check`, `PRAGMA foreign_key_check`를 하나의 transaction에서 실행합니다. 실패하면 schema 변경, seed 변경, migration record가 함께 rollback됩니다. 일반 workflow 명령은 pending migration을 자동 적용하지 않고 실패합니다. 전체 기본 권한은 신규 또는 무버전 DB에만 seed하며, 이후 migration은 그 migration에서 새로 도입한 권한만 추가하므로 프로젝트별 권한 철회가 보존됩니다.
+`baton migrate`는 검증된 SQLite backup을 먼저 만든 뒤 pending migration, 해당되는 seed 보강, `PRAGMA quick_check`, `PRAGMA foreign_key_check`를 하나의 transaction에서 실행합니다. 실패하면 schema 변경, seed 변경, migration record가 함께 rollback됩니다. 일반 workflow 명령은 pending migration을 자동 적용하지 않고 실패하며, waiter, active handoff, cancellation acknowledgement 또는 claimed submitted CR review가 남아 있으면 migration을 거부합니다. 전체 기본 권한은 신규 또는 무버전 DB에만 seed하며, 이후 migration은 그 migration에서 새로 도입한 권한만 추가하므로 프로젝트별 권한 철회가 보존됩니다.
 
 현재 binary가 아는 migration:
 
@@ -67,6 +68,7 @@
 8 cr_body_integrity
 9 plan_revision_controls
 10 opt_in_thread_notifications
+11 workstream_routing
 ```
 
 `baton migrate --check`는 DB가 현재 binary가 아는 최신 schema version인지 읽기 전용으로 확인합니다.
@@ -234,6 +236,7 @@ workspace.override
 | `title` | `text` | 예 | 사람이 읽기 쉬운 짧은 제목입니다. |
 | `status` | `text` | 예 | 현재 queue 상태입니다. |
 | `target_role` | `text` | 예 | 이 job을 claim/finish할 수 있는 표준 role입니다. |
+| `workstream` | `text` | 아니오 | claimant가 `target_role` 안에서 등록해야 하는 선택적 세부 작업 영역입니다. |
 | `source_ref` | `text` | 아니오 | 원천 CR, QA report, 사용자 요청, 문서 참조입니다. |
 | `objective` | `text` | 예 | target role이 완료해야 할 작업 목적입니다. |
 | `exit_criteria` | `text` | 예 | 완료 판단 기준입니다. |
@@ -534,6 +537,24 @@ Claim 동작:
 
 `unique(host, thread_id)`는 한 host thread가 두 profile을 나타내는 것을 방지하고 partial unique index는 `agent_id`마다 하나의 active endpoint만 허용합니다. session 교체에는 명시적 `--replace`가 필요합니다. `active`는 현재 실행 중이라는 뜻이 아니라 이후 follow-up을 받을 수 있다는 뜻입니다.
 
+## `agent_workstreams`
+
+용도:
+
+- role 권한과 세부 작업 라우팅 자격을 분리합니다.
+- 하나의 넓은 role 안에서 `api-contract`, `ui-regression` 같은 안정적인 영역을 agent가 표시할 수 있게 합니다.
+
+컬럼:
+
+| 컬럼 | 타입 | 필수 | 용도 |
+| --- | --- | --- | --- |
+| `agent_id` | `text` | 예 | 안정적인 구체 agent profile입니다. |
+| `role_id` | `text` | 예 | 세부 작업 영역이 적용되는 role입니다. |
+| `workstream` | `text` | 예 | 정규화된 domain route입니다. |
+| `created_at` | `text` | 예 | UTC 등록 시각입니다. |
+
+복합 primary key는 `(agent_id, role_id, workstream)`입니다. Handoff 또는 CR의 workstream이 null이면 이전 role-only 라우팅을 유지합니다. Workstream 등록은 role 권한을 부여하지 않습니다.
+
 ## `handoff_notifications`
 
 용도:
@@ -561,7 +582,7 @@ Claim 동작:
 | `detail` | `text` | 아니오 | 결과 상세이며 CLI는 실패 시 필수로 요구합니다. |
 | `created_at` | `text` | 예 | 전달 시도 시각입니다. |
 
-partial unique index는 handoff마다 최대 하나의 `sent` row만 허용합니다. 실패 시도는 fallback 진단을 위해 보존합니다. 일반적으로 `finish`가 ready 직접 하위 작업을 승격하며, `notify targets`는 호환성 reconciliation을 위해 동일한 범위의 승격을 유지하고 현재 `in_progress` 또는 `cancel_requested` handoff를 소유하지 않은 active Codex peer 후보를 반환합니다. 프로젝트 로컬 global 또는 대상 role stop이 적용되거나 shift가 만료된 경우에는 후보 없이 `outside_shift`를 반환하며 handoff는 `open`으로 유지됩니다. 이 명령은 message를 보내지 않으며 다른 model host가 호환되는 peer messaging을 제공한다고 가정하지 않습니다. `notify record`는 agent가 host messaging tool을 사용한 후 보고한 결과를 기록합니다. 어느 명령도 handoff를 claim하지 않습니다. 인증 token과 message 본문은 저장하지 않습니다.
+partial unique index는 handoff마다 최대 하나의 `sent` row만 허용합니다. 실패 시도는 fallback 진단을 위해 보존합니다. 일반적으로 `finish`가 ready 직접 하위 작업을 승격하며, `notify targets`는 호환성 reconciliation을 위해 동일한 범위의 승격을 유지하고 선택적 workstream과 일치하며 현재 `in_progress` 또는 `cancel_requested` handoff나 claimed submitted CR review를 소유하지 않은 active Codex peer 후보를 반환합니다. 프로젝트 로컬 global 또는 대상 role stop이 적용되거나 shift가 만료된 경우에는 후보 없이 `outside_shift`를 반환하며 handoff는 `open`으로 유지됩니다. 이 명령은 message를 보내지 않으며 다른 model host가 호환되는 peer messaging을 제공한다고 가정하지 않습니다. `notify record`는 agent가 host messaging tool을 사용한 후 보고한 결과를 기록합니다. 어느 명령도 handoff를 claim하지 않습니다. 인증 token과 message 본문은 저장하지 않습니다.
 
 ## `change_requests`
 
@@ -580,6 +601,9 @@ partial unique index는 handoff마다 최대 하나의 `sent` row만 허용합�
 | `status` | `text` | 예 | 현재 CR workflow 상태입니다. |
 | `author_role` | `text` | 예 | CR 본문을 작성/보강하는 role입니다. |
 | `reviewer_role` | `text` | 예 | 이 CR을 심사할 수 있는 role입니다. |
+| `reviewer_workstream` | `text` | 아니오 | 구체 reviewer에게 요구되는 선택적 세부 작업 영역입니다. |
+| `review_claimed_by` | `text` | 아니오 | 현재 review claim을 소유하거나 심사를 완료한 구체 agent입니다. |
+| `review_started_at` | `text` | 아니오 | 최근 review claim의 UTC 시각입니다. |
 | `file_path` | `text` | 예 | Markdown 본문 파일 경로입니다. |
 | `created_at` | `text` | 예 | UTC 생성 시각입니다. |
 | `updated_at` | `text` | 예 | UTC 수정 시각입니다. |
@@ -611,6 +635,8 @@ cancelled
 
 - `draft -> submitted`는 author role이 수행합니다.
 - `submitted -> revision_requested`, `approved`, `rejected`는 reviewer role이 수행합니다.
+- Workstream으로 라우팅된 submitted review는 자격이 있는 구체 agent가 먼저 claim해야 하며, 해당 claimant만 심사 결정을 할 수 있습니다.
+- Resubmit과 reviewer 재지정은 이전 review claim을 해제합니다. `cr release-review`는 결정하지 않은 submitted review claim을 감사 사유와 함께 해제합니다.
 - `revision_requested -> submitted`는 Markdown 본문 보강 후 author role이 수행합니다.
 - 승인은 현재 본문이 `submitted_body_hash`와 일치해야 하며 `approved_body_hash`를 기록합니다.
 - implementation handoff 생성, claim, finish와 최종 구현 완료 처리는 승인 본문 hash가 유지돼야 합니다.

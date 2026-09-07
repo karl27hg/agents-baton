@@ -14,9 +14,16 @@ fi
 export PIPX_HOME="$TMP_ROOT/pipx-home"
 export PIPX_BIN_DIR="$TMP_ROOT/bin"
 export PIPX_MAN_DIR="$TMP_ROOT/man"
+export PIP_CACHE_DIR="$TMP_ROOT/pip-cache"
+export HOME="$TMP_ROOT/home"
 
-mkdir -p "$PIPX_BIN_DIR" "$PIPX_MAN_DIR"
-"$PIPX_COMMAND" install "$ROOT"
+mkdir -p "$PIPX_BIN_DIR" "$PIPX_MAN_DIR" "$PIP_CACHE_DIR" "$HOME"
+WHEEL_DIR="$TMP_ROOT/wheels"
+mkdir -p "$WHEEL_DIR"
+python3 -m pip wheel --no-build-isolation --no-deps --wheel-dir "$WHEEL_DIR" "$ROOT" >/dev/null
+WHEEL_PATH="$(find "$WHEEL_DIR" -maxdepth 1 -type f -name 'agents_baton-*.whl' -print -quit)"
+test -n "$WHEEL_PATH"
+"$PIPX_COMMAND" install --skip-maintenance --backend pip "$WHEEL_PATH"
 
 EXPECTED_VERSION="$("$ROOT/bin/baton" --version)"
 ACTUAL_VERSION="$("$PIPX_BIN_DIR/baton" --version)"
@@ -34,7 +41,7 @@ mkdir -p "$CONSUMER"
   cd "$CONSUMER"
   "$PIPX_BIN_DIR/baton" init
   "$PIPX_BIN_DIR/baton" migrate --check
-  "$PIPX_BIN_DIR/baton" project info | grep 'schema_version: 10' >/dev/null
+  "$PIPX_BIN_DIR/baton" project info | grep 'schema_version: 11' >/dev/null
   "$PIPX_BIN_DIR/baton" role add update-sentinel --display-name "Update Sentinel"
   "$PIPX_BIN_DIR/baton" role list >/dev/null
   "$PIPX_BIN_DIR/baton-report" summary >/dev/null
@@ -82,7 +89,20 @@ if count != 1:
     raise SystemExit("could not replace test package version")
 path.write_text(updated, encoding="utf-8")
 PY
-"$PIPX_COMMAND" install --force "$UPGRADE_SOURCE"
+UPGRADE_WHEEL_DIR="$TMP_ROOT/upgrade-wheels"
+mkdir -p "$UPGRADE_WHEEL_DIR"
+python3 -m pip wheel \
+  --no-build-isolation \
+  --no-deps \
+  --wheel-dir "$UPGRADE_WHEEL_DIR" \
+  "$UPGRADE_SOURCE" >/dev/null
+UPGRADE_WHEEL="$(find "$UPGRADE_WHEEL_DIR" -maxdepth 1 -type f -name 'agents_baton-9999.0.0-*.whl' -print -quit)"
+test -n "$UPGRADE_WHEEL"
+"$PIPX_COMMAND" install \
+  --force \
+  --skip-maintenance \
+  --backend pip \
+  "$UPGRADE_WHEEL"
 UPDATED_VERSION="$("$PIPX_BIN_DIR/baton" --version)"
 test "$UPDATED_VERSION" = "baton 9999.0.0"
 (

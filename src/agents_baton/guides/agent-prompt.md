@@ -44,6 +44,15 @@ Do not rely on Codex thread IDs, turn IDs, or temporary files as the only long-l
 
 If several agents share the same workspace, do not let them unintentionally share the same default identity file. Prefer `--claimed-by <profile-name>` or `BATON_AGENT_ID=<profile-name>` when the profile name is already known.
 
+When the project routes a broad role into specialized workstreams, register only the domains this agent can actually own:
+
+```bash
+baton agent workstream-add api-contract --role integration --agent-id integration-api
+baton agent workstream-list --agent-id integration-api
+```
+
+`role` controls authority. `workstream` controls eligibility inside that role. A role-only handoff remains eligible to every agent in the role for backward compatibility.
+
 ## Delegation Rules
 
 - Do not create subagents, child tasks, parallel agent sessions, or delegated background agents while operating under Baton.
@@ -86,6 +95,15 @@ Reviewer roles waiting for CR review work use:
 baton --db <db> cr wait-review --role <role> --timeout 900
 ```
 
+For a workstream-routed review, pass the stable identity, then claim before reading or deciding it:
+
+```bash
+baton --db <db> cr wait-review --role integration --agent-id integration-api --timeout 900
+baton --db <db> cr claim-review <cr-id> --role integration --claimed-by integration-api
+```
+
+Use `cr release-review --reason ...` when the claimant must yield without deciding. Do not begin a second Baton unit while retaining the review claim.
+
 Planner/SM roles that receive both handoffs and CR reviews use `watch`, which checks assigned CR reviews first and then ready handoffs:
 
 ```bash
@@ -111,6 +129,7 @@ Shift handling:
 - After a successful `finish`, `fail`, or CR review action, report the transition once, check shift status, and re-enter the appropriate bounded wait only if the shift is still active.
 - In opt-in Codex peer-notification mode, a successful notification of ready successor work removes the need for the sender to wait solely to wake that successor. Keep waiting only for the sender's own remaining role obligations, CR monitoring, or notification fallback.
 - After `finish`, `baton handoff successors <finished-job>` may be used to inspect direct workflow successors. Its `target_role` is eligibility, not assignment; `unassigned` work belongs to no concrete agent until `claim` succeeds.
+- One concrete agent identity may own only one active handoff or submitted CR review. Finish, fail, cancel, decide, or explicitly release the current unit before claiming another.
 
 A global shift uses `shift start --all`, `shift extend --all`, and `shift end --all`. Global and role scopes are cumulative controls: either scope can stop a role. Changing one scope does not clear an expired or stopped state on the other scope.
 
@@ -156,6 +175,8 @@ baton notify record HO-... \
 ```
 
 For an error, use `--status failed --detail <reason>`, then try the next listed candidate or fall back to the receiver's normal `wait`/`watch` loop. Codex peer messaging is an optional transport optimization, not a protocol assumed to exist in other model hosts. Baton permits only one successful notification record per handoff to suppress duplicate wake-ups. A delivered message never changes the handoff to `in_progress`; only `claim` does that.
+
+Notification does not reserve recipient capacity. Parallel senders may select the same profile before its first claim, and an agent performing a CR review is not currently marked busy by a concrete review claim. An incoming message never preempts the receiver's active handoff or review. Finish or safely transition the current unit first, then re-read Baton state and claim only still-eligible work. Do not abandon current work merely because a newer message arrived.
 
 ## Claim Rules
 

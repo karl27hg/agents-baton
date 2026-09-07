@@ -17,6 +17,8 @@ Examples use the pipx-installed `baton` command from `PATH`. From a Baton source
 - When independence is uncertain, serialize the jobs. Register the upstream handoff first and add its ID to each downstream handoff with `--depends-on`.
 - Use a named Gate when downstream work must be registered before a future predecessor ID exists or when release requires an explicit planning decision.
 - Give each handoff one target role, a bounded objective, concrete exit criteria, and the source reference that defines its scope.
+- Keep `role` for authorization and use optional `--workstream` for specialization within a broad role. Prefer stable domain names such as `api-contract`, `ui-regression`, or `data-migration`; do not encode an agent name in the workstream.
+- At a validation fan-in, register independent evidence-producing workstreams in parallel, then one final integration handoff that depends on every required result. The final merge, acceptance decision, and Gate release remain serialized.
 - Do not create duplicate handoffs for the same output. Use `baton handoff list` and `baton handoff show` to inspect existing status and payload before replacing or retrying work.
 - Do not use execution speed as evidence that jobs are independent.
 - A predecessor marked `finished` does not prove that its commit exists in a downstream worktree. Before releasing integration-dependent work, merge or cherry-pick the required commit into its base, or hold the work behind an integration Gate.
@@ -48,6 +50,7 @@ Do not send a final response merely because the current planning action complete
 - One successful delivery record per handoff is the default duplicate-suppression boundary. Additional agents discover the job through Baton rather than repeated broadcast messages.
 - Keep a session active while its existing Codex task remains addressable by follow-up messages, even when it is not currently executing. End or replace stale endpoints explicitly.
 - Do not require peer delivery from non-Codex hosts or other models. Their interoperable baseline is Baton state plus `next`, `wait`, `watch`, and `claim`.
+- Candidate selection respects workstream registration and excludes agents that already own an active handoff or claimed CR review. Delivery still does not reserve capacity, so the receiver must claim before editing. At convergence points, register one fan-in handoff that depends on every required branch, optionally behind a Gate, so readiness and notification occur once after all inputs finish.
 
 ## Parallel-Safety Decision
 
@@ -142,6 +145,8 @@ While a potentially breaking CR is still under review, do not silently reinterpr
 ## Runtime Guarantees And Limits
 
 Baton prevents two agents from successfully claiming the same handoff and keeps declared dependency transitions transactional. It does not inspect source files, predict write sets, detect semantic API conflicts, or infer missing dependency edges. The planner owns those decisions.
+
+Baton permits one active claimed handoff or submitted CR review per concrete agent identity. This limits message pile-up, but it does not increase the throughput of a genuinely serial integration decision. Reduce that bottleneck by splitting independent evidence collection into workstreams, keeping integration ownership explicit, and avoiding parallel writes to the same integration branch or shared environment.
 
 Baton also cannot disable subagent or thread-creation tools provided by the agent host. The project `AGENTS.md` or equivalent host policy must enforce the no-subagent rule; this guide defines the required Baton behavior.
 
