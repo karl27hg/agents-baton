@@ -170,6 +170,17 @@ pipx list
 baton --version
 ```
 
+Before replacing the shared executable, run preflight in every active Baton project with the currently compatible version:
+
+```bash
+cd /path/to/your-project
+baton upgrade preflight
+baton stop --all --reason "Baton upgrade"
+baton upgrade preflight
+```
+
+The first check lists active waiter, handoff, cancellation, and claimed CR-review IDs. Drain them and repeat until preflight reports `READY`. Exit `0` means a global maintenance stop is active and every blocker is drained. Installing first can leave the new CLI unable to finish work on an older schema; if that happens, `upgrade preflight` still diagnoses known older schemas, but use the previous compatible Baton executable to perform the listed transitions.
+
 For a future package-index installation, upgrade the managed application with:
 
 ```bash
@@ -183,16 +194,17 @@ pipx install --force "git+https://github.com/karl27hg/agents-baton.git@vNEW.VERS
 baton --version
 ```
 
-After changing the installed Baton version, enter every active consuming project and inspect its database location before starting agents. If `.baton/baton.sqlite3` already exists, apply or verify its schema migration:
+After changing the installed Baton version, return to every preflighted project and inspect its database location before starting agents. If `.baton/baton.sqlite3` already exists, apply or verify its schema migration, then explicitly resume:
 
 ```bash
 cd /path/to/your-project
 baton migrate
 baton migrate --check
 baton project info
+baton resume --all
 ```
 
-Only `baton migrate`, its deprecated `update` alias, and the checked project migration flow may change the schema. Normal workflow commands reject a pending migration. `baton migrate` writes a validated backup under the database's `backups/` directory before applying pending migrations, then performs the migration transactionally. Migration is refused while waiters, active handoffs, cancellation acknowledgements, or claimed submitted CR reviews remain active. Avoid downgrading to an older Baton after a schema migration because an older executable may not support the newer database schema.
+Only `baton migrate`, its deprecated `update` alias, and the checked project migration flow may change the schema. Normal workflow commands reject a pending migration. `upgrade preflight` is read-only and intentionally supports known older schemas so it can diagnose an interrupted upgrade. `baton migrate` writes a validated backup under the database's `backups/` directory before applying pending migrations, then performs the migration transactionally. Migration is refused while waiters, active handoffs, cancellation acknowledgements, or claimed submitted CR reviews remain active and reports their IDs. Avoid downgrading to an older Baton after a schema migration because an older executable may not support the newer database schema.
 
 Released schema migrations are append-only and retained so a dormant project can upgrade directly across multiple tagged Baton versions when it is next used. Compatibility covers released Baton schemas and recognized unversioned legacy databases, not arbitrary development snapshots, manually edited schemas, or downgrade operations.
 
@@ -404,7 +416,7 @@ bin/baton role permission-add architecture workspace.override
 bin/baton role permission-remove sm cr.approve
 ```
 
-After changing the Baton binary or release tag, run `bin/baton migrate` before starting role agents. Migrations are versioned, transactional, and idempotent: existing handoff, CR, event, control, role, and permission rows are preserved. A failed migration is rolled back.
+Before changing the Baton binary or release tag, run `bin/baton upgrade preflight`, drain every listed object under a global maintenance stop, and repeat until it reports `READY`. After changing the binary, run `bin/baton migrate` before starting role agents. Migrations are versioned, transactional, and idempotent: existing handoff, CR, event, control, role, and permission rows are preserved. A failed migration is rolled back.
 
 ```bash
 bin/baton migrate
@@ -489,6 +501,8 @@ bin/baton register \
 
 Use stable domain names for workstreams, not agent names. A handoff without `--workstream` remains eligible to every agent in its target role for backward compatibility. `next`, `wait`, `watch`, and CR review waiting use `--agent-id`, `BATON_AGENT_ID`, or the local identity file to match specialized work.
 
+Use `next --explain` when a ready queue appears empty. It reports the resolved agent, requested and active-session roles, workstream exclusions, and current ownership. A session-role mismatch is an advisory warning rather than a rejection because Baton permits explicitly authorized multi-role operation.
+
 Baton permits one active claimed handoff or submitted CR review per concrete agent identity. Finish, fail, cancel, decide, or release the current unit before claiming another. This is a workflow capacity guard, not a promise that source changes are conflict-free.
 
 ## Opt-In Codex Peer Notifications
@@ -534,14 +548,15 @@ bin/baton notify record HO-READY \
   --detail "Codex accepted the follow-up."
 ```
 
-Use `--status failed --detail <reason>` when delivery fails, then try the next candidate or retain the receiver's `wait`/`watch` fallback. Baton records at most one successful notification for each handoff attempt to avoid repeated wake-up messages. An approved `retry` increments the attempt, so a new baseline may be delivered and audited without colliding with the previous successful notification. Delivery does not claim work, and no Baton agent may create a new task or send work that is not registered in Baton.
+Use `--status failed --detail <reason>` when delivery fails, then try the next candidate or retain the receiver's `wait`/`watch` fallback. The compatible stored value `sent` is displayed as `host_accepted`: it proves only that the host accepted the message, not that the receiving task observed it. Baton records at most one successful notification for each handoff attempt to avoid repeated wake-up messages. An approved `retry` increments the attempt, so a new baseline may be delivered and audited without colliding with the previous successful notification. Delivery does not claim work, and no Baton agent may create a new task or send work that is not registered in Baton.
 
 ```bash
 bin/baton agent session-list --status active
 bin/baton notify list --job HO-READY
+bin/baton notify status HO-READY --stale-after 15m
 ```
 
-Successful delivery means the sender does not need to wait solely to wake that successor. Polling remains required for CR monitoring, unassigned role work, unavailable endpoints, delivery failures, and non-Codex hosts.
+`notify status` derives whether the current attempt is unnotified, host-accepted but unclaimed, stale, claimed by the recipient, or claimed by another agent. It does not resend messages automatically. Host acceptance means the sender does not need to wait solely to wake that successor when the push-first conditions are met. Polling remains required for CR monitoring, unassigned role work, unavailable endpoints, delivery failures, and non-Codex hosts.
 
 ### Converging Work and Message Pile-Up
 
@@ -771,6 +786,7 @@ Reviewer roles can wait for submitted CRs:
 
 ```bash
 bin/baton cr wait-review --role sm --timeout 900
+bin/baton cr list --status submitted --reviewer-role sm
 ```
 
 For a specialized review queue, route the CR and claim it as one concrete reviewer:
@@ -950,11 +966,14 @@ Read-only commands do not claim ownership:
 - `role list`
 - `role permission-list`
 - `migrate --check`
+- `upgrade preflight`
 - `status`
 - `next`
 - `handoff list`
 - `handoff show`
 - `handoff successors`
+- `notify list`
+- `notify status`
 - `events`
 - `gate status`
 - `gate events`
@@ -963,6 +982,7 @@ Read-only commands do not claim ownership:
 - `workspace check`
 - `workspace events`
 - `cr status`
+- `cr list`
 - `cr events`
 
 `cr sync` reads SQLite without changing workflow state, but it does replace the CR Markdown frontmatter on disk.
@@ -985,6 +1005,7 @@ tests/agent-id.sh
 tests/cr-flow.sh
 tests/gates.sh
 tests/workstream-routing.sh
+tests/rc4-operations.sh
 tests/handoff-cancel.sh
 tests/handoff-dependencies.sh
 tests/migrate.sh
@@ -1054,7 +1075,7 @@ A planner or SM that receives both review and handoff work uses the combined wat
 bin/baton watch --role planning --timeout 900
 ```
 
-Continuous circulation exists only while the agent keeps its current host turn active and re-enters bounded `watch` calls. Baton records workflow state and blocks in the CLI, but it cannot start a new Codex turn after an agent sends its final response.
+Polling circulation exists only while the agent keeps its current host turn active and re-enters bounded `watch` calls. A reachable Codex planner may instead become addressable idle with no CLI waiter when it owns no active work or review, every expected return path is an explicit planning handoff, and every producer can notify its active session. On a message, it must re-read and claim Baton state. Keep `watch` for CR review without a notification path, unassigned role work, stale or failed delivery, and non-Codex hosts.
 
 Omitting `--interval` is equivalent to selecting automatic mode explicitly:
 

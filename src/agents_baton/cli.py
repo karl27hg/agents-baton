@@ -1739,6 +1739,20 @@ def active_waiter_count(con: sqlite3.Connection) -> int:
     return int(row[0])
 
 
+def active_waiter_rows(con: sqlite3.Connection) -> list[sqlite3.Row]:
+    if "waiter_leases" not in database_table_names(con):
+        return []
+    return con.execute(
+        """
+        select waiter_id, wait_kind, role_id, heartbeat_at, lease_expires_at
+        from waiter_leases
+        where lease_expires_at > ?
+        order by role_id, wait_kind, waiter_id
+        """,
+        (utc_now(),),
+    ).fetchall()
+
+
 def in_progress_handoff_count(con: sqlite3.Connection) -> int:
     if "handoff_jobs" not in database_table_names(con):
         return 0
@@ -1747,6 +1761,19 @@ def in_progress_handoff_count(con: sqlite3.Connection) -> int:
             "select count(*) from handoff_jobs where status in ('in_progress', 'cancel_requested')"
         ).fetchone()[0]
     )
+
+
+def in_progress_handoff_rows(con: sqlite3.Connection) -> list[sqlite3.Row]:
+    if "handoff_jobs" not in database_table_names(con):
+        return []
+    return con.execute(
+        """
+        select job_id, status, target_role, claimed_by
+        from handoff_jobs
+        where status in ('in_progress', 'cancel_requested')
+        order by created_at, job_id
+        """
+    ).fetchall()
 
 
 def active_cr_review_count(con: sqlite3.Connection) -> int:
@@ -1766,6 +1793,28 @@ def active_cr_review_count(con: sqlite3.Connection) -> int:
             """
         ).fetchone()[0]
     )
+
+
+def active_cr_review_rows(con: sqlite3.Connection) -> list[sqlite3.Row]:
+    if "change_requests" not in database_table_names(con):
+        return []
+    columns = {
+        row["name"] for row in con.execute("PRAGMA table_info(change_requests)").fetchall()
+    }
+    if "review_claimed_by" not in columns:
+        return []
+    reviewer_workstream = (
+        "reviewer_workstream" if "reviewer_workstream" in columns else "null"
+    )
+    return con.execute(
+        f"""
+        select cr_id, reviewer_role, {reviewer_workstream} as reviewer_workstream,
+               review_claimed_by
+        from change_requests
+        where status = 'submitted' and review_claimed_by is not null
+        order by submitted_at, created_at, cr_id
+        """
+    ).fetchall()
 
 
 def global_stop_is_active(con: sqlite3.Connection) -> bool:
@@ -2893,6 +2942,78 @@ def command_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_upgrade_preflight(args: argparse.Namespace) -> int:
+    path = Path(args.db).expanduser().resolve()
+    if not path.is_file():
+        raise MigrationError(f"database does not exist: {path}")
+    with closing(connect_readonly(str(path))) as con:
+        tables = database_table_names(con)
+        baton_tables = {"roles", "handoff_jobs", "handoff_controls", "change_requests"}
+        if not tables.intersection(baton_tables):
+            raise MigrationError(f"database is not a recognized Baton database: {path}")
+        schema = current_schema_version(con)
+        if schema > LATEST_SCHEMA_VERSION:
+            raise MigrationError(
+                f"database schema is newer than this Baton version: "
+                f"schema={schema} latest={LATEST_SCHEMA_VERSION}"
+            )
+        validate_database(con)
+        waiters = active_waiter_rows(con)
+        handoffs = in_progress_handoff_rows(con)
+        reviews = active_cr_review_rows(con)
+        global_stop = global_stop_is_active(con)
+
+    ready = global_stop and not waiters and not handoffs and not reviews
+    payload = {
+        "status": "ready" if ready else "not_ready",
+        "database": str(path),
+        "baton_version": BATON_VERSION,
+        "schema_version": schema,
+        "global_stop": global_stop,
+        "active_waiters": [{key: row[key] for key in row.keys()} for row in waiters],
+        "active_handoffs": [{key: row[key] for key in row.keys()} for row in handoffs],
+        "active_cr_reviews": [{key: row[key] for key in row.keys()} for row in reviews],
+    }
+    if args.format == "json":
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0 if ready else 2
+
+    print(f"Upgrade preflight {'READY' if ready else 'NOT READY'}")
+    print(f"database: {path}")
+    print(f"baton_version: {BATON_VERSION}")
+    print(f"schema_version: {schema}")
+    print(f"global_stop: {'yes' if global_stop else 'no'}")
+    for row in waiters:
+        print(
+            f"waiter: {row['waiter_id']} kind={row['wait_kind']} role={row['role_id']} "
+            f"lease_expires_at={row['lease_expires_at']}"
+        )
+    for row in handoffs:
+        print(
+            f"handoff: {row['job_id']} status={row['status']} role={row['target_role']} "
+            f"claimed_by={row['claimed_by'] or ''}"
+        )
+    for row in reviews:
+        print(
+            f"cr_review: {row['cr_id']} role={row['reviewer_role']} "
+            f"workstream={row['reviewer_workstream'] or ''} "
+            f"claimed_by={row['review_claimed_by']}"
+        )
+    if not global_stop:
+        print("action: run 'baton stop --all --reason \"Baton upgrade\"' before draining")
+    if waiters:
+        print("action: wait for listed waiter leases to exit or expire")
+    if handoffs:
+        print("action: finish, fail, or cooperatively cancel the listed handoffs")
+    if reviews:
+        print("action: decide or release the listed CR reviews")
+    if ready:
+        print("action: upgrade Baton, run 'baton migrate', verify, then explicitly resume")
+    else:
+        print("action: rerun 'baton upgrade preflight' after every blocker is drained")
+    return 0 if ready else 2
+
+
 def command_migrate(args: argparse.Namespace) -> int:
     path = Path(args.db)
     validate_marker_for_database(path)
@@ -2918,22 +3039,24 @@ def command_migrate(args: argparse.Namespace) -> int:
             if marker:
                 print(f"Project marker {marker}")
             return 0
-        waiters = active_waiter_count(con)
+        waiters = active_waiter_rows(con)
+        active_handoffs = in_progress_handoff_rows(con)
+        active_reviews = active_cr_review_rows(con)
+        blockers: list[str] = []
         if waiters:
-            raise MigrationError(
-                f"cannot migrate while {waiters} Baton waiter(s) are active; stop agents and retry"
-            )
-        active_handoffs = in_progress_handoff_count(con)
+            blockers.append("waiters=" + ",".join(row["waiter_id"] for row in waiters))
         if active_handoffs:
-            raise MigrationError(
-                f"cannot migrate while {active_handoffs} handoff(s) are in progress or awaiting "
-                "cancellation acknowledgement; finish or cancel them and retry"
+            blockers.append(
+                "handoffs="
+                + ",".join(f"{row['job_id']}:{row['status']}" for row in active_handoffs)
             )
-        active_reviews = active_cr_review_count(con)
         if active_reviews:
+            blockers.append("cr_reviews=" + ",".join(row["cr_id"] for row in active_reviews))
+        if blockers:
             raise MigrationError(
-                f"cannot migrate while {active_reviews} CR review(s) are claimed; "
-                "decide or release them and retry"
+                "cannot migrate while workflow activity is present: "
+                + "; ".join(blockers)
+                + "; drain with the previous compatible Baton and run 'baton upgrade preflight'"
             )
         signature = database_content_signature(con)
 
@@ -4575,6 +4698,73 @@ def command_cr_mark_implemented(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_cr_list(args: argparse.Namespace) -> int:
+    if args.limit <= 0:
+        raise SystemExit("ERROR: --limit must be greater than zero")
+    conditions: list[str] = []
+    params: list[object] = []
+    if args.status:
+        conditions.append("status = ?")
+        params.append(args.status)
+    if args.reviewer_workstream:
+        conditions.append("reviewer_workstream = ?")
+        params.append(normalize_workstream(args.reviewer_workstream))
+    if args.claimed_by:
+        if args.claimed_by == "unassigned":
+            conditions.append("review_claimed_by is null")
+        else:
+            conditions.append("review_claimed_by = ?")
+            params.append(args.claimed_by.strip())
+    with connect(args.db) as con:
+        init_schema(con)
+        if args.reviewer_role:
+            conditions.append("reviewer_role = ?")
+            params.append(resolve_role(con, args.reviewer_role))
+        where = f"where {' and '.join(conditions)}" if conditions else ""
+        rows = con.execute(
+            f"""
+            select *
+            from change_requests
+            {where}
+            order by created_at, cr_id
+            """,
+            params,
+        ).fetchall()
+        payload: list[dict[str, object]] = []
+        for row in rows:
+            integrity, _ = cr_body_integrity(con, row)
+            if args.body_integrity and integrity != args.body_integrity:
+                continue
+            payload.append(
+                {
+                    "cr_id": row["cr_id"],
+                    "status": row["status"],
+                    "title": row["title"],
+                    "author_role": row["author_role"],
+                    "reviewer_role": row["reviewer_role"],
+                    "reviewer_workstream": row["reviewer_workstream"] or "",
+                    "review_claimed_by": row["review_claimed_by"] or "",
+                    "body_integrity": integrity,
+                    "file_path": str(project_file_path(con, row["file_path"])),
+                }
+            )
+            if len(payload) >= args.limit:
+                break
+    if args.format == "json":
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0
+    if not payload:
+        print("No change requests.")
+        return 0
+    for item in payload:
+        print(
+            f"{item['cr_id']}\t{item['status']}\t{item['reviewer_role']}\t"
+            f"{item['reviewer_workstream']}\t{item['review_claimed_by'] or 'unassigned'}\t"
+            f"{item['body_integrity']}\t{item['title']}"
+        )
+    return 0
+
+
 def command_cr_status(args: argparse.Namespace) -> int:
     with connect(args.db) as con:
         init_schema(con)
@@ -4688,6 +4878,122 @@ def command_cr_events(args: argparse.Namespace) -> int:
     return 0
 
 
+def active_agent_ownership(con: sqlite3.Connection, agent_id: str) -> tuple[str, str]:
+    if not agent_id:
+        return "", ""
+    handoff = con.execute(
+        """
+        select job_id
+        from handoff_jobs
+        where claimed_by = ? and status in ('in_progress', 'cancel_requested')
+        order by created_at, job_id
+        limit 1
+        """,
+        (agent_id,),
+    ).fetchone()
+    review = con.execute(
+        """
+        select cr_id
+        from change_requests
+        where review_claimed_by = ? and status = 'submitted'
+        order by submitted_at, created_at, cr_id
+        limit 1
+        """,
+        (agent_id,),
+    ).fetchone()
+    return (
+        str(handoff["job_id"]) if handoff else "",
+        str(review["cr_id"]) if review else "",
+    )
+
+
+def warn_agent_session_role(con: sqlite3.Connection, role: str, agent_id: str) -> str:
+    if not agent_id:
+        return ""
+    session = active_agent_session(con, agent_id)
+    session_role = str(session["role_id"]) if session else ""
+    if session_role and session_role != role:
+        print(
+            f"WARNING: resolved agent {agent_id} has active session role {session_role}, "
+            f"but requested role is {role}; continuing because Baton permits explicit multi-role use",
+            file=sys.stderr,
+        )
+    return session_role
+
+
+def explain_agent_eligibility(
+    con: sqlite3.Connection,
+    role: str,
+    agent_id: str,
+    *,
+    include_reviews: bool = False,
+) -> None:
+    session = active_agent_session(con, agent_id) if agent_id else None
+    session_role = str(session["role_id"]) if session else ""
+    handoffs = con.execute(
+        """
+        select job_id, workstream
+        from handoff_jobs
+        where status = 'open' and target_role = ?
+        order by created_at, job_id
+        """,
+        (role,),
+    ).fetchall()
+    eligible_handoffs: list[str] = []
+    excluded_handoffs: list[tuple[str, str]] = []
+    for row in handoffs:
+        workstream = str(row["workstream"] or "")
+        if not workstream or agent_has_workstream(con, agent_id, role, workstream):
+            eligible_handoffs.append(str(row["job_id"]))
+        else:
+            excluded_handoffs.append((str(row["job_id"]), workstream))
+    active_handoff, active_review = active_agent_ownership(con, agent_id)
+    print(
+        f"eligibility: agent={agent_id or '<unset>'} requested_role={role} "
+        f"session_role={session_role or '<none>'} ready_handoffs={len(handoffs)} "
+        f"eligible_handoffs={len(eligible_handoffs)}",
+        file=sys.stderr,
+    )
+    for job_id, workstream in excluded_handoffs:
+        print(
+            f"excluded_handoff: {job_id} reason=missing_workstream_registration "
+            f"workstream={workstream}",
+            file=sys.stderr,
+        )
+    if active_handoff:
+        print(f"active_ownership: handoff={active_handoff}", file=sys.stderr)
+    if active_review:
+        print(f"active_ownership: cr_review={active_review}", file=sys.stderr)
+    if not include_reviews:
+        return
+    reviews = con.execute(
+        """
+        select cr_id, reviewer_workstream, review_claimed_by
+        from change_requests
+        where status = 'submitted' and reviewer_role = ?
+          and (review_claimed_by is null or review_claimed_by = ?)
+        order by submitted_at, created_at, cr_id
+        """,
+        (role, agent_id),
+    ).fetchall()
+    eligible_reviews = 0
+    for row in reviews:
+        workstream = str(row["reviewer_workstream"] or "")
+        if not workstream or agent_has_workstream(con, agent_id, role, workstream):
+            eligible_reviews += 1
+        else:
+            print(
+                f"excluded_cr_review: {row['cr_id']} "
+                f"reason=missing_workstream_registration workstream={workstream}",
+                file=sys.stderr,
+            )
+    print(
+        f"review_eligibility: submitted_reviews={len(reviews)} "
+        f"eligible_reviews={eligible_reviews}",
+        file=sys.stderr,
+    )
+
+
 def next_review_for_agent(
     con: sqlite3.Connection,
     role: str,
@@ -4757,6 +5063,9 @@ def command_watch(args: argparse.Namespace) -> int:
     deadline = None if args.timeout == 0 else time.monotonic() + args.timeout
     waiter_id, role, active_waiters = start_waiter(args, "watch")
     agent_id = optional_agent_id(args)
+    with connect(args.db) as con:
+        init_schema(con)
+        warn_agent_session_role(con, role, agent_id)
     try:
         while True:
             with connect(args.db) as con:
@@ -4811,6 +5120,10 @@ def command_watch(args: argparse.Namespace) -> int:
                 print(f"handoff\t{handoff['job_id']}\t{handoff['title']}{route}")
                 return 0
             if deadline is not None and time.monotonic() >= deadline:
+                if getattr(args, "explain", False):
+                    with connect(args.db) as con:
+                        init_schema(con)
+                        explain_agent_eligibility(con, role, agent_id, include_reviews=True)
                 print(f"Timed out watching role {role}")
                 return 2
             interval = poll_sleep_seconds(args.interval, active_waiters, waiter_id)
@@ -4997,6 +5310,10 @@ def command_next(args: argparse.Namespace) -> int:
     with connect(args.db) as con:
         init_schema(con)
         role = resolve_role(con, args.role)
+        if not getattr(args, "quiet", False):
+            warn_agent_session_role(con, role, agent_id)
+        if getattr(args, "explain", False):
+            explain_agent_eligibility(con, role, agent_id)
         row = con.execute(
             """
             select job_id, title, workstream
@@ -5887,9 +6204,79 @@ def command_notify_record(args: argparse.Namespace) -> int:
         notification_id = cursor.lastrowid
         con.commit()
     print(
-        f"notification={notification_id}\t{args.status}\t{args.job_id}\t"
+        f"notification={notification_id}\t"
+        f"{'host_accepted' if args.status == 'sent' else args.status}\t{args.job_id}\t"
         f"attempt={job['attempt']}\t{recipient_agent_id}"
     )
+    return 0
+
+
+def command_notify_status(args: argparse.Namespace) -> int:
+    stale_after = parse_duration(args.stale_after)
+    with connect(args.db) as con:
+        init_schema(con)
+        job = con.execute(
+            """
+            select job_id, status, target_role, workstream, claimed_by, attempt
+            from handoff_jobs
+            where job_id = ?
+            """,
+            (args.job_id,),
+        ).fetchone()
+        if not job:
+            raise SystemExit(f"ERROR: unknown job: {args.job_id}")
+        notification = con.execute(
+            """
+            select id, recipient_agent_id, recipient_thread_id, transport,
+                   message_ref, created_at
+            from handoff_notifications
+            where job_id = ? and attempt = ? and delivery_status = 'sent'
+            order by id desc
+            limit 1
+            """,
+            (args.job_id, job["attempt"]),
+        ).fetchone()
+
+    age_seconds: int | None = None
+    recipient = ""
+    last_notification_at = ""
+    if not notification:
+        state = "not_notified"
+    else:
+        recipient = str(notification["recipient_agent_id"])
+        last_notification_at = str(notification["created_at"])
+        age_seconds = max(
+            0,
+            int((datetime.now(timezone.utc) - parse_utc(last_notification_at)).total_seconds()),
+        )
+        claimant = str(job["claimed_by"] or "")
+        if claimant == recipient:
+            state = "claimed_by_recipient"
+        elif claimant:
+            state = "claimed_by_other"
+        elif job["status"] == "open" and age_seconds >= int(stale_after.total_seconds()):
+            state = "stale_unclaimed"
+        elif job["status"] == "open":
+            state = "host_accepted_unclaimed"
+        else:
+            state = f"host_accepted_{job['status']}"
+
+    payload = {
+        "job_id": job["job_id"],
+        "attempt": job["attempt"],
+        "handoff_status": job["status"],
+        "notification_state": state,
+        "recipient_agent_id": recipient,
+        "claimed_by": job["claimed_by"] or "",
+        "last_notification_at": last_notification_at,
+        "unclaimed_for_seconds": age_seconds if notification and not job["claimed_by"] else None,
+        "stale_after_seconds": int(stale_after.total_seconds()),
+    }
+    if args.format == "json":
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0
+    for key, value in payload.items():
+        print(f"{key}: {'' if value is None else value}")
     return 0
 
 
@@ -5916,7 +6303,13 @@ def command_notify_list(args: argparse.Namespace) -> int:
             """,
             params,
         ).fetchall()
-    payload = [{key: row[key] for key in row.keys()} for row in rows]
+    payload = []
+    for row in rows:
+        item = {key: row[key] for key in row.keys()}
+        item["delivery_state"] = (
+            "host_accepted" if row["delivery_status"] == "sent" else row["delivery_status"]
+        )
+        payload.append(item)
     if args.format == "json":
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return 0
@@ -5926,7 +6319,7 @@ def command_notify_list(args: argparse.Namespace) -> int:
     for row in rows:
         print(
             f"{row['id']}\t{row['job_id']}\tattempt={row['attempt']}\t"
-            f"{row['delivery_status']}\t"
+            f"{'host_accepted' if row['delivery_status'] == 'sent' else row['delivery_status']}\t"
             f"{row['sender_agent_id']}\t{row['recipient_agent_id']}\t"
             f"{row['transport']}\t{row['recipient_thread_id']}\t"
             f"{row['recipient_model']}\t{row['created_at']}\t{row['detail'] or ''}"
@@ -6246,6 +6639,10 @@ def command_control_status(args: argparse.Namespace) -> int:
 def command_wait(args: argparse.Namespace) -> int:
     deadline = None if args.timeout == 0 else time.monotonic() + args.timeout
     waiter_id, role, active_waiters = start_waiter(args, "handoff")
+    agent_id = optional_agent_id(args)
+    with connect(args.db) as con:
+        init_schema(con)
+        warn_agent_session_role(con, role, agent_id)
     try:
         while True:
             with connect(args.db) as con:
@@ -6260,13 +6657,17 @@ def command_wait(args: argparse.Namespace) -> int:
             next_args = argparse.Namespace(
                 db=args.db,
                 role=role,
-                agent_id=optional_agent_id(args),
+                agent_id=agent_id,
                 agent_id_file=getattr(args, "agent_id_file", ""),
                 quiet=True,
             )
             if command_next(next_args) == 0:
                 return 0
             if deadline is not None and time.monotonic() >= deadline:
+                if getattr(args, "explain", False):
+                    with connect(args.db) as con:
+                        init_schema(con)
+                        explain_agent_eligibility(con, role, agent_id)
                 print(f"Timed out waiting for role {role}")
                 return 2
             interval = poll_sleep_seconds(args.interval, active_waiters, waiter_id)
@@ -6348,6 +6749,22 @@ def build_parser() -> argparse.ArgumentParser:
     migrate.add_argument("--check", action="store_true", help="verify schema version and integrity without migrating")
     migrate.set_defaults(func=command_migrate)
     sub.add_parser("update", help="deprecated alias for migrate").set_defaults(func=command_update)
+
+    upgrade = sub.add_parser(
+        "upgrade",
+        help="inspect project workflow readiness before replacing the Baton executable",
+    )
+    upgrade_sub = upgrade.add_subparsers(dest="upgrade_command", required=True)
+    upgrade_preflight = upgrade_sub.add_parser(
+        "preflight",
+        help="list workflow blockers without requiring the latest database schema",
+        description=(
+            "Inspect upgrade blockers without modifying workflow state. Exit 0 means the project "
+            "has a global maintenance stop and no active waiters, handoffs, or claimed CR reviews."
+        ),
+    )
+    upgrade_preflight.add_argument("--format", choices=("text", "json"), default="text")
+    upgrade_preflight.set_defaults(func=command_upgrade_preflight)
 
     project = sub.add_parser("project", help="inspect or migrate project-local Baton state")
     project_sub = project.add_subparsers(dest="project_command", required=True)
@@ -6564,6 +6981,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     cr = sub.add_parser("cr", help="manage change requests")
     cr_sub = cr.add_subparsers(dest="cr_command", required=True)
+    cr_list = cr_sub.add_parser("list", help="list change requests with review and integrity filters")
+    cr_list.add_argument("--status", choices=tuple(sorted(CR_STATUSES)), default="")
+    cr_list.add_argument("--reviewer-role", default="")
+    cr_list.add_argument("--reviewer-workstream", default="")
+    cr_list.add_argument(
+        "--claimed-by",
+        default="",
+        help="concrete review claimant, or 'unassigned'",
+    )
+    cr_list.add_argument(
+        "--body-integrity",
+        choices=("editable", "legacy-unsealed", "missing", "mismatch", "ok", "unreadable"),
+        default="",
+    )
+    cr_list.add_argument("--limit", type=int, default=100)
+    cr_list.add_argument("--format", choices=("text", "json"), default="text")
+    cr_list.set_defaults(func=command_cr_list)
     cr_create = cr_sub.add_parser("create")
     cr_create.add_argument("--title", required=True)
     cr_create.add_argument("--author-role", required=True)
@@ -6733,6 +7167,11 @@ def build_parser() -> argparse.ArgumentParser:
     next_parser = sub.add_parser("next", help="inspect the next ready handoff without waiting")
     next_parser.add_argument("--role", required=True)
     next_parser.add_argument("--agent-id", default="")
+    next_parser.add_argument(
+        "--explain",
+        action="store_true",
+        help="show resolved identity, session role, ownership, and workstream eligibility",
+    )
     next_parser.set_defaults(func=command_next)
 
     claim = sub.add_parser("claim", help="claim an open handoff")
@@ -6840,6 +7279,18 @@ def build_parser() -> argparse.ArgumentParser:
     notify_record.add_argument("--message-ref", default="")
     notify_record.add_argument("--detail", default="")
     notify_record.set_defaults(func=command_notify_record)
+    notify_status = notify_sub.add_parser(
+        "status",
+        help="derive host acceptance, claim, and stale-unclaimed state for one handoff",
+    )
+    notify_status.add_argument("job_id")
+    notify_status.add_argument(
+        "--stale-after",
+        default="15m",
+        help="duration before an accepted but unclaimed notification is stale; default: 15m",
+    )
+    notify_status.add_argument("--format", choices=("text", "json"), default="text")
+    notify_status.set_defaults(func=command_notify_status)
     notify_list = notify_sub.add_parser("list", help="list notification delivery audit records")
     notify_list.add_argument("--job", dest="job_id", default="")
     notify_list.add_argument("--status", choices=("sent", "failed"), default="")
@@ -6894,6 +7345,11 @@ def build_parser() -> argparse.ArgumentParser:
     wait = sub.add_parser("wait", help="wait for a ready handoff")
     wait.add_argument("--role", required=True)
     wait.add_argument("--agent-id", default="")
+    wait.add_argument(
+        "--explain",
+        action="store_true",
+        help="show eligibility details when the bounded wait times out",
+    )
     wait.add_argument("--timeout", type=int, default=900, help="seconds; default: 900; 0 means forever")
     wait.add_argument(
         "--interval",
@@ -6910,6 +7366,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     watch.add_argument("--role", required=True)
     watch.add_argument("--agent-id", default="")
+    watch.add_argument(
+        "--explain",
+        action="store_true",
+        help="show handoff and CR eligibility details when the bounded watch times out",
+    )
     watch.add_argument("--timeout", type=int, default=900, help="seconds; default: 900; 0 means forever")
     watch.add_argument(
         "--interval",

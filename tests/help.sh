@@ -24,6 +24,7 @@ grep 'BATON_DB' "$TMP/root-command.txt" >/dev/null
 cmp "$TMP/migrate-short.txt" "$TMP/migrate-command.txt"
 grep -- '--source-db SOURCE_DB' "$TMP/migrate-command.txt" >/dev/null
 grep -- '--plan-token PLAN_TOKEN' "$TMP/migrate-command.txt" >/dev/null
+"$CLI" help upgrade preflight | grep 'global maintenance stop' >/dev/null
 
 "$CLI" help guide show | grep '{bootstrap,worker,planner,git}' >/dev/null
 "$CLI" help workspace check | grep -- '--job JOB_ID' >/dev/null
@@ -42,7 +43,12 @@ grep -- '--plan-token PLAN_TOKEN' "$TMP/migrate-command.txt" >/dev/null
 "$CLI" help notify targets | grep 'outside_shift' >/dev/null
 "$CLI" help notify record | grep -- '--status {sent,failed}' >/dev/null
 "$CLI" help notify list | grep -- '--job JOB_ID' >/dev/null
+"$CLI" help notify status | grep -- '--stale-after STALE_AFTER' >/dev/null
 "$CLI" help watch | grep 'CR review first' >/dev/null
+"$CLI" help watch | grep -- '--explain' >/dev/null
+"$CLI" help wait | grep -- '--explain' >/dev/null
+"$CLI" help next | grep -- '--explain' >/dev/null
+"$CLI" help cr list | grep -- '--body-integrity' >/dev/null
 "$CLI" help cr show | grep 'CR_ID' >/dev/null
 "$CLI" help cr seal | grep -- '--evidence EVIDENCE' >/dev/null
 "$CLI" help cr supersede | grep -- '--by NEW_CR_ID' >/dev/null

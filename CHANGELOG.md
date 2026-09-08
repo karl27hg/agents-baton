@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.6.0rc4
+
+- Added read-only `upgrade preflight` checks that work against known older schemas and report maintenance-stop, waiter, active handoff, and claimed CR-review blockers by ID before executable replacement.
+- Added `notify status` with derived `host_accepted_unclaimed`, stale, and claimant states while preserving the schema-v12 `sent` storage value for compatibility.
+- Added `next --explain`, timeout diagnostics for `wait` and `watch`, and advisory active-session role mismatch warnings without restricting explicit multi-role operation.
+- Added filtered `cr list` output for planner review-queue discovery and documented push-first addressable-idle operation for reachable Codex planner tasks.
+- Kept schema v12 unchanged and improved migration blocker errors with concrete object IDs and recovery guidance.
+
 ## v0.6.0rc3
 
 - Added an installed bootstrap-guide notice for per-project schema v11-to-v12 migration, safety prerequisites, backup behavior, and RC3 compatibility boundaries.

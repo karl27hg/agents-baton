@@ -106,8 +106,13 @@ An existing `.baton/baton.sqlite3` without a marker is discovered while walking 
 For a package-index installation, upgrade the user-level command with pipx:
 
 ```bash
+cd /path/to/each-active-project
+baton stop --all --reason "Baton upgrade"
+baton upgrade preflight
 pipx upgrade agents-baton
 ```
+
+Run the read-only preflight with the currently compatible Baton before replacing the executable. It is ready only after a global stop and after all waiter leases, active handoffs, cancellation acknowledgements, and claimed submitted CR reviews are drained. It reports concrete blocker IDs when work remains.
 
 For a Git URL installation, explicitly replace it with the chosen new tag, then migrate each active project database:
 
@@ -116,6 +121,7 @@ pipx install --force "git+https://github.com/karl27hg/agents-baton.git@vNEW.VERS
 cd /path/to/your-project
 baton migrate
 baton migrate --check
+baton resume --all
 ```
 
 Remove the managed commands and isolated environment with `pipx uninstall agents-baton`. Uninstall leaves every consuming project's `.baton/` directory and workflow database intact. Prefer a submodule when the consuming repository must pin Baton in version control, and do not downgrade an executable after applying a schema migration unless the target version is known to support that schema.
@@ -319,7 +325,7 @@ Use `tools/baton/bin/baton` for role handoff and CR workflow state.
 - Treat work as parallel only after confirming independent inputs, write sets, contracts, shared state, and completion order; otherwise declare a dependency or Gate.
 - Use bounded waits; do not use `--timeout 0` unless explicitly requested.
 - Keep the default automatic interval unless the user or project policy requires a fixed numeric interval.
-- Treat `next` as a one-time queue check, not as a wait command.
+- Treat `next` as a one-time queue check, not as a wait command. Use `next --explain` to diagnose role, workstream, or ownership exclusions.
 - After wait timeout, repeat bounded waits while the shift remains active.
 - Do not report ordinary wait timeouts or unchanged waiting state; report actual state transitions once.
 - Start a shift before long-running waits.
@@ -405,6 +411,7 @@ The watcher returns assigned CRs before handoffs. When a workstream-routed CR ap
 If approved implementation should proceed, create implementation handoffs through Baton.
 If your role has direct design authority, do not create and self-review a CR. Record the authoritative contract and register implementation handoffs directly unless independent or user review is required.
 When worker results require planning reconciliation, register a planning handoff depending on every required worker job, then return to watch. Make that handoff complete enough for another planning agent to claim.
+When peer notification is enabled, the planner may instead remain addressable without a waiter lease only if it owns no active Baton work, has an active registered Codex session, has an explicit planning return handoff, and every producer that can release it can notify that session. Re-read Baton when messaged. Keep `watch` for CR arrival, unassigned work, incomplete notification coverage, and failed or stale delivery.
 For an incompatible approved design change, use `cr supersede` with an approved replacement CR. If your planner/SM role has direct design authority and no independent review is required, use `--by-source-ref <immutable-ref>` instead. Do not modify the old approved body.
 Do not edit Baton SQLite records directly.
 ```
@@ -525,6 +532,15 @@ git fetch --tags
 git checkout vX.Y.Z
 ```
 
+Before replacing Baton, stop and drain each active project with the still-compatible executable:
+
+```bash
+tools/baton/bin/baton stop --all --reason "Baton upgrade"
+tools/baton/bin/baton upgrade preflight
+```
+
+`upgrade preflight` is read-only and can inspect a recognized older schema. It requires the explicit global stop and lists active waiter, handoff, cancellation, and claimed-review blocker IDs. Transition those blockers with the old executable; a newly installed executable may diagnose an older DB but normal workflow commands will reject it until migration.
+
 After changing Baton versions, run the database migration command from the consuming project root before starting agents:
 
 ```bash
@@ -532,6 +548,7 @@ tools/baton/bin/baton migrate
 tools/baton/bin/baton migrate --check
 tools/baton/bin/baton --version
 tools/baton/bin/baton role permission-list sm
+tools/baton/bin/baton resume --all
 ```
 
 `migrate` applies pending migrations in one transaction, records them in `schema_migrations`, validates database and foreign-key integrity, and seeds newly introduced default roles or permissions. It does not rewrite existing handoff, CR, event, control, role, or permission content. Permissions removed with `role permission-remove` remain revoked across later migrations unless a migration explicitly introduces that same permission as a new default. Migration 7 is the deliberate exception for the newly explicit `handoff.register`: it grants the permission to existing active roles so an upgrade does not silently remove their former ability to register work. Review and revoke those compatibility grants after migration when the project requires centralized registration. Re-running `migrate` is safe.
@@ -558,9 +575,9 @@ The installed CLI does not call Codex or hold Codex credentials. Existing Codex 
 
 `finish` immediately opens eligible direct dependents. Any agent may inspect direct downstream state with `handoff successors <finished-job>`; the reported role is eligibility, and `unassigned` never means the inspecting agent owns the work. Only `claim` establishes the concrete worker.
 
-After a handoff finishes, its agent can optionally run `notify targets <finished-job> --role <role> --from-agent <profile>` to list existing Codex peer candidates, ranked by recent session update. A project-local global or target-role stop, including shift expiry, returns `outside_shift` instead of a candidate; the handoff stays `open` and no host message should be sent. The agent sends one `candidate` a host follow-up containing the receiving handoff ID, then records the actual result with `notify record --status sent|failed`. Successful delivery is unique per handoff attempt; reviewed retry increments the attempt so its corrected baseline can produce a new audit record. The receiver must inspect and claim the handoff before editing.
+After a handoff finishes, its agent can optionally run `notify targets <finished-job> --role <role> --from-agent <profile>` to list existing Codex peer candidates, ranked by recent session update. A project-local global or target-role stop, including shift expiry, returns `outside_shift` instead of a candidate; the handoff stays `open` and no host message should be sent. The agent sends one `candidate` a host follow-up containing the receiving handoff ID, then records the result with `notify record --status sent|failed`. The stored `sent` value is displayed as `host_accepted` because it proves host acceptance, not recipient acknowledgement or ownership. Use `notify status <ready-job> --stale-after 15m` to distinguish accepted-unclaimed, stale-unclaimed, and claimed outcomes. Successful delivery is unique per handoff attempt; reviewed retry increments the attempt so its corrected baseline can produce a new audit record. The receiver must inspect and claim the handoff before editing.
 
-Registration itself is the opt-in switch; projects that do not register sessions retain the existing polling behavior. Baton does not assume that other models or hosts provide a compatible task-message protocol. Keep `wait`/`watch` for CR monitoring, unassigned role queues, inaccessible or stale tasks, failed messages, and non-Codex environments. Do not create new Codex tasks as part of this flow. End stale endpoints explicitly, and use `--replace` only after verifying the replacement task. Baton stores no host token or message body.
+Registration itself is the opt-in switch; projects that do not register sessions retain the existing polling behavior. Baton does not assume that other models or hosts provide a compatible task-message protocol. Keep `wait`/`watch` for CR monitoring, unassigned role queues, inaccessible or stale tasks, failed messages, and non-Codex environments. A planner may be addressable-idle without a waiter only when it owns no active Baton work, has an explicit return handoff, and every releasing producer can notify its active session; it must re-read Baton on wake-up. Do not create new Codex tasks as part of this flow. End stale endpoints explicitly, and use `--replace` only after verifying the replacement task. Baton stores no host token or message body.
 
 ### Known Fan-In Limitation
 
@@ -583,7 +600,7 @@ Do not share one `.baton/baton.sqlite3` across unrelated repositories. Baton's I
 
 Use a separate Baton database per project unless the user explicitly wants one shared workflow across multiple repositories.
 
-A pipx-installed executable is shared by all projects for the same OS user, but each Baton marker has its own database, controls, waiter leases, CR paths, and ID sequence. Concurrent agents in different projects do not contend on SQLite unless an explicit `--db` path points them at the same file. A pipx upgrade still changes the executable for every project, so migrate each project when it is next used; Baton does not maintain a global registry or claim to discover every moved, copied, or dormant project.
+A pipx-installed executable is shared by all projects for the same OS user, but each Baton marker has its own database, controls, waiter leases, CR paths, and ID sequence. Concurrent agents in different projects do not contend on SQLite unless an explicit `--db` path points them at the same file. A pipx upgrade still changes the executable for every project, so run preflight for every active project before replacement and migrate each project when it is next used. Baton does not maintain a global registry or claim to discover every moved, copied, or dormant project.
 
 Moving the whole project preserves the marker-to-DB relationship. Copying the whole project, including `.baton/`, copies workflow history into a physically independent DB; the copies may contain identical local handoff IDs without racing. A source-control clone that excludes `.baton/` is a new Baton project and must be initialized explicitly.
 

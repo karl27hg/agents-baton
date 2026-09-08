@@ -125,14 +125,21 @@ baton-report summary
 
 Normal workflow commands do not migrate schemas automatically. A `database migration required` error is an operator action: keep workers stopped, run `baton migrate`, verify with `baton migrate --check`, and then resume the intended scopes.
 
-### v0.6.0rc3 / Schema v12 Upgrade Notice
+### Schema v12 Upgrade Notice
 
-Upgrading the shared pipx executable to `v0.6.0rc3` does not modify any project database. Each existing project owns its own database and must be migrated separately from that project's root. A newly initialized RC3 project already uses schema v12. Projects already migrated with RC2 remain on schema v12 and need only `baton migrate --check`.
+Installing a shared pipx executable does not modify any project database. Baton `v0.6.0rc3` and later use schema v12. Each existing project owns its own database and must be migrated separately from that project's root. Projects already on schema v12 need only `baton migrate --check`.
 
-Before migrating an existing schema v11 database, stop its workers and waiters, finish or cancel active handoffs, resolve cancellation acknowledgements, and decide or release claimed CR reviews. Then run:
+Before replacing the executable, run the read-only preflight with the currently compatible Baton. It returns exit `0` only when the project has a global maintenance stop and no active waiter, handoff, cancellation acknowledgement, or claimed CR review:
 
 ```bash
-baton stop --all --reason "Baton v0.6.0rc3 migration"
+baton upgrade preflight
+baton stop --all --reason "Baton upgrade"
+baton upgrade preflight
+```
+
+Drain every listed object and repeat preflight until it reports `READY`. Only then replace the executable. For an existing schema v11 database, continue with:
+
+```bash
 baton migrate
 baton migrate --check
 baton resume --all
@@ -140,7 +147,7 @@ baton resume --all
 
 `baton migrate` writes a validated backup under `.baton/backups/` before applying schema v12 transactionally. Schema v12 preserves existing handoffs and notification records as attempt 1, adds retry-attempt-scoped notification deduplication, and adds audited replacement relationships for cancelled CR implementation handoffs. It does not infer replacement relationships from historical cancellations; a reviewer must record a valid replacement explicitly with `cr supersede-handoff` before such a CR can be marked implemented.
 
-Do not resume with an older Baton executable after schema v12 is applied. When multiple projects use the same pipx installation, repeat only the project-local database migration for each project; there is no global database migration command.
+If the executable was replaced too early, the new Baton can still run `upgrade preflight` against a known older schema and print blocker IDs, but workflow transitions must be drained with the previous compatible Baton. Do not resume with an older Baton executable after schema v12 is applied. When multiple projects use the same pipx installation, repeat preflight and the project-local database migration for each project; there is no global database migration command.
 
 Schema v7 introduces `failed` handoffs and `handoff.register`. Existing projects retain prior registration behavior because migration grants `handoff.register` to every active role already present. Review those grants after migration and use `role permission-remove <role> handoff.register` when registration should remain centralized in `sm` or `planning`.
 
@@ -162,6 +169,6 @@ baton guide show planner
 
 Before a worker's first wait, require it to inspect `shift status --role <role>`. A worker may create the default `4h` role shift only when no applicable deadline or stopped/expired scope exists. Existing active deadlines are preserved, and expired or stopped role/global scopes require explicit user or SM authorization before restart, extension, or resume.
 
-Require planner/SM roles that receive both CR reviews and handoffs to use `watch` rather than alternating long independent waits unless every applicable successor has a recorded successful opt-in notification. CR monitoring, unassigned role work, and notification failures retain the polling fallback. Require every active claimant to inspect its handoff before commit, integration, and completion. On `cancel_requested`, the claimant pauses and inspects the reason; it resumes only after an authorized `cancel-withdraw` restores `in_progress`, or uses `cancel-ack` after cancellation is confirmed. It must not report `finish` or `fail` while cancellation is requested.
+Require planner/SM roles that receive both CR reviews and handoffs to use `watch` rather than alternating long independent waits unless push-first conditions are satisfied. A reachable Codex planner may end its current turn without a CLI waiter when it owns no active handoff or review, every expected return path is an explicit planning handoff, and every producer can notify its active session. This is addressable idle, not a Baton workflow state. CR monitoring, unassigned role work, non-Codex hosts, stale endpoints, and notification failures retain the polling fallback. Require every active claimant to inspect its handoff before commit, integration, and completion. On `cancel_requested`, the claimant pauses and inspects the reason; it resumes only after an authorized `cancel-withdraw` restores `in_progress`, or uses `cancel-ack` after cancellation is confirmed. It must not report `finish` or `fail` while cancellation is requested.
 
 Project `AGENTS.md` should require these guides and define the assigned role. If a command, version, path, migration plan, or authority decision is unclear, stop and ask the user or SM instead of guessing.
