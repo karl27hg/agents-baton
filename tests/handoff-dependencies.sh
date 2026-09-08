@@ -153,4 +153,49 @@ PY
 "$CLI" --db "$LEGACY_DB" events "$LEGACY_CHILD" | awk -F '\t' '$2 == "dependency_cancelled" { found=1 } END { exit !found }'
 "$CLI" --db "$LEGACY_DB" status | grep '^cancelled: 2$' >/dev/null
 
+INPUT_DB="$TMP/input-validation.sqlite3"
+INPUT_ERROR="$TMP/input-validation.err"
+"$CLI" --db "$INPUT_DB" init >/dev/null
+INPUT_UPSTREAM="$("$CLI" --db "$INPUT_DB" register \
+  --title "Input validation upstream" \
+  --role backend \
+  --objective "Provide a dependency identifier." \
+  --exit-criteria "Duplicate input is rejected." | awk '{print $1}')"
+if "$CLI" --db "$INPUT_DB" register \
+  --title "Duplicate dependency" \
+  --role frontend \
+  --depends-on "$INPUT_UPSTREAM" \
+  --depends-on "$INPUT_UPSTREAM" \
+  --objective "This handoff must not be created." \
+  --exit-criteria "The CLI returns a stable user error." >"$INPUT_ERROR" 2>&1; then
+  echo "ERROR: duplicate handoff dependency unexpectedly succeeded" >&2
+  exit 1
+fi
+grep "ERROR: duplicate handoff dependency: $INPUT_UPSTREAM" "$INPUT_ERROR" >/dev/null
+if grep 'Traceback' "$INPUT_ERROR" >/dev/null; then
+  echo "ERROR: duplicate handoff dependency exposed a stack trace" >&2
+  exit 1
+fi
+"$CLI" --db "$INPUT_DB" handoff list --format json \
+  | grep -c '"job_id"' | grep '^1$' >/dev/null
+
+python3 - "$INPUT_DB" "$INPUT_UPSTREAM" <<'PY'
+import sqlite3
+import sys
+
+with sqlite3.connect(sys.argv[1]) as con:
+    con.execute("update handoff_jobs set status = 'failed' where job_id = ?", (sys.argv[2],))
+PY
+FAILED_WARNING="$TMP/failed-dependency.err"
+FAILED_DEPENDENT="$("$CLI" --db "$INPUT_DB" register \
+  --title "Failed dependency warning" \
+  --role frontend \
+  --depends-on "$INPUT_UPSTREAM" \
+  --objective "Remain blocked behind failed work." \
+  --exit-criteria "The failed predecessor is resolved." 2>"$FAILED_WARNING" | awk '{print $1}')"
+grep "WARNING: dependency $INPUT_UPSTREAM is failed" "$FAILED_WARNING" >/dev/null
+"$CLI" --db "$INPUT_DB" handoff show "$FAILED_DEPENDENT" | grep 'status: blocked' >/dev/null
+"$CLI" --db "$INPUT_DB" events "$FAILED_DEPENDENT" \
+  | grep "Failed dependencies: $INPUT_UPSTREAM" >/dev/null
+
 echo "OK handoff dependencies db=$DB cancel_db=$CANCEL_DB"

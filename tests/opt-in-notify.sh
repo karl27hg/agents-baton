@@ -132,6 +132,59 @@ fi
 "$CLI" --db "$DB" claim "$TARGET_JOB" --role backend --claimed-by backend-main >/dev/null
 "$CLI" --db "$DB" finish "$TARGET_JOB" --role backend --evidence "Notified work completed." >/dev/null
 
+RETRY_SOURCE="$("$CLI" --db "$DB" register \
+  --title "Prepare retry notification" \
+  --role frontend \
+  --objective "Open a handoff that will require a second notification." \
+  --exit-criteria "The dependent handoff is ready." | awk '{print $1}')"
+RETRY_TARGET="$("$CLI" --db "$DB" register \
+  --title "Retry notification target" \
+  --role backend \
+  --depends-on "$RETRY_SOURCE" \
+  --objective "Fail once and then complete on retry." \
+  --exit-criteria "Both notification attempts are audited." | awk '{print $1}')"
+"$CLI" --db "$DB" claim "$RETRY_SOURCE" --role frontend --claimed-by frontend-main >/dev/null
+"$CLI" --db "$DB" finish "$RETRY_SOURCE" --role frontend \
+  --evidence "Retry target is ready." >/dev/null
+"$CLI" --db "$DB" notify record "$RETRY_TARGET" \
+  --role frontend \
+  --from-agent frontend-main \
+  --to-agent backend-main \
+  --status sent \
+  --message-ref codex-retry-001 >/dev/null
+"$CLI" --db "$DB" claim "$RETRY_TARGET" --role backend --claimed-by backend-main >/dev/null
+FAILURE_LINE="$("$CLI" --db "$DB" fail "$RETRY_TARGET" \
+  --role backend \
+  --reason "First attempt needs remediation." \
+  --evidence "The retry path is intentional." \
+  --file-path "$TMP/retry-failure.md")"
+FAILURE_CR="$(sed -n 's/.* cr=\([^ ]*\).*/\1/p' <<<"$FAILURE_LINE")"
+"$CLI" --db "$DB" cr approve "$FAILURE_CR" --role planning \
+  --evidence "Authorize a corrected retry." >/dev/null
+"$CLI" --db "$DB" retry "$RETRY_TARGET" --role planning \
+  --cr-id "$FAILURE_CR" \
+  --reason "Use the corrected baseline." | grep 'attempt=2' >/dev/null
+"$CLI" --db "$DB" handoff show "$RETRY_TARGET" | grep 'attempt: 2' >/dev/null
+"$CLI" --db "$DB" notify targets "$RETRY_SOURCE" \
+  --role frontend \
+  --from-agent frontend-main \
+  | grep "$RETRY_TARGET.*attempt=2.*candidate.*backend-main" >/dev/null
+"$CLI" --db "$DB" notify record "$RETRY_TARGET" \
+  --role frontend \
+  --from-agent frontend-main \
+  --to-agent backend-main \
+  --status sent \
+  --message-ref codex-retry-002 >/dev/null
+"$CLI" --db "$DB" notify list --job "$RETRY_TARGET" \
+  | grep 'attempt=1.*sent.*frontend-main.*backend-main' >/dev/null
+"$CLI" --db "$DB" notify list --job "$RETRY_TARGET" \
+  | grep 'attempt=2.*sent.*frontend-main.*backend-main' >/dev/null
+"$CLI" --db "$DB" claim "$RETRY_TARGET" --role backend --claimed-by backend-main >/dev/null
+"$CLI" --db "$DB" finish "$RETRY_TARGET" --role backend \
+  --evidence "Second attempt completed." >/dev/null
+"$CLI" --db "$DB" cr mark-implemented "$FAILURE_CR" --role planning \
+  --evidence "Retried handoff completed." >/dev/null
+
 "$CLI" --db "$DB" agent session-end \
   --agent-id backend-main \
   --reason "Codex task completed." | grep "$BACKEND_SESSION.*inactive.*backend-main" >/dev/null

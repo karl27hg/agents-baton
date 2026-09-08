@@ -31,8 +31,11 @@ JOB2="$("$CLI" --db "$DB" register \
   --objective "Run QA smoke handoff." \
   --exit-criteria "QA smoke is finished." | awk '{print $1}')"
 
-"$CLI" --db "$DB" promote-ready | grep "$JOB2" >/dev/null
+"$CLI" --db "$DB" handoff show "$JOB2" | grep 'status: open' >/dev/null
 "$CLI" --db "$DB" next --role qa | grep "$JOB2" >/dev/null
-"$CLI" --db "$DB" events "$JOB2" | grep promoted >/dev/null
+if "$CLI" --db "$DB" events "$JOB2" | grep promoted >/dev/null; then
+  echo "ERROR: dependency registered after completion required promotion" >&2
+  exit 1
+fi
 
 echo "OK smoke db=$DB"

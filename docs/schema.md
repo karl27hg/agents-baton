@@ -32,6 +32,7 @@ Tables:
 - `change_requests`: CR workflow state and Markdown file pointer
 - `cr_events`: audit log of CR state changes
 - `cr_handoffs`: links CRs to revision or implementation handoffs
+- `cr_handoff_supersessions`: audited replacement links for cancelled CR implementations
 
 State-changing CLI commands use `BEGIN IMMEDIATE` transactions to serialize writes.
 
@@ -69,6 +70,7 @@ Known migrations:
 9 plan_revision_controls
 10 opt_in_thread_notifications
 11 workstream_routing
+12 retry_and_replacement_tracking
 ```
 
 `baton migrate --check` performs a read-only check that the database is at the latest known schema version.
@@ -237,6 +239,7 @@ Columns:
 | `status` | `text` | yes | Current queue state. |
 | `target_role` | `text` | yes | Canonical role that may claim and finish the job. |
 | `workstream` | `text` | no | Optional specialization that the claimant must register within `target_role`. |
+| `attempt` | `integer` | yes | Current execution generation, starting at 1 and incremented by each reviewed retry. |
 | `source_ref` | `text` | no | Source CR, QA report, user request, or document reference. |
 | `objective` | `text` | yes | What the target role must accomplish. |
 | `exit_criteria` | `text` | yes | Completion criteria for the target role. |
@@ -271,7 +274,7 @@ Status meaning:
 
 An authorized `cancel` operation immediately changes a selected `blocked`, `open`, or reviewed `failed` job to `cancelled`, then recursively cancels blocked dependency descendants. An `in_progress` job changes to `cancel_requested`. Before claimant acknowledgement, `cancel-withdraw` by a role with `handoff.cancel` returns it to `in_progress`, preserving `claimed_by` and `started_at` and recording the review reason. Withdrawal is rejected when a linked implementation CR is already `cancelled` or `superseded`. Only `cancel-ack` by the claimant finalizes cancellation and descendant propagation. `cancel --force` is the audited recovery path when acknowledgement is impossible. A failed job must have its failure CR rejected or cancelled first. Unrelated queue branches are unchanged.
 
-`fail` changes only an `in_progress` job to `failed`, creates and submits a linked failure CR, and leaves dependency descendants `blocked`. An approved failure CR allows its reviewer to use `retry`, which returns the original job to `open`. A rejected failure CR allows an authorized cancellation. Dependents become ready only after the retried original job reaches `finished`.
+`fail` changes only an `in_progress` job to `failed`, creates and submits a linked failure CR, and leaves dependency descendants `blocked`. An approved failure CR allows its reviewer to use `retry`, which increments `attempt` and returns the original job to `open`. A rejected failure CR allows an authorized cancellation. Dependents become ready only after the retried original job reaches `finished`.
 
 Minimal ready job example:
 
@@ -322,6 +325,9 @@ Promotion rule:
 - If any required upstream job is `cancelled`, Baton recursively changes its blocked dependents to `cancelled`.
 - Each propagated transition records one `dependency_cancelled` handoff event with the immediate upstream job as its cause.
 - A new handoff registered with an already-cancelled dependency starts as `cancelled`, not `blocked`.
+- A new handoff whose declared dependencies are all already `finished` starts as `open` without a separate promotion command.
+- Duplicate dependency IDs are rejected before the job is inserted.
+- A new handoff registered against a `failed` dependency remains `blocked` and emits a warning. Standalone remediation should use `source_ref` for causality instead of depending on the failed job.
 - `promote-ready` also reconciles older database records that still contain a blocked job behind a cancelled dependency.
 - Independent jobs and dependency branches are never cancelled by this propagation.
 
@@ -569,6 +575,7 @@ Columns:
 | --- | --- | --- | --- |
 | `id` | `integer primary key autoincrement` | yes | Delivery-attempt sequence. |
 | `job_id` | `text` | yes | Ready receiving handoff named in the message. |
+| `attempt` | `integer` | yes | Handoff execution generation associated with this delivery record. |
 | `sender_session_id` | `text` | yes | Sending runtime session. |
 | `recipient_session_id` | `text` | yes | Selected existing peer runtime session. |
 | `sender_agent_id` | `text` | yes | Stable sender profile snapshot. |
@@ -582,7 +589,7 @@ Columns:
 | `detail` | `text` | no | Result detail; required by CLI for failures. |
 | `created_at` | `text` | yes | Attempt time. |
 
-A partial unique index permits at most one `sent` row per handoff. Failed attempts remain available for fallback diagnosis. `finish` normally promotes ready direct dependents; `notify targets` retains the same scoped promotion as a compatibility reconciliation path and returns active Codex peer candidates that match the optional workstream and do not currently own an `in_progress` or `cancel_requested` handoff or claimed submitted CR review. An applicable project-local global or target-role stop, including an expired shift, returns `outside_shift` without a candidate and leaves the handoff `open`. It does not send a message, and compatible peer messaging is not assumed for other model hosts. `notify record` records what the agent reports after using a host messaging tool. Neither operation claims the handoff. Authentication tokens and message bodies are not stored.
+A partial unique index permits at most one `sent` row per `(job_id, attempt)`. Failed delivery records remain available for fallback diagnosis. A reviewed retry increments the handoff attempt, permitting one new successful delivery record for the corrected baseline while retaining earlier audit rows. `finish` normally promotes ready direct dependents; `notify targets` retains the same scoped promotion as a compatibility reconciliation path and returns active Codex peer candidates that match the optional workstream and do not currently own an `in_progress` or `cancel_requested` handoff or claimed submitted CR review. An applicable project-local global or target-role stop, including an expired shift, returns `outside_shift` without a candidate and leaves the handoff `open`. It does not send a message, and compatible peer messaging is not assumed for other model hosts. `notify record` records what the agent reports after using a host messaging tool. Neither operation claims the handoff. Authentication tokens and message bodies are not stored.
 
 ## `change_requests`
 
@@ -641,7 +648,7 @@ State rules:
 - Approval requires the current body to match `submitted_body_hash` and records `approved_body_hash`.
 - Implementation handoff creation, claim, finish, and final implementation marking require the approved body hash to remain unchanged.
 - Existing approved CRs migrated without a hash require an explicit reviewer `cr seal` before new implementation work.
-- `approved -> implemented` requires at least one linked implementation handoff and all linked implementation handoffs must be `finished`.
+- `approved -> implemented` requires at least one linked implementation handoff. Every linked implementation must be `finished` or be `cancelled` with an explicit replacement chain that reaches a finished implementation.
 - `approved -> superseded` requires `cr.admin` and either an approved replacement CR or an immutable authoritative design reference from a role with `handoff.register`. Linked queued implementation handoffs are cancelled, linked active handoffs receive `cancel_requested`, and finished handoffs are preserved.
 - `cancelled` is performed by a role with `cr.admin`, retires linked unfinished implementation work using the same cancellation rules, and records an audit event.
 - `reviewer_role` can be reassigned before terminal review by a role with `cr.admin`.
@@ -681,6 +688,7 @@ cancelled
 superseded
 supersedes
 implementation_handoff_created
+implementation_handoff_superseded
 implemented
 ```
 
@@ -707,6 +715,27 @@ Primary key:
 (cr_id, job_id)
 ```
 
+## `cr_handoff_supersessions`
+
+Purpose:
+
+- Records that a cancelled implementation handoff was explicitly replaced under the same approved CR.
+- Preserves the retired job and its events while allowing CR closure only after the replacement chain finishes.
+- Prevents migration or `mark-implemented` from guessing that an unrelated cancellation is complete.
+
+Columns:
+
+| Column | Type | Required | Purpose |
+| --- | --- | --- | --- |
+| `cr_id` | `text` | yes | Approved CR shared by the retired and replacement implementation handoffs. |
+| `retired_job_id` | `text` | yes | Cancelled implementation handoff. |
+| `replacement_job_id` | `text` | yes | Viable implementation handoff replacing the retired route. |
+| `actor_role` | `text` | yes | Assigned reviewer role that recorded the replacement. |
+| `reason` | `text` | yes | Audited replacement reason. |
+| `created_at` | `text` | yes | UTC relationship creation time. |
+
+The primary key is `(cr_id, retired_job_id)`. `cr supersede-handoff` requires both jobs to be linked as implementations of the same approved CR, requires the old job to be `cancelled`, and rejects a failed or cancelled replacement.
+
 ## Indexes
 
 Indexes:
@@ -722,10 +751,11 @@ idx_gate_events_gate on gate_events(gate_name)
 idx_agent_sessions_active_agent on agent_sessions(agent_id) where status = 'active'
 idx_agent_sessions_role_status on agent_sessions(role_id, status, updated_at)
 idx_handoff_notifications_job on handoff_notifications(job_id, id)
-idx_handoff_notifications_sent_job on handoff_notifications(job_id) where delivery_status = 'sent'
+idx_handoff_notifications_sent_attempt on handoff_notifications(job_id, attempt) where delivery_status = 'sent'
 idx_handoff_notifications_recipient on handoff_notifications(recipient_agent_id, created_at)
 idx_cr_status_reviewer on change_requests(status, reviewer_role)
 idx_cr_handoffs_cr on cr_handoffs(cr_id)
+idx_cr_handoff_supersessions_replacement on cr_handoff_supersessions(cr_id, replacement_job_id)
 ```
 
 Purpose:
@@ -737,9 +767,10 @@ Purpose:
 - `handoff_gate_dependencies`: Fast Gate checks by job and dependent-job lookup by Gate.
 - `gate_events.gate_name`: Fast Gate audit history lookup.
 - `agent_sessions`: Unique active profile endpoints and fast role candidate lookup.
-- `handoff_notifications`: Fast job/recipient audit lookup and one successful delivery per job.
+- `handoff_notifications`: Fast job/recipient audit lookup and one successful delivery per job attempt.
 - `cr.status, reviewer_role`: Fast `cr wait-review` lookup.
 - `cr_handoffs.cr_id`: Fast implementation completion checks.
+- `cr_handoff_supersessions`: Fast replacement-chain validation for CR closure.
 
 ## Identity Model
 

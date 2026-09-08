@@ -41,7 +41,7 @@ mkdir -p "$CONSUMER"
   cd "$CONSUMER"
   "$PIPX_BIN_DIR/baton" init
   "$PIPX_BIN_DIR/baton" migrate --check
-  "$PIPX_BIN_DIR/baton" project info | grep 'schema_version: 11' >/dev/null
+  "$PIPX_BIN_DIR/baton" project info | grep 'schema_version: 12' >/dev/null
   "$PIPX_BIN_DIR/baton" role add update-sentinel --display-name "Update Sentinel"
   "$PIPX_BIN_DIR/baton" role list >/dev/null
   "$PIPX_BIN_DIR/baton-report" summary >/dev/null

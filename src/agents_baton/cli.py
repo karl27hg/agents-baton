@@ -88,7 +88,7 @@ FAILURE_REVIEW_PERMISSIONS = {
 KNOWN_PERMISSIONS = (
     REVIEW_PERMISSIONS | HANDOFF_PERMISSIONS | GATE_PERMISSIONS | WORKSPACE_PERMISSIONS
 )
-LATEST_SCHEMA_VERSION = 11
+LATEST_SCHEMA_VERSION = 12
 PROJECT_FORMAT_VERSION = 1
 PROJECT_MARKER_NAME = "project.json"
 PROJECT_CONFIG_NAME = "baton.toml"
@@ -236,7 +236,10 @@ def slugify(value: str) -> str:
 def connect(db_path: str, *, create: bool = False) -> sqlite3.Connection:
     path = Path(db_path)
     if not path.exists() and not create:
-        raise MigrationError(f"database does not exist: {db_path}; run 'baton init' first")
+        raise MigrationError(
+            f"database does not exist: {db_path}; run 'baton init' only for a new project; "
+            "in an isolated worktree, set BATON_DB to the existing shared control database"
+        )
     if create and path.parent != Path("."):
         path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(path, timeout=30)
@@ -964,6 +967,43 @@ def migration_v11_workstream_routing(con: sqlite3.Connection) -> None:
     )
 
 
+def migration_v12_retry_and_replacement_tracking(con: sqlite3.Connection) -> None:
+    handoff_columns = {
+        row["name"] for row in con.execute("PRAGMA table_info(handoff_jobs)").fetchall()
+    }
+    if "attempt" not in handoff_columns:
+        con.execute("alter table handoff_jobs add column attempt integer not null default 1")
+    notification_columns = {
+        row["name"] for row in con.execute("PRAGMA table_info(handoff_notifications)").fetchall()
+    }
+    if "attempt" not in notification_columns:
+        con.execute(
+            "alter table handoff_notifications add column attempt integer not null default 1"
+        )
+    execute_sql_script(
+        con,
+        """
+        drop index if exists idx_handoff_notifications_sent_job;
+        create unique index if not exists idx_handoff_notifications_sent_attempt
+          on handoff_notifications(job_id, attempt) where delivery_status = 'sent';
+
+        create table if not exists cr_handoff_supersessions (
+          cr_id text not null references change_requests(cr_id) on delete cascade,
+          retired_job_id text not null references handoff_jobs(job_id),
+          replacement_job_id text not null references handoff_jobs(job_id),
+          actor_role text not null references roles(role_id),
+          reason text not null,
+          created_at text not null,
+          primary key (cr_id, retired_job_id),
+          check (retired_job_id != replacement_job_id)
+        );
+
+        create index if not exists idx_cr_handoff_supersessions_replacement
+          on cr_handoff_supersessions(cr_id, replacement_job_id);
+        """,
+    )
+
+
 MIGRATIONS = (
     (1, "initial_schema", migration_v1_initial_schema),
     (2, "handoff_cancel_permission", migration_v2_handoff_cancel_permission),
@@ -976,6 +1016,7 @@ MIGRATIONS = (
     (9, "plan_revision_controls", migration_v9_plan_revision_controls),
     (10, "opt_in_thread_notifications", migration_v10_opt_in_thread_notifications),
     (11, "workstream_routing", migration_v11_workstream_routing),
+    (12, "retry_and_replacement_tracking", migration_v12_retry_and_replacement_tracking),
 )
 
 
@@ -2498,7 +2539,9 @@ def cr_frontmatter(row: sqlite3.Row) -> str:
         "managed_by": "baton",
         "updated_at": row["updated_at"],
     }
-    body = "\n".join(f"{key}: {value}" for key, value in values.items())
+    body = "\n".join(
+        f"{key}: {value}" if value else f"{key}:" for key, value in values.items()
+    )
     return f"---\n{body}\n---\n"
 
 
@@ -3331,11 +3374,13 @@ def create_handoff_job(
     depends_on_gates: list[str],
     actor_role: str,
     workstream: str = "",
-) -> tuple[str, str, str]:
+) -> tuple[str, str, str, tuple[str, ...]]:
     target_role = resolve_role(con, role)
     normalized_workstream = normalize_workstream(workstream) if workstream.strip() else None
     dependency_statuses: dict[str, str] = {}
     for dep in depends_on:
+        if dep in dependency_statuses:
+            raise SystemExit(f"ERROR: duplicate handoff dependency: {dep}")
         dependency = con.execute(
             "select status from handoff_jobs where job_id = ?",
             (dep,),
@@ -3361,12 +3406,18 @@ def create_handoff_job(
     cancelled_dependencies = [
         dep for dep, dependency_status in dependency_statuses.items() if dependency_status == "cancelled"
     ]
+    failed_dependencies = [
+        dep for dep, dependency_status in dependency_statuses.items() if dependency_status == "failed"
+    ]
+    waiting_dependencies = [
+        dep for dep, dependency_status in dependency_statuses.items() if dependency_status != "finished"
+    ]
     cancelled_gates = [gate for gate, gate_status in gate_statuses.items() if gate_status == "cancelled"]
     waiting_gates = [gate for gate, gate_status in gate_statuses.items() if gate_status == "pending"]
     status = (
         "cancelled"
         if cancelled_dependencies or cancelled_gates
-        else ("blocked" if depends_on or waiting_gates else "open")
+        else ("blocked" if waiting_dependencies or waiting_gates else "open")
     )
     con.execute(
         """
@@ -3398,13 +3449,27 @@ def create_handoff_job(
             "insert into handoff_gate_dependencies(job_id, gate_name) values (?, ?)",
             (job_id, gate_name),
         )
-    message = ""
+    messages: list[str] = []
     if cancelled_dependencies:
-        message = f"Cancelled dependencies: {', '.join(cancelled_dependencies)}"
+        messages.append(f"Cancelled dependencies: {', '.join(cancelled_dependencies)}")
+    if failed_dependencies:
+        messages.append(f"Failed dependencies: {', '.join(failed_dependencies)}")
     if cancelled_gates:
-        message = f"Cancelled gates: {', '.join(cancelled_gates)}"
-    event(con, "registered", job_id=job_id, actor_role=actor_role, to_status=status, message=message)
-    return job_id, status, target_role
+        messages.append(f"Cancelled gates: {', '.join(cancelled_gates)}")
+    event(
+        con,
+        "registered",
+        job_id=job_id,
+        actor_role=actor_role,
+        to_status=status,
+        message="; ".join(messages),
+    )
+    warnings = tuple(
+        f"dependency {dep} is failed; {job_id} remains blocked until it is retried and finished "
+        "or the new handoff is cancelled"
+        for dep in failed_dependencies
+    )
+    return job_id, status, target_role, warnings
 
 
 def command_register(args: argparse.Namespace) -> int:
@@ -3414,7 +3479,7 @@ def command_register(args: argparse.Namespace) -> int:
         init_schema(con)
         begin_immediate(con)
         actor_role = require_permission(con, args.actor_role, "handoff.register")
-        job_id, status, role = create_handoff_job(
+        job_id, status, role, warnings = create_handoff_job(
             con,
             args.title,
             args.role,
@@ -3436,6 +3501,8 @@ def command_register(args: argparse.Namespace) -> int:
             actor_role=actor_role,
         )
         con.commit()
+    for warning in warnings:
+        print(f"WARNING: {warning}", file=sys.stderr)
     route = f"\t{normalize_workstream(args.workstream)}" if args.workstream.strip() else ""
     print(f"{job_id}\t{status}\t{role}{route}")
     return 0
@@ -3904,7 +3971,7 @@ def command_cr_request_revision(args: argparse.Namespace) -> int:
                 f"ERROR: revision handoff must return to CR author role {row['author_role']}; "
                 f"delegated resubmission by {assign_role} is not supported"
             )
-        job_id, job_status, _ = create_handoff_job(
+        job_id, job_status, _, _ = create_handoff_job(
             con,
             args.title or f"Revise rejected CR: {row['title']}",
             assign_role,
@@ -4299,7 +4366,7 @@ def command_cr_create_handoff(args: argparse.Namespace) -> int:
         if row["status"] != "approved":
             raise SystemExit(f"ERROR: CR must be approved: {args.cr_id} status={row['status']}")
         require_cr_body_hash(con, row, "approved_body_hash", "approval")
-        job_id, status, role = create_handoff_job(
+        job_id, status, role, warnings = create_handoff_job(
             con,
             args.title,
             args.role,
@@ -4317,8 +4384,161 @@ def command_cr_create_handoff(args: argparse.Namespace) -> int:
         )
         cr_event(con, args.cr_id, "implementation_handoff_created", actor_role=actor_role, message=job_id)
         con.commit()
+    for warning in warnings:
+        print(f"WARNING: {warning}", file=sys.stderr)
     print(f"{args.cr_id}\t{job_id}\t{status}\t{role}")
     return 0
+
+
+def command_cr_supersede_handoff(args: argparse.Namespace) -> int:
+    reason = args.reason.strip()
+    if not reason:
+        raise SystemExit("ERROR: --reason cannot be blank")
+    if args.retired_job_id == args.replacement_job_id:
+        raise SystemExit("ERROR: retired and replacement handoffs must be different")
+    with connect(args.db) as con:
+        init_schema(con)
+        begin_immediate(con)
+        row, actor_role = assert_reviewer_action(
+            con,
+            args.cr_id,
+            args.role,
+            "cr.assign_implementation",
+        )
+        if row["status"] != "approved":
+            raise SystemExit(f"ERROR: CR must be approved: {args.cr_id} status={row['status']}")
+        require_cr_body_hash(con, row, "approved_body_hash", "approval")
+        linked = {
+            item["job_id"]: item
+            for item in con.execute(
+                """
+                select h.job_id, h.status
+                from cr_handoffs ch
+                join handoff_jobs h on h.job_id = ch.job_id
+                where ch.cr_id = ? and ch.kind = 'implementation'
+                  and h.job_id in (?, ?)
+                """,
+                (args.cr_id, args.retired_job_id, args.replacement_job_id),
+            ).fetchall()
+        }
+        missing = [
+            job_id
+            for job_id in (args.retired_job_id, args.replacement_job_id)
+            if job_id not in linked
+        ]
+        if missing:
+            raise SystemExit(
+                "ERROR: handoff is not linked to this CR as implementation: "
+                + ", ".join(missing)
+            )
+        if linked[args.retired_job_id]["status"] != "cancelled":
+            raise SystemExit(
+                f"ERROR: retired implementation handoff must be cancelled: "
+                f"{args.retired_job_id} status={linked[args.retired_job_id]['status']}"
+            )
+        replacement_status = linked[args.replacement_job_id]["status"]
+        if replacement_status in {"cancelled", "failed"}:
+            raise SystemExit(
+                f"ERROR: replacement implementation handoff is not viable: "
+                f"{args.replacement_job_id} status={replacement_status}"
+            )
+        existing = con.execute(
+            """
+            select replacement_job_id
+            from cr_handoff_supersessions
+            where cr_id = ? and retired_job_id = ?
+            """,
+            (args.cr_id, args.retired_job_id),
+        ).fetchone()
+        if existing:
+            raise SystemExit(
+                f"ERROR: implementation handoff {args.retired_job_id} is already superseded by "
+                f"{existing['replacement_job_id']}"
+            )
+        now = utc_now()
+        con.execute(
+            """
+            insert into cr_handoff_supersessions(
+              cr_id, retired_job_id, replacement_job_id, actor_role, reason, created_at
+            ) values (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                args.cr_id,
+                args.retired_job_id,
+                args.replacement_job_id,
+                actor_role,
+                reason,
+                now,
+            ),
+        )
+        cr_event(
+            con,
+            args.cr_id,
+            "implementation_handoff_superseded",
+            actor_role=actor_role,
+            from_status="approved",
+            to_status="approved",
+            message=(
+                f"{args.retired_job_id} -> {args.replacement_job_id}: {reason}"
+            ),
+        )
+        con.commit()
+    print(
+        f"{args.cr_id}\t{args.retired_job_id}\tsuperseded_by\t"
+        f"{args.replacement_job_id}"
+    )
+    return 0
+
+
+def unresolved_cr_implementation_handoffs(
+    con: sqlite3.Connection,
+    cr_id: str,
+) -> tuple[dict[str, str], list[tuple[str, str]]]:
+    statuses = {
+        row["job_id"]: row["status"]
+        for row in con.execute(
+            """
+            select h.job_id, h.status
+            from cr_handoffs ch
+            join handoff_jobs h on h.job_id = ch.job_id
+            where ch.cr_id = ? and ch.kind = 'implementation'
+            """,
+            (cr_id,),
+        ).fetchall()
+    }
+    replacements = {
+        row["retired_job_id"]: row["replacement_job_id"]
+        for row in con.execute(
+            """
+            select retired_job_id, replacement_job_id
+            from cr_handoff_supersessions
+            where cr_id = ?
+            """,
+            (cr_id,),
+        ).fetchall()
+    }
+
+    def is_resolved(job_id: str) -> bool:
+        visited: set[str] = set()
+        current = job_id
+        while current not in visited:
+            visited.add(current)
+            status = statuses.get(current)
+            if status == "finished":
+                return True
+            if status != "cancelled":
+                return False
+            current = replacements.get(current, "")
+            if not current:
+                return False
+        return False
+
+    unresolved = [
+        (job_id, status)
+        for job_id, status in sorted(statuses.items())
+        if not is_resolved(job_id)
+    ]
+    return statuses, unresolved
 
 
 def command_cr_mark_implemented(args: argparse.Namespace) -> int:
@@ -4337,28 +4557,11 @@ def command_cr_mark_implemented(args: argparse.Namespace) -> int:
         if row["status"] != "approved":
             raise SystemExit(f"ERROR: CR must be approved: {args.cr_id} status={row['status']}")
         require_cr_body_hash(con, row, "approved_body_hash", "approval")
-        unfinished = con.execute(
-            """
-            select h.job_id, h.status
-            from cr_handoffs ch
-            join handoff_jobs h on h.job_id = ch.job_id
-            where ch.cr_id = ? and ch.kind = 'implementation' and h.status != 'finished'
-            order by h.job_id
-            """,
-            (args.cr_id,),
-        ).fetchall()
-        implementation_count = con.execute(
-            """
-            select count(*) as count
-            from cr_handoffs
-            where cr_id = ? and kind = 'implementation'
-            """,
-            (args.cr_id,),
-        ).fetchone()["count"]
-        if implementation_count == 0:
+        implementations, unresolved = unresolved_cr_implementation_handoffs(con, args.cr_id)
+        if not implementations:
             raise SystemExit(f"ERROR: CR has no implementation handoffs: {args.cr_id}")
-        if unfinished:
-            details = ", ".join(f"{row['job_id']}:{row['status']}" for row in unfinished)
+        if unresolved:
+            details = ", ".join(f"{job_id}:{status}" for job_id, status in unresolved)
             raise SystemExit(f"ERROR: implementation handoffs are not finished: {details}")
         now = utc_now()
         con.execute(
@@ -4380,6 +4583,15 @@ def command_cr_status(args: argparse.Namespace) -> int:
             raise SystemExit(f"ERROR: unknown CR: {args.cr_id}")
         resolved_path = project_file_path(con, row["file_path"])
         integrity, expected_hash = cr_body_integrity(con, row)
+        supersessions = con.execute(
+            """
+            select retired_job_id, replacement_job_id, actor_role, reason, created_at
+            from cr_handoff_supersessions
+            where cr_id = ?
+            order by created_at, retired_job_id
+            """,
+            (args.cr_id,),
+        ).fetchall()
     print(f"{row['cr_id']}\t{row['status']}\t{row['title']}\t{resolved_path}")
     print(f"author_role: {row['author_role']}")
     print(f"reviewer_role: {row['reviewer_role']}")
@@ -4395,6 +4607,12 @@ def command_cr_status(args: argparse.Namespace) -> int:
         print(f"superseded_by_cr_id: {row['superseded_by_cr_id']}")
     if row["superseded_by_ref"]:
         print(f"superseded_by_ref: {row['superseded_by_ref']}")
+    for item in supersessions:
+        print(
+            f"implementation_supersession: {item['retired_job_id']} -> "
+            f"{item['replacement_job_id']} role={item['actor_role']} "
+            f"at={item['created_at']} reason={item['reason']}"
+        )
     return 0
 
 
@@ -4407,6 +4625,15 @@ def command_cr_show(args: argparse.Namespace) -> int:
         path = project_file_path(con, row["file_path"])
         body, current_hash = cr_body_snapshot(path)
         integrity, expected_hash = cr_body_integrity(con, row, current_hash)
+        supersessions = con.execute(
+            """
+            select retired_job_id, replacement_job_id, actor_role, reason, created_at
+            from cr_handoff_supersessions
+            where cr_id = ?
+            order by created_at, retired_job_id
+            """,
+            (args.cr_id,),
+        ).fetchall()
     print(f"cr_id: {row['cr_id']}")
     print(f"status: {row['status']}")
     print(f"title: {row['title']}")
@@ -4418,6 +4645,12 @@ def command_cr_show(args: argparse.Namespace) -> int:
         print(f"superseded_by_cr_id: {row['superseded_by_cr_id']}")
     if row["superseded_by_ref"]:
         print(f"superseded_by_ref: {row['superseded_by_ref']}")
+    for item in supersessions:
+        print(
+            f"implementation_supersession: {item['retired_job_id']} -> "
+            f"{item['replacement_job_id']} role={item['actor_role']} "
+            f"at={item['created_at']} reason={item['reason']}"
+        )
     print(f"file_path: {path}")
     print(f"body_integrity: {integrity}")
     if expected_hash:
@@ -4655,6 +4888,7 @@ def command_handoff_show(args: argparse.Namespace) -> int:
         "title",
         "target_role",
         "workstream",
+        "attempt",
         "claimed_by",
         "source_ref",
         "objective",
@@ -5059,7 +5293,7 @@ def command_retry(args: argparse.Namespace) -> int:
         begin_immediate(con)
         actor_role = require_permission(con, args.role, "handoff.register")
         row = con.execute(
-            "select status from handoff_jobs where job_id = ?",
+            "select status, attempt from handoff_jobs where job_id = ?",
             (args.job_id,),
         ).fetchone()
         if not row:
@@ -5098,14 +5332,16 @@ def command_retry(args: argparse.Namespace) -> int:
         ).fetchone()
         require_cr_body_hash(con, failure_cr, "approved_body_hash", "approval")
         now = utc_now()
+        next_attempt = row["attempt"] + 1
         con.execute(
             """
             update handoff_jobs
             set status = 'open', claimed_by = null, started_at = null,
-                finished_at = null, closure_evidence = null, related_commit = null
+                finished_at = null, closure_evidence = null, related_commit = null,
+                attempt = ?
             where job_id = ? and status = 'failed'
             """,
-            (args.job_id,),
+            (next_attempt, args.job_id),
         )
         con.execute(
             """
@@ -5130,7 +5366,7 @@ def command_retry(args: argparse.Namespace) -> int:
             actor_role=actor_role,
             from_status="failed",
             to_status="open",
-            message=f"{failure['cr_id']}: {reason}",
+            message=f"attempt={next_attempt} {failure['cr_id']}: {reason}",
         )
         cr_event(
             con,
@@ -5142,7 +5378,7 @@ def command_retry(args: argparse.Namespace) -> int:
             message=f"{args.job_id}: {reason}",
         )
         con.commit()
-    print(f"Retried {args.job_id} cr={failure['cr_id']}")
+    print(f"Retried {args.job_id} attempt={next_attempt} cr={failure['cr_id']}")
     return 0
 
 
@@ -5407,7 +5643,7 @@ def command_notify_targets(args: argparse.Namespace) -> int:
         promote_ready_direct_dependents(con, args.job_id, actor_role)
         jobs = con.execute(
             """
-            select distinct job.job_id, job.target_role, job.workstream, job.title
+            select distinct job.job_id, job.target_role, job.workstream, job.title, job.attempt
             from handoff_jobs job
             join handoff_dependencies direct on direct.job_id = job.job_id
             where direct.depends_on_job_id = ? and job.status = 'open'
@@ -5421,11 +5657,11 @@ def command_notify_targets(args: argparse.Namespace) -> int:
                 """
                 select recipient_agent_id, recipient_thread_id, recipient_model, transport, created_at
                 from handoff_notifications
-                where job_id = ? and delivery_status = 'sent'
+                where job_id = ? and attempt = ? and delivery_status = 'sent'
                 order by id desc
                 limit 1
                 """,
-                (job["job_id"],),
+                (job["job_id"], job["attempt"]),
             ).fetchone()
             if notified:
                 payload.append(
@@ -5434,6 +5670,7 @@ def command_notify_targets(args: argparse.Namespace) -> int:
                         "target_role": job["target_role"],
                         "workstream": job["workstream"] or "",
                         "title": job["title"],
+                        "attempt": job["attempt"],
                         "state": "already_notified",
                         "agent_id": notified["recipient_agent_id"],
                         "host": notified["transport"],
@@ -5450,6 +5687,7 @@ def command_notify_targets(args: argparse.Namespace) -> int:
                         "target_role": job["target_role"],
                         "workstream": job["workstream"] or "",
                         "title": job["title"],
+                        "attempt": job["attempt"],
                         "state": "outside_shift",
                         "agent_id": "",
                         "host": "",
@@ -5500,6 +5738,7 @@ def command_notify_targets(args: argparse.Namespace) -> int:
                         "target_role": job["target_role"],
                         "workstream": job["workstream"] or "",
                         "title": job["title"],
+                        "attempt": job["attempt"],
                         "state": "no_active_peer_session",
                         "agent_id": "",
                         "host": "",
@@ -5515,6 +5754,7 @@ def command_notify_targets(args: argparse.Namespace) -> int:
                         "target_role": job["target_role"],
                         "workstream": job["workstream"] or "",
                         "title": job["title"],
+                        "attempt": job["attempt"],
                         "state": "candidate",
                         "agent_id": session["agent_id"],
                         "host": session["host"],
@@ -5531,7 +5771,7 @@ def command_notify_targets(args: argparse.Namespace) -> int:
         for item in payload:
             print(
                 f"{item['job_id']}\t{item['target_role']}\t{item['workstream']}\t"
-                f"{item['state']}\t"
+                f"attempt={item['attempt']}\t{item['state']}\t"
                 f"{item['agent_id']}\t{item['host']}\t{item['thread_id']}\t"
                 f"{item['model']}\t{item['title']}"
             )
@@ -5552,7 +5792,8 @@ def command_notify_record(args: argparse.Namespace) -> int:
         begin_immediate(con)
         actor_role = resolve_role(con, args.role)
         job = con.execute(
-            "select status, target_role, workstream, claimed_by from handoff_jobs where job_id = ?",
+            "select status, target_role, workstream, claimed_by, attempt "
+            "from handoff_jobs where job_id = ?",
             (args.job_id,),
         ).fetchone()
         if not job:
@@ -5592,8 +5833,8 @@ def command_notify_record(args: argparse.Namespace) -> int:
                 )
             existing = con.execute(
                 "select recipient_agent_id from handoff_notifications "
-                "where job_id = ? and delivery_status = 'sent'",
-                (args.job_id,),
+                "where job_id = ? and attempt = ? and delivery_status = 'sent'",
+                (args.job_id, job["attempt"]),
             ).fetchone()
             if existing:
                 raise SystemExit(
@@ -5605,8 +5846,8 @@ def command_notify_record(args: argparse.Namespace) -> int:
               job_id, sender_session_id, recipient_session_id,
               sender_agent_id, sender_model, recipient_agent_id,
               recipient_thread_id, recipient_model, transport,
-              delivery_status, message_ref, detail, created_at
-            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              delivery_status, message_ref, detail, created_at, attempt
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 args.job_id,
@@ -5622,10 +5863,11 @@ def command_notify_record(args: argparse.Namespace) -> int:
                 message_ref,
                 detail,
                 utc_now(),
+                job["attempt"],
             ),
         )
         event_message = (
-            f"recipient={recipient_agent_id} host={recipient['host']} "
+            f"attempt={job['attempt']} recipient={recipient_agent_id} host={recipient['host']} "
             f"thread={recipient['thread_id']} model={recipient['model']}"
         )
         if message_ref:
@@ -5644,7 +5886,10 @@ def command_notify_record(args: argparse.Namespace) -> int:
         )
         notification_id = cursor.lastrowid
         con.commit()
-    print(f"notification={notification_id}\t{args.status}\t{args.job_id}\t{recipient_agent_id}")
+    print(
+        f"notification={notification_id}\t{args.status}\t{args.job_id}\t"
+        f"attempt={job['attempt']}\t{recipient_agent_id}"
+    )
     return 0
 
 
@@ -5662,7 +5907,7 @@ def command_notify_list(args: argparse.Namespace) -> int:
         init_schema(con)
         rows = con.execute(
             f"""
-            select id, job_id, delivery_status, sender_agent_id, sender_model,
+            select id, job_id, attempt, delivery_status, sender_agent_id, sender_model,
                    recipient_agent_id, recipient_thread_id, recipient_model,
                    transport, message_ref, detail, created_at
             from handoff_notifications
@@ -5680,7 +5925,8 @@ def command_notify_list(args: argparse.Namespace) -> int:
         return 0
     for row in rows:
         print(
-            f"{row['id']}\t{row['job_id']}\t{row['delivery_status']}\t"
+            f"{row['id']}\t{row['job_id']}\tattempt={row['attempt']}\t"
+            f"{row['delivery_status']}\t"
             f"{row['sender_agent_id']}\t{row['recipient_agent_id']}\t"
             f"{row['transport']}\t{row['recipient_thread_id']}\t"
             f"{row['recipient_model']}\t{row['created_at']}\t{row['detail'] or ''}"
@@ -6059,7 +6305,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="SQLite-backed Baton CLI",
         epilog=(
             "Agent operating guides: run 'baton guide list', then "
-            "'baton guide show bootstrap|worker|planner|git'."
+            "'baton guide show bootstrap|worker|planner|git'. Read-only project audit is "
+            "available through the separate 'baton-report audit|summary' executable."
         ),
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {BATON_VERSION}")
@@ -6418,6 +6665,17 @@ def build_parser() -> argparse.ArgumentParser:
     cr_create_handoff.add_argument("--depends-on", action="append", default=[])
     cr_create_handoff.add_argument("--depends-on-gate", action="append", default=[])
     cr_create_handoff.set_defaults(func=command_cr_create_handoff)
+
+    cr_supersede_handoff = cr_sub.add_parser(
+        "supersede-handoff",
+        help="replace a cancelled implementation handoff while preserving CR audit history",
+    )
+    cr_supersede_handoff.add_argument("cr_id")
+    cr_supersede_handoff.add_argument("retired_job_id", metavar="CANCELLED_JOB_ID")
+    cr_supersede_handoff.add_argument("--replacement", dest="replacement_job_id", required=True)
+    cr_supersede_handoff.add_argument("--role", required=True)
+    cr_supersede_handoff.add_argument("--reason", required=True)
+    cr_supersede_handoff.set_defaults(func=command_cr_supersede_handoff)
 
     cr_mark_implemented = cr_sub.add_parser("mark-implemented")
     cr_mark_implemented.add_argument("cr_id")

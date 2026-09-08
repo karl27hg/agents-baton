@@ -65,6 +65,8 @@ bin/baton --db /tmp/baton.sqlite3 register \
   --exit-criteria "Backend behavior matches the approved API contract."
 ```
 
+Duplicate dependency IDs are rejected before registration. If every listed predecessor is already `finished`, the new handoff starts as `open`; no manual promotion is needed. A failed predecessor keeps the handoff blocked and produces a warning. For standalone remediation, cite the failed job in `--source-ref` instead of making it a scheduling dependency.
+
 Use `--depends-on` for sequential work:
 
 ```bash
@@ -155,7 +157,7 @@ bin/baton --db /tmp/baton.sqlite3 cancel HO-YYYY-MM-DD-001 \
   --role planning --reason "Failure review rejected retry."
 ```
 
-`retry` returns the original job to `open`; the target role must claim it again. Finishing the retry is the only action that can release its blocked dependents. After a successful retry, the reviewer may use `cr mark-implemented` because Baton links the retried job as the failure CR implementation. Cancellation requires the failure CR to be rejected or administratively cancelled first. Administrative `cr cancel` also cancels the linked failed job and its blocked descendants.
+`retry` increments the original job's attempt and returns it to `open`; the target role must claim it again. Finishing the retry is the only action that can release its blocked dependents. Notification success is unique per attempt, allowing one new audited wake-up for the corrected baseline. After a successful retry, the reviewer may use `cr mark-implemented` because Baton links the retried job as the failure CR implementation. Cancellation requires the failure CR to be rejected or administratively cancelled first. Administrative `cr cancel` also cancels the linked failed job and its blocked descendants.
 
 ## Handoff Cancellation
 
@@ -343,10 +345,18 @@ bin/baton --db /tmp/baton.sqlite3 cr create-handoff CR-YYYY-MM-DD-001 \
   --objective "Implement the approved upload policy UI." \
   --exit-criteria "UI behavior matches the approved CR."
 
+# Record an explicit replacement after cancelling an invalid implementation route.
+bin/baton --db /tmp/baton.sqlite3 cr supersede-handoff CR-YYYY-MM-DD-001 HO-OLD \
+  --replacement HO-NEW \
+  --role sm \
+  --reason "HO-NEW replaces the cancelled implementation route."
+
 bin/baton --db /tmp/baton.sqlite3 cr mark-implemented CR-YYYY-MM-DD-001 \
   --role sm \
   --evidence "Implementation handoffs finished."
 ```
+
+Both replacement jobs must be implementation handoffs of the same approved CR. The old job must be `cancelled`. `cr mark-implemented` accepts its audited replacement chain only after that chain reaches a `finished` handoff; unrelated cancelled jobs still block closure.
 
 ## Agent Identity
 
@@ -401,7 +411,7 @@ bin/baton --db /tmp/baton.sqlite3 agent session-set \
   --model <model-id>
 ```
 
-After `finish`, optionally inspect active Codex delivery candidates with `notify targets <finished-job> --role <role> --from-agent <profile>`. If the target role is stopped by the applicable project-local global or role control, including shift expiry, the command returns `outside_shift` without a candidate; do not send a host message. The successor remains `open` and becomes discoverable when its role resumes. Send one candidate task the handoff ID and instructions to run `handoff show` and `claim`, then record `notify record <ready-job> --status sent|failed`. A successful message is not a claim. Other hosts and models are not assumed to provide a compatible peer-message protocol; failed, unavailable, or unsupported delivery falls back to the recipient's normal `wait`/`watch` loop. Do not create a new task for notification.
+After `finish`, optionally inspect active Codex delivery candidates with `notify targets <finished-job> --role <role> --from-agent <profile>`. If the target role is stopped by the applicable project-local global or role control, including shift expiry, the command returns `outside_shift` without a candidate; do not send a host message. The successor remains `open` and becomes discoverable when its role resumes. Send one candidate task the handoff ID and instructions to run `handoff show` and `claim`, then record `notify record <ready-job> --status sent|failed`. A successful message is not a claim. Success is deduplicated per handoff attempt; an approved retry increments the attempt and permits one new notification carrying its changed baseline. Other hosts and models are not assumed to provide a compatible peer-message protocol; failed, unavailable, or unsupported delivery falls back to the recipient's normal `wait`/`watch` loop. Do not create a new task for notification.
 
 ## Wait Usage
 

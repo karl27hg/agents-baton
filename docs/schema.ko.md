@@ -32,6 +32,7 @@
 - `change_requests`: CR workflow 상태와 Markdown 파일 참조
 - `cr_events`: CR 상태 변경 감사 로그
 - `cr_handoffs`: CR과 revision/implementation handoff 연결
+- `cr_handoff_supersessions`: 취소된 CR implementation의 감사 가능한 대체 관계
 
 상태를 변경하는 CLI 명령은 `BEGIN IMMEDIATE` transaction을 사용해 write 작업을 직렬화합니다.
 
@@ -69,6 +70,7 @@
 9 plan_revision_controls
 10 opt_in_thread_notifications
 11 workstream_routing
+12 retry_and_replacement_tracking
 ```
 
 `baton migrate --check`는 DB가 현재 binary가 아는 최신 schema version인지 읽기 전용으로 확인합니다.
@@ -237,6 +239,7 @@ workspace.override
 | `status` | `text` | 예 | 현재 queue 상태입니다. |
 | `target_role` | `text` | 예 | 이 job을 claim/finish할 수 있는 표준 role입니다. |
 | `workstream` | `text` | 아니오 | claimant가 `target_role` 안에서 등록해야 하는 선택적 세부 작업 영역입니다. |
+| `attempt` | `integer` | 예 | 1부터 시작하며 심사된 retry마다 증가하는 현재 실행 세대입니다. |
 | `source_ref` | `text` | 아니오 | 원천 CR, QA report, 사용자 요청, 문서 참조입니다. |
 | `objective` | `text` | 예 | target role이 완료해야 할 작업 목적입니다. |
 | `exit_criteria` | `text` | 예 | 완료 판단 기준입니다. |
@@ -271,7 +274,7 @@ cancelled
 
 권한이 있는 `cancel` 명령은 선택한 `blocked`, `open` 또는 심사가 끝난 `failed` job을 즉시 `cancelled`로 바꾸고 blocked 하위 job을 재귀적으로 취소합니다. `in_progress` job은 `cancel_requested`로 바뀝니다. claimant가 확인하기 전에 `handoff.cancel` 권한이 있는 role이 `cancel-withdraw`를 실행하면 검토 사유를 기록하면서 기존 `claimed_by`와 `started_at`을 유지한 채 `in_progress`로 돌아갑니다. 연결된 구현 CR이 이미 `cancelled` 또는 `superseded`이면 원 설계가 폐기되었으므로 철회를 거부합니다. 원래 claimant가 `cancel-ack`를 실행해야 최종 취소와 하위 전파가 확정됩니다. claimant가 확인할 수 없을 때만 감사되는 복구 경로인 `cancel --force`를 사용합니다. 실패 job은 먼저 연결된 실패 CR이 `rejected` 또는 `cancelled` 상태여야 합니다.
 
-`fail`은 `in_progress` job만 `failed`로 바꾸고 연결된 실패 CR을 생성·제출하며, 하위 dependency는 `blocked`로 유지합니다. 실패 CR이 승인되면 reviewer가 `retry`로 원래 job을 `open`으로 되돌릴 수 있습니다. 실패 CR이 거절되면 권한 있는 role이 해당 job과 하위 branch를 취소할 수 있습니다. 하위 작업은 재시도된 원래 job이 `finished`가 된 이후에만 ready 상태가 됩니다.
+`fail`은 `in_progress` job만 `failed`로 바꾸고 연결된 실패 CR을 생성·제출하며, 하위 dependency는 `blocked`로 유지합니다. 실패 CR이 승인되면 reviewer가 `retry`로 `attempt`를 증가시키고 원래 job을 `open`으로 되돌릴 수 있습니다. 실패 CR이 거절되면 권한 있는 role이 해당 job과 하위 branch를 취소할 수 있습니다. 하위 작업은 재시도된 원래 job이 `finished`가 된 이후에만 ready 상태가 됩니다.
 
 최소 ready job 예:
 
@@ -322,6 +325,9 @@ depends_on_job_id=HO-2026-06-02-001
 - 필수 upstream job 중 하나라도 `cancelled`가 되면 Baton은 이를 기다리는 blocked job을 재귀적으로 `cancelled`로 변경합니다.
 - 전파된 각 상태 변경에는 직접적인 upstream job을 원인으로 기록한 `dependency_cancelled` handoff event가 한 번 남습니다.
 - 이미 취소된 dependency를 지정해 새 handoff를 등록하면 `blocked`가 아니라 즉시 `cancelled` 상태로 생성됩니다.
+- 선언한 dependency가 모두 이미 `finished`라면 새 handoff는 별도 승격 명령 없이 `open`으로 시작합니다.
+- 중복 dependency ID는 job을 삽입하기 전에 거부합니다.
+- `failed` dependency를 참조한 새 handoff는 `blocked`로 남고 경고를 출력합니다. 독립 remediation은 failed job을 실행 dependency로 두지 말고 `source_ref`로 인과관계를 기록해야 합니다.
 - `promote-ready`는 취소된 dependency 뒤에 blocked job이 남아 있는 이전 DB record도 함께 정리합니다.
 - 독립 job과 관련 없는 dependency branch는 이 전파로 취소되지 않습니다.
 
@@ -569,6 +575,7 @@ Claim 동작:
 | --- | --- | --- | --- |
 | `id` | `integer primary key autoincrement` | 예 | 전달 시도 순서입니다. |
 | `job_id` | `text` | 예 | message에 포함된 ready handoff입니다. |
+| `attempt` | `integer` | 예 | 이 전달 기록과 연결된 handoff 실행 세대입니다. |
 | `sender_session_id` | `text` | 예 | 발신 runtime session입니다. |
 | `recipient_session_id` | `text` | 예 | 선택한 기존 peer runtime session입니다. |
 | `sender_agent_id` | `text` | 예 | stable sender profile snapshot입니다. |
@@ -582,7 +589,7 @@ Claim 동작:
 | `detail` | `text` | 아니오 | 결과 상세이며 CLI는 실패 시 필수로 요구합니다. |
 | `created_at` | `text` | 예 | 전달 시도 시각입니다. |
 
-partial unique index는 handoff마다 최대 하나의 `sent` row만 허용합니다. 실패 시도는 fallback 진단을 위해 보존합니다. 일반적으로 `finish`가 ready 직접 하위 작업을 승격하며, `notify targets`는 호환성 reconciliation을 위해 동일한 범위의 승격을 유지하고 선택적 workstream과 일치하며 현재 `in_progress` 또는 `cancel_requested` handoff나 claimed submitted CR review를 소유하지 않은 active Codex peer 후보를 반환합니다. 프로젝트 로컬 global 또는 대상 role stop이 적용되거나 shift가 만료된 경우에는 후보 없이 `outside_shift`를 반환하며 handoff는 `open`으로 유지됩니다. 이 명령은 message를 보내지 않으며 다른 model host가 호환되는 peer messaging을 제공한다고 가정하지 않습니다. `notify record`는 agent가 host messaging tool을 사용한 후 보고한 결과를 기록합니다. 어느 명령도 handoff를 claim하지 않습니다. 인증 token과 message 본문은 저장하지 않습니다.
+partial unique index는 `(job_id, attempt)`마다 최대 하나의 `sent` row만 허용합니다. 실패 전달 기록은 fallback 진단을 위해 보존합니다. 심사된 retry는 handoff attempt를 증가시켜 과거 감사 row를 유지하면서 수정 baseline에 대한 새 성공 전달 1건을 허용합니다. 일반적으로 `finish`가 ready 직접 하위 작업을 승격하며, `notify targets`는 호환성 reconciliation을 위해 동일한 범위의 승격을 유지하고 선택적 workstream과 일치하며 현재 `in_progress` 또는 `cancel_requested` handoff나 claimed submitted CR review를 소유하지 않은 active Codex peer 후보를 반환합니다. 프로젝트 로컬 global 또는 대상 role stop이 적용되거나 shift가 만료된 경우에는 후보 없이 `outside_shift`를 반환하며 handoff는 `open`으로 유지됩니다. 이 명령은 message를 보내지 않으며 다른 model host가 호환되는 peer messaging을 제공한다고 가정하지 않습니다. `notify record`는 agent가 host messaging tool을 사용한 후 보고한 결과를 기록합니다. 어느 명령도 handoff를 claim하지 않습니다. 인증 token과 message 본문은 저장하지 않습니다.
 
 ## `change_requests`
 
@@ -641,7 +648,7 @@ cancelled
 - 승인은 현재 본문이 `submitted_body_hash`와 일치해야 하며 `approved_body_hash`를 기록합니다.
 - implementation handoff 생성, claim, finish와 최종 구현 완료 처리는 승인 본문 hash가 유지돼야 합니다.
 - hash 없이 migration된 과거 approved CR은 새 구현 전에 reviewer가 명시적으로 `cr seal`해야 합니다.
-- `approved -> implemented`는 연결된 implementation handoff가 최소 1개 있어야 하고, 모든 implementation handoff가 `finished`여야 합니다.
+- `approved -> implemented`는 연결된 implementation handoff가 최소 1개 있어야 합니다. 모든 implementation은 `finished`이거나, 명시적인 replacement chain이 finished implementation에 도달하는 `cancelled` 상태여야 합니다.
 - `approved -> superseded`는 `cr.admin`과 approved replacement CR 또는 `handoff.register` 권한을 가진 role의 불변 authoritative design reference가 필요합니다. 연결된 queued 구현 작업은 취소되고 active 작업은 `cancel_requested`가 되며 finished 작업은 보존됩니다.
 - `cancelled`는 `cr.admin` 권한을 가진 role이 수행하고 연결된 미완료 구현 작업을 같은 취소 규칙으로 정리하며 audit event를 남깁니다.
 - `reviewer_role`은 terminal review 전까지 `cr.admin` 권한을 가진 role이 재지정할 수 있습니다.
@@ -681,6 +688,7 @@ cancelled
 superseded
 supersedes
 implementation_handoff_created
+implementation_handoff_superseded
 implemented
 ```
 
@@ -707,6 +715,27 @@ Primary key:
 (cr_id, job_id)
 ```
 
+## `cr_handoff_supersessions`
+
+용도:
+
+- 같은 approved CR에서 취소된 implementation handoff가 명시적으로 대체됐음을 기록합니다.
+- 폐기된 job과 event를 보존하면서 replacement chain이 끝난 뒤에만 CR 종료를 허용합니다.
+- migration 또는 `mark-implemented`가 무관한 취소를 완료로 추측하지 못하게 합니다.
+
+컬럼:
+
+| 컬럼 | 타입 | 필수 | 용도 |
+| --- | --- | --- | --- |
+| `cr_id` | `text` | 예 | 폐기 및 대체 implementation handoff가 공유하는 approved CR입니다. |
+| `retired_job_id` | `text` | 예 | 취소된 implementation handoff입니다. |
+| `replacement_job_id` | `text` | 예 | 폐기된 경로를 대체하는 유효한 implementation handoff입니다. |
+| `actor_role` | `text` | 예 | 대체 관계를 기록한 지정 reviewer role입니다. |
+| `reason` | `text` | 예 | 감사되는 대체 사유입니다. |
+| `created_at` | `text` | 예 | 관계 생성 UTC 시각입니다. |
+
+Primary key는 `(cr_id, retired_job_id)`입니다. `cr supersede-handoff`는 두 job이 같은 approved CR의 implementation으로 연결돼 있어야 하고, old job은 `cancelled`여야 하며, failed 또는 cancelled replacement는 거부합니다.
+
 ## Index
 
 Index:
@@ -722,10 +751,11 @@ idx_gate_events_gate on gate_events(gate_name)
 idx_agent_sessions_active_agent on agent_sessions(agent_id) where status = 'active'
 idx_agent_sessions_role_status on agent_sessions(role_id, status, updated_at)
 idx_handoff_notifications_job on handoff_notifications(job_id, id)
-idx_handoff_notifications_sent_job on handoff_notifications(job_id) where delivery_status = 'sent'
+idx_handoff_notifications_sent_attempt on handoff_notifications(job_id, attempt) where delivery_status = 'sent'
 idx_handoff_notifications_recipient on handoff_notifications(recipient_agent_id, created_at)
 idx_cr_status_reviewer on change_requests(status, reviewer_role)
 idx_cr_handoffs_cr on cr_handoffs(cr_id)
+idx_cr_handoff_supersessions_replacement on cr_handoff_supersessions(cr_id, replacement_job_id)
 ```
 
 용도:
@@ -737,9 +767,10 @@ idx_cr_handoffs_cr on cr_handoffs(cr_id)
 - `handoff_gate_dependencies`: job별 Gate 확인과 Gate별 dependent job 조회를 빠르게 처리합니다.
 - `gate_events.gate_name`: Gate 감사 이력 조회를 빠르게 처리합니다.
 - `agent_sessions`: profile별 active endpoint uniqueness와 role별 후보 조회를 처리합니다.
-- `handoff_notifications`: job/recipient별 감사 조회와 job별 단일 성공 전달을 처리합니다.
+- `handoff_notifications`: job/recipient별 감사 조회와 job attempt별 단일 성공 전달을 처리합니다.
 - `cr.status, reviewer_role`: `cr wait-review` 조회를 빠르게 처리합니다.
 - `cr_handoffs.cr_id`: implementation 완료 검사를 빠르게 처리합니다.
+- `cr_handoff_supersessions`: CR 종료 시 replacement chain 검증을 빠르게 처리합니다.
 
 ## Identity Model
 

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.6.0rc2
+
+- Added schema migration v12 with per-retry handoff attempts, attempt-scoped notification deduplication, and audited replacement relationships for cancelled CR implementation handoffs.
+- Allowed a CR to reach `implemented` when every cancelled implementation has an explicit replacement chain ending in a finished handoff.
+- Rejected duplicate handoff dependencies before database writes, opened newly registered work immediately when all predecessors were already finished, and warned when registration targets a failed predecessor.
+- Removed trailing whitespace from empty Baton-managed CR frontmatter values.
+- Clarified separate `baton-report` discovery, shared worktree database errors, retry notification behavior, and remediation dependency policy.
+
 ## v0.6.0rc1
 
 - Added schema migration v11 with optional workstream routing for handoffs and CR reviews, concrete CR review claims, audited review release, and one-active-unit capacity per agent identity.

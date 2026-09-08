@@ -174,9 +174,9 @@ baton notify record HO-... \
   --detail "Codex accepted the follow-up."
 ```
 
-For an error, use `--status failed --detail <reason>`, then try the next listed candidate or fall back to the receiver's normal `wait`/`watch` loop. Codex peer messaging is an optional transport optimization, not a protocol assumed to exist in other model hosts. Baton permits only one successful notification record per handoff to suppress duplicate wake-ups. A delivered message never changes the handoff to `in_progress`; only `claim` does that.
+For an error, use `--status failed --detail <reason>`, then try the next listed candidate or fall back to the receiver's normal `wait`/`watch` loop. Codex peer messaging is an optional transport optimization, not a protocol assumed to exist in other model hosts. Baton permits only one successful notification record per handoff attempt to suppress duplicate wake-ups. An approved retry increments the attempt and permits one new notification carrying the corrected baseline. A delivered message never changes the handoff to `in_progress`; only `claim` does that.
 
-Notification does not reserve recipient capacity. Parallel senders may select the same profile before its first claim, and an agent performing a CR review is not currently marked busy by a concrete review claim. An incoming message never preempts the receiver's active handoff or review. Finish or safely transition the current unit first, then re-read Baton state and claim only still-eligible work. Do not abandon current work merely because a newer message arrived.
+Notification does not reserve recipient capacity. Parallel senders may select the same idle profile before its first claim. Profiles that own an active handoff or claimed submitted CR review are excluded, but an incoming message never preempts the receiver's active work. Finish or safely transition the current unit first, then re-read Baton state and claim only still-eligible work. Do not abandon current work merely because a newer message arrived.
 
 ## Claim Rules
 
@@ -273,6 +273,8 @@ baton --db <db> cr create-handoff <cr-id> \
   --objective "Implementation objective" \
   --exit-criteria "Completion criteria"
 ```
+
+If one linked implementation was cancelled and replaced under the same approved CR, the reviewer records the relationship with `cr supersede-handoff <cr-id> <cancelled-job> --replacement <new-job> --role <role> --reason <reason>`. Mark the CR implemented only after the replacement chain reaches a finished handoff; never treat an unrelated cancelled implementation as complete.
 
 ## Finish Rules
 

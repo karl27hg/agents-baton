@@ -276,7 +276,7 @@ bin/baton retry HO-YYYY-MM-DD-001 \
   --reason "심사된 수정안을 적용합니다."
 ```
 
-대상 role은 다시 열린 job을 새로 claim해야 합니다. 재시도하지 않기로 결정하면 실패 CR을 거절한 뒤 `cancel`을 실행하며, 이때 해당 blocked dependency branch만 연쇄 취소됩니다.
+대상 role은 다시 열린 job을 새로 claim해야 합니다. `retry`는 원래 job의 attempt를 증가시키며 수정 baseline에 대한 새 알림도 이 attempt에 기록됩니다. 재시도하지 않기로 결정하면 실패 CR을 거절한 뒤 `cancel`을 실행하며, 이때 해당 blocked dependency branch만 연쇄 취소됩니다.
 
 `in_progress` 작업을 취소하면 즉시 최종 취소되지 않고 `cancel_requested`가 됩니다. 원래 claimant는 먼저 작업을 멈추고 `events`에서 취소 요청 사유를 확인합니다. 검토 결과 기존 작업에 문제가 없다면 `handoff.cancel` 권한이 있는 planner/SM이 `cancel-withdraw HO-... --role sm --reason "..."`로 요청을 철회할 수 있습니다. 기존 claimant와 시작 시각은 유지되며, claimant는 `handoff show`에서 다시 `in_progress`가 된 것을 확인한 후 재claim 없이 이어서 작업합니다. 취소 또는 대체된 CR에 연결된 구현 작업은 원 설계가 폐기되었으므로 철회할 수 없습니다. 취소가 확정된 경우에만 claimant가 중단 내용과 남은 변경을 evidence로 기록해 `cancel-ack`를 실행합니다. claimant가 유실된 경우에만 SM이 사유와 함께 `cancel --force`를 사용합니다.
 
@@ -295,7 +295,7 @@ baton notify record HO-READY \
   --detail "Codex가 follow-up을 수락함"
 ```
 
-실패하면 `--status failed --detail <사유>`를 기록하고 다음 후보를 시도하거나 기존 `wait`/`watch`로 복구합니다. 성공 알림은 handoff마다 하나만 기록되어 반복 메시지를 막습니다. 메시지는 claim이 아니며 새 task나 subagent를 만들거나 Baton에 없는 작업을 지시해서는 안 됩니다. 성공적으로 후속 task를 깨웠다면 송신자가 그 목적만으로 계속 기다릴 필요는 없지만, CR 심사·미지정 role 작업·전송 실패에는 polling이 계속 필요합니다.
+실패하면 `--status failed --detail <사유>`를 기록하고 다음 후보를 시도하거나 기존 `wait`/`watch`로 복구합니다. 성공 알림은 handoff attempt마다 하나만 기록되어 반복 메시지를 막고, 심사된 retry는 새 attempt에서 한 번 더 알릴 수 있습니다. 메시지는 claim이 아니며 새 task나 subagent를 만들거나 Baton에 없는 작업을 지시해서는 안 됩니다. 성공적으로 후속 task를 깨웠다면 송신자가 그 목적만으로 계속 기다릴 필요는 없지만, CR 심사·미지정 role 작업·전송 실패에는 polling이 계속 필요합니다.
 
 `next`는 한 번만 확인하는 비대기 명령입니다. 작업이 없다는 이유로 agent가 종료되면 안 되며, shift가 활성 상태인 동안 제한된 `wait`를 반복해야 합니다.
 `next` 출력만으로 작업을 시작하지 말고 claim 전에 `handoff show`로 objective, source reference, dependency, Gate, exit criteria를 모두 확인해야 합니다. `handoff list`는 role과 status별 queue를 읽기 전용으로 조회합니다.
@@ -356,6 +356,8 @@ SQLite와 파일시스템은 하나의 transaction이 아니므로 비정상 종
 `submit`과 `resubmit`은 본문 hash를 기록하고 `approve`는 같은 본문인지 확인한 뒤 승인 hash를 고정합니다. 승인 후 본문이 바뀌면 implementation handoff 생성·claim·finish·최종 구현 완료 처리가 차단됩니다. 승인 후 요구 변경은 기존 본문을 고치지 않고 새 CR로 진행합니다.
 
 호환되지 않는 새 CR이 승인되면 `cr supersede OLD_CR --by NEW_CR --role sm --reason "..."`로 이전 승인을 대체합니다. planner/SM에게 직접 설계 권한이 있고 독립 심사가 필요하지 않다면 자기 심사용 CR을 만들지 않고 `--by-source-ref <불변-설계-참조>`를 사용합니다. 이전 CR은 `superseded` 상태와 승인 본문을 보존하고, 연결된 queued 구현 작업은 취소되며 active 구현 작업은 `cancel_requested`가 됩니다. 이미 finished인 결과는 보존하고 새 설계에 필요한 보강 handoff를 별도로 등록합니다. 단순 `cr cancel`도 연결된 미완료 구현 작업을 같은 규칙으로 정리합니다.
+
+같은 approved CR 안에서 취소된 구현 경로를 다른 implementation handoff로 대체했다면 `cr supersede-handoff CR-ID OLD --replacement NEW --role <reviewer> --reason <사유>`로 관계를 먼저 기록합니다. `mark-implemented`는 이 replacement chain이 finished handoff에 도달해야만 취소된 old job을 완료된 것으로 인정합니다.
 
 Schema migration 후 과거 approved CR이 `legacy-unsealed`로 표시되면 지정 reviewer가 본문을 확인하고 새 구현 전에 명시적으로 봉인합니다.
 
@@ -455,7 +457,7 @@ bin/baton migrate
 bin/baton migrate --check
 ```
 
-Migration은 version이 지정되어 있고 transaction 단위로 실행되며 반복 실행할 수 있습니다. 기존 handoff, CR, event, control, role, permission 데이터는 보존되고 실패한 migration은 rollback됩니다. Schema v8은 CR hash 필드를 추가하지만 과거 승인 본문의 hash를 추측하지 않습니다. DB보다 오래된 Baton binary는 더 새로운 schema를 수정할 수 없습니다.
+Migration은 version이 지정되어 있고 transaction 단위로 실행되며 반복 실행할 수 있습니다. 기존 handoff, CR, event, control, role, permission 데이터는 보존되고 실패한 migration은 rollback됩니다. Schema v8은 CR hash 필드를 추가하지만 과거 승인 본문의 hash를 추측하지 않습니다. Schema v12는 기존 job과 notification을 attempt 1로 보존하고 retry 세대 및 명시적인 implementation 대체 관계를 추가합니다. DB보다 오래된 Baton binary는 더 새로운 schema를 수정할 수 없습니다.
 
 일반 workflow 명령은 pending migration을 자동 적용하지 않습니다. `baton migrate`가 변경 전에 검증된 backup을 만들며, migration이 필요한 DB에 일반 명령을 실행하면 명시적으로 실패합니다. Schema migration 5는 생성 및 최근 migration에 사용된 Baton 버전을 진단 정보로 기록하지만 호환성은 계속 `schema_migrations`로 판단합니다.
 
