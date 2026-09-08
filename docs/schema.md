@@ -73,7 +73,7 @@ Known migrations:
 12 retry_and_replacement_tracking
 ```
 
-`baton migrate --check` performs a read-only check that the database is at the latest known schema version.
+`baton upgrade preflight` is a read-only operational check that can inspect a recognized older schema before the executable is replaced. It requires an explicit global stop and reports blocker object IDs. `baton migrate --check` then verifies that the database is at the latest known schema version after migration.
 
 ## `database_metadata`
 
@@ -541,7 +541,7 @@ Columns:
 | `ended_at` | `text` | no | Time an endpoint was deactivated. |
 | `end_reason` | `text` | no | Audited reason for deactivation or replacement. |
 
-`unique(host, thread_id)` prevents one host thread from representing two profiles, and a partial unique index permits only one active endpoint per `agent_id`. Replacing a session requires explicit `--replace`. `active` means addressable by a future follow-up, not currently executing.
+`unique(host, thread_id)` prevents one host thread from representing two profiles, and a partial unique index permits only one active endpoint per `agent_id`. Replacing a session requires explicit `--replace`. `active` means addressable by a future follow-up, not currently executing. A planner may rely on that addressability instead of a waiter lease only under the documented push-first idle conditions; the session row itself does not prove complete notification coverage.
 
 ## `agent_workstreams`
 
@@ -584,12 +584,12 @@ Columns:
 | `recipient_thread_id` | `text` | yes | Host task that received the attempt. |
 | `recipient_model` | `text` | yes | Recipient model snapshot. |
 | `transport` | `text` | yes | Runtime host used for delivery. |
-| `delivery_status` | `text` | yes | `sent` or `failed`. |
+| `delivery_status` | `text` | yes | Compatibility storage value: `sent` (host accepted) or `failed`. |
 | `message_ref` | `text` | no | Optional host delivery/message reference. |
 | `detail` | `text` | no | Result detail; required by CLI for failures. |
 | `created_at` | `text` | yes | Attempt time. |
 
-A partial unique index permits at most one `sent` row per `(job_id, attempt)`. Failed delivery records remain available for fallback diagnosis. A reviewed retry increments the handoff attempt, permitting one new successful delivery record for the corrected baseline while retaining earlier audit rows. `finish` normally promotes ready direct dependents; `notify targets` retains the same scoped promotion as a compatibility reconciliation path and returns active Codex peer candidates that match the optional workstream and do not currently own an `in_progress` or `cancel_requested` handoff or claimed submitted CR review. An applicable project-local global or target-role stop, including an expired shift, returns `outside_shift` without a candidate and leaves the handoff `open`. It does not send a message, and compatible peer messaging is not assumed for other model hosts. `notify record` records what the agent reports after using a host messaging tool. Neither operation claims the handoff. Authentication tokens and message bodies are not stored.
+A partial unique index permits at most one `sent` row per `(job_id, attempt)`. CLI text presents that stored value as `host_accepted`; it is not recipient acknowledgement. `notify status` derives accepted-unclaimed, stale-unclaimed, and claimed outcomes from the current handoff and latest delivery record without adding a second authoritative state. Failed delivery records remain available for fallback diagnosis. A reviewed retry increments the handoff attempt, permitting one new successful delivery record for the corrected baseline while retaining earlier audit rows. `finish` normally promotes ready direct dependents; `notify targets` retains the same scoped promotion as a compatibility reconciliation path and returns active Codex peer candidates that match the optional workstream and do not currently own an `in_progress` or `cancel_requested` handoff or claimed submitted CR review. An applicable project-local global or target-role stop, including an expired shift, returns `outside_shift` without a candidate and leaves the handoff `open`. It does not send a message, and compatible peer messaging is not assumed for other model hosts. `notify record` records what the agent reports after using a host messaging tool. Neither operation claims the handoff. Authentication tokens and message bodies are not stored.
 
 ## `change_requests`
 

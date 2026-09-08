@@ -24,7 +24,7 @@ bin/baton --db /tmp/baton.sqlite3 init
 bin/baton --db /tmp/baton.sqlite3 shift status --role frontend
 bin/baton --db /tmp/baton.sqlite3 shift start --role frontend
 bin/baton --db /tmp/baton.sqlite3 wait --role frontend --timeout 900
-bin/baton --db /tmp/baton.sqlite3 next --role frontend
+bin/baton --db /tmp/baton.sqlite3 next --role frontend --explain
 bin/baton --db /tmp/baton.sqlite3 claim HO-YYYY-MM-DD-001 --role frontend
 bin/baton --db /tmp/baton.sqlite3 finish HO-YYYY-MM-DD-001 --role frontend --evidence "Evidence summary"
 bin/baton --db /tmp/baton.sqlite3 shift status --role frontend
@@ -32,6 +32,7 @@ bin/baton --db /tmp/baton.sqlite3 wait --role frontend --timeout 900
 ```
 
 The final `wait` starts the next work cycle. A timeout is not completion; repeat bounded waits while the shift remains active.
+`--explain` reports why ready work is or is not eligible for the supplied agent identity. A mismatch between the requested role and an active registered session is advisory because explicit multi-role operation remains supported.
 
 ## Optional Git Workspace Checks
 
@@ -268,6 +269,7 @@ Reviewer roles need `cr.review` plus the action-specific permission such as `cr.
 The CR author role and reviewer role must be different. If an old CR is stuck because it has the same author and reviewer role, an SM/admin role with `cr.admin` must reassign or cancel it instead of editing SQLite directly.
 
 ```bash
+bin/baton --db /tmp/baton.sqlite3 cr list --status submitted --reviewer-role sm
 bin/baton --db /tmp/baton.sqlite3 cr wait-review --role sm --timeout 900
 ```
 
@@ -411,7 +413,7 @@ bin/baton --db /tmp/baton.sqlite3 agent session-set \
   --model <model-id>
 ```
 
-After `finish`, optionally inspect active Codex delivery candidates with `notify targets <finished-job> --role <role> --from-agent <profile>`. If the target role is stopped by the applicable project-local global or role control, including shift expiry, the command returns `outside_shift` without a candidate; do not send a host message. The successor remains `open` and becomes discoverable when its role resumes. Send one candidate task the handoff ID and instructions to run `handoff show` and `claim`, then record `notify record <ready-job> --status sent|failed`. A successful message is not a claim. Success is deduplicated per handoff attempt; an approved retry increments the attempt and permits one new notification carrying its changed baseline. Other hosts and models are not assumed to provide a compatible peer-message protocol; failed, unavailable, or unsupported delivery falls back to the recipient's normal `wait`/`watch` loop. Do not create a new task for notification.
+After `finish`, optionally inspect active Codex delivery candidates with `notify targets <finished-job> --role <role> --from-agent <profile>`. If the target role is stopped by the applicable project-local global or role control, including shift expiry, the command returns `outside_shift` without a candidate; do not send a host message. The successor remains `open` and becomes discoverable when its role resumes. Send one candidate task the handoff ID and instructions to run `handoff show` and `claim`, then record `notify record <ready-job> --status sent|failed`. Baton stores `sent` for compatibility but displays it as `host_accepted`: it confirms only that the host accepted the follow-up, not that the recipient read or claimed it. Use `notify status <ready-job>` to derive whether that accepted notification is unclaimed, stale, or followed by a claim. Success is deduplicated per handoff attempt; an approved retry increments the attempt and permits one new notification carrying its changed baseline. Other hosts and models are not assumed to provide a compatible peer-message protocol; failed, unavailable, unsupported, or stale delivery falls back to the recipient's normal `wait`/`watch` loop. Do not create a new task for notification.
 
 ## Wait Usage
 
@@ -420,7 +422,7 @@ Use bounded waits by default:
 ```bash
 bin/baton --db /tmp/baton.sqlite3 wait --role frontend --timeout 900
 bin/baton --db /tmp/baton.sqlite3 cr wait-review --role sm --timeout 900
-bin/baton --db /tmp/baton.sqlite3 watch --role planning --timeout 900
+bin/baton --db /tmp/baton.sqlite3 watch --role planning --timeout 900 --explain
 ```
 
 Use `watch` for planner/SM roles that receive both kinds of work. It checks assigned CR reviews first and then ready handoffs; a role without `cr.review` uses it as a handoff-only wait.
@@ -430,6 +432,8 @@ Use `watch` for planner/SM roles that receive both kinds of work. It checks assi
 No-op polling is silent. CLI output is produced for a ready job, an actual promotion or cancellation, timeout, or stop result. A worker must not relay an ordinary timeout as a user-facing update while its shift remains active.
 
 Avoid `--timeout 0` unless the user explicitly asks for a forever-wait experiment. For normal polling operation, repeat bounded waits while the role shift is active. Exit code `2` is only an internal loop boundary: check the shift and enter another bounded wait without reporting when the state is unchanged. Report once for ready work, claim/finish transitions, stop or shift expiry, errors requiring intervention, or an explicit status request. After finishing a claimed job, re-enter the same wait loop while the shift remains active unless a successful opt-in notification has transferred the only successor wake-up responsibility; CR monitoring, unassigned work, and failures still require polling.
+
+A planner/SM may remain addressable without holding a Baton waiter lease only when it owns no active handoff or CR review, has an active registered Codex session, has an explicit planning return handoff, and every producer that can release that handoff can use peer notification. The task must re-read Baton state when a host message arrives. Continue `watch` polling when any condition is missing, when CR work may arrive, or when delivery is stale or failed.
 
 If a required upstream handoff or Gate is cancelled, Baton recursively cancels blocked dependent handoffs in that dependency branch. Independent queue branches remain available. Cancelled handoffs do not become ready and must not be reopened by agents.
 

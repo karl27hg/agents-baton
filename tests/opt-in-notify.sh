@@ -127,7 +127,7 @@ if "$CLI" --db "$DB" notify record "$TARGET_JOB" \
 fi
 
 "$CLI" --db "$DB" notify list --job "$TARGET_JOB" | grep 'failed.*frontend-main.*backend-main' >/dev/null
-"$CLI" --db "$DB" notify list --job "$TARGET_JOB" | grep 'sent.*frontend-main.*backend-main' >/dev/null
+"$CLI" --db "$DB" notify list --job "$TARGET_JOB" | grep 'host_accepted.*frontend-main.*backend-main' >/dev/null
 "$CLI" --db "$DB" events "$TARGET_JOB" | grep 'notification_sent.*backend-main.*gpt-5.6-terra' >/dev/null
 "$CLI" --db "$DB" claim "$TARGET_JOB" --role backend --claimed-by backend-main >/dev/null
 "$CLI" --db "$DB" finish "$TARGET_JOB" --role backend --evidence "Notified work completed." >/dev/null
@@ -176,9 +176,9 @@ FAILURE_CR="$(sed -n 's/.* cr=\([^ ]*\).*/\1/p' <<<"$FAILURE_LINE")"
   --status sent \
   --message-ref codex-retry-002 >/dev/null
 "$CLI" --db "$DB" notify list --job "$RETRY_TARGET" \
-  | grep 'attempt=1.*sent.*frontend-main.*backend-main' >/dev/null
+  | grep 'attempt=1.*host_accepted.*frontend-main.*backend-main' >/dev/null
 "$CLI" --db "$DB" notify list --job "$RETRY_TARGET" \
-  | grep 'attempt=2.*sent.*frontend-main.*backend-main' >/dev/null
+  | grep 'attempt=2.*host_accepted.*frontend-main.*backend-main' >/dev/null
 "$CLI" --db "$DB" claim "$RETRY_TARGET" --role backend --claimed-by backend-main >/dev/null
 "$CLI" --db "$DB" finish "$RETRY_TARGET" --role backend \
   --evidence "Second attempt completed." >/dev/null

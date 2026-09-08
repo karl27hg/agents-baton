@@ -140,19 +140,24 @@ baton project migrate --apply --plan-token <token>
 
 검사 때 `--source-db` 또는 `--project-root`를 사용했다면 적용할 때도 같은 값을 사용합니다. Baton은 변경된 원본, 활성 waiter, 호환되지 않는 DB, 복수 후보, 서로 다른 기존 대상 DB를 거부하며, 적용 전 `.baton/backups/`에 검증된 백업을 만듭니다.
 
-Git tag 설치의 버전을 변경할 때는 새 tag를 명시하여 교체하고 각 프로젝트 DB를 migration합니다.
+Git tag 설치의 버전을 변경하기 전에 현재 호환되는 Baton으로 각 활성 프로젝트를 사전 점검합니다. `upgrade preflight`는 global maintenance stop이 설정되고 active waiter, handoff, cancellation acknowledgement, claimed CR review가 모두 없어야 `READY`와 exit `0`을 반환합니다.
 
 ```bash
+cd /path/to/your-project
+baton upgrade preflight
+baton stop --all --reason "Baton upgrade"
+baton upgrade preflight
+
 pipx install --force "git+https://github.com/karl27hg/agents-baton.git@vNEW.VERSION"
 baton --version
 
-cd /path/to/your-project
 baton migrate
 baton migrate --check
 baton project info
+baton resume --all
 ```
 
-이전 Baton이 새 schema를 지원하지 않을 수 있으므로 schema migration 후 임의로 downgrade하지 않습니다. 설치 버전을 고정하려면 `pipx pin agents-baton`, 다시 업그레이드를 허용하려면 `pipx unpin agents-baton`을 사용합니다.
+preflight가 출력한 ID를 모두 정리한 뒤 실행파일을 교체합니다. 새 실행파일을 먼저 설치한 경우에도 알려진 구버전 schema에 대해 preflight 진단은 가능하지만, 실제 finish/fail/review transition은 이전 호환 Baton으로 처리해야 합니다. 이전 Baton이 새 schema를 지원하지 않을 수 있으므로 schema migration 후 임의로 downgrade하지 않습니다. 설치 버전을 고정하려면 `pipx pin agents-baton`, 다시 업그레이드를 허용하려면 `pipx unpin agents-baton`을 사용합니다.
 
 정식 배포된 schema migration은 append-only로 유지하므로 오래 사용하지 않은 프로젝트도 다음 사용 시 여러 tag를 건너뛰어 최신 schema로 올릴 수 있습니다. 지원 범위는 정식 Baton schema와 인식 가능한 과거 unversioned DB이며 임의의 개발 snapshot, 수동 변경 schema 및 downgrade는 포함하지 않습니다.
 
@@ -295,10 +300,12 @@ baton notify record HO-READY \
   --detail "Codex가 follow-up을 수락함"
 ```
 
-실패하면 `--status failed --detail <사유>`를 기록하고 다음 후보를 시도하거나 기존 `wait`/`watch`로 복구합니다. 성공 알림은 handoff attempt마다 하나만 기록되어 반복 메시지를 막고, 심사된 retry는 새 attempt에서 한 번 더 알릴 수 있습니다. 메시지는 claim이 아니며 새 task나 subagent를 만들거나 Baton에 없는 작업을 지시해서는 안 됩니다. 성공적으로 후속 task를 깨웠다면 송신자가 그 목적만으로 계속 기다릴 필요는 없지만, CR 심사·미지정 role 작업·전송 실패에는 polling이 계속 필요합니다.
+실패하면 `--status failed --detail <사유>`를 기록하고 다음 후보를 시도하거나 기존 `wait`/`watch`로 복구합니다. 호환성을 위해 DB에는 `sent`로 저장하지만 사람용 출력은 `host_accepted`로 표시하며, 이는 수신 task가 메시지를 읽거나 claim했다는 뜻이 아닙니다. `notify status HO-... --stale-after 15m`으로 미청구, stale, 수신자 claim, 다른 agent claim 상태를 진단할 수 있으며 자동 재전송은 하지 않습니다. 성공 알림은 handoff attempt마다 하나만 기록되어 반복 메시지를 막고, 심사된 retry는 새 attempt에서 한 번 더 알릴 수 있습니다. 메시지는 claim이 아니며 새 task나 subagent를 만들거나 Baton에 없는 작업을 지시해서는 안 됩니다.
+
+메시지로 다시 깨울 수 있는 Codex planner는 active handoff와 claimed review가 없고, 모든 복귀 지점이 명시적 planning handoff이며, 각 producer가 active planner session에 알릴 수 있을 때 CLI waiter 없이 `addressable idle` 상태로 현재 turn을 끝낼 수 있습니다. 이는 Baton 상태가 아닙니다. CR 알림 경로가 없거나 미지정 planning 작업, stale endpoint, 전송 실패, 비 Codex host가 있으면 `watch`를 유지합니다.
 
 `next`는 한 번만 확인하는 비대기 명령입니다. 작업이 없다는 이유로 agent가 종료되면 안 되며, shift가 활성 상태인 동안 제한된 `wait`를 반복해야 합니다.
-`next` 출력만으로 작업을 시작하지 말고 claim 전에 `handoff show`로 objective, source reference, dependency, Gate, exit criteria를 모두 확인해야 합니다. `handoff list`는 role과 status별 queue를 읽기 전용으로 조회합니다.
+`next --explain`은 resolved agent, 요청 role, active session role, workstream 제외와 현재 ownership을 표시합니다. role 불일치는 명시적 겸임 운용을 위해 경고만 하며 자동 차단하지 않습니다. `next` 출력만으로 작업을 시작하지 말고 claim 전에 `handoff show`로 objective, source reference, dependency, Gate, exit criteria를 모두 확인해야 합니다. `handoff list`는 role과 status별 queue를 읽기 전용으로 조회합니다.
 
 ### 선택적 Git workspace 연동
 
@@ -335,6 +342,7 @@ bin/baton cr create \
 
 bin/baton cr submit CR-YYYY-MM-DD-001 --role planning
 bin/baton cr wait-review --role sm --timeout 900
+bin/baton cr list --status submitted --reviewer-role sm
 bin/baton cr show CR-YYYY-MM-DD-001
 ```
 
@@ -450,9 +458,10 @@ git checkout vX.Y.Z
 
 ## 버전 변경과 DB 보존
 
-Baton 버전을 변경한 뒤 role agent를 시작하기 전에 migration을 명시적으로 수행합니다.
+Baton 버전을 변경하기 전에 `upgrade preflight`를 실행하고 모든 blocker를 정리합니다. 실행파일 교체 뒤 role agent를 시작하기 전에 migration을 명시적으로 수행합니다.
 
 ```bash
+bin/baton upgrade preflight
 bin/baton migrate
 bin/baton migrate --check
 ```

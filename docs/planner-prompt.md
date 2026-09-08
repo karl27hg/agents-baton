@@ -34,9 +34,11 @@ Before waiting, inspect the applicable shift. Start the default `4h` role shift 
 baton watch --role planning --timeout 900
 ```
 
-`watch` checks submitted CRs assigned to the role first, then ready handoffs. Exit `2` is only a bounded-loop timeout: check `shift status` and re-enter `watch` silently while the shift remains active. After each CR decision or completed handoff, return to `watch`. Exit `3`, shift expiry, an unrecoverable error, or explicit user direction ends the loop.
+`watch` checks submitted CRs assigned to the role first, then ready handoffs. Use `cr list --status submitted --reviewer-role <role>` for an explicit queue audit. Exit `2` is only a bounded-loop timeout: check `shift status` and re-enter `watch` silently while the shift remains active. Use `watch --explain` when a timeout needs identity, workstream, or ownership diagnosis. After each CR decision or completed handoff, return to `watch` unless the push-first conditions below are satisfied. Exit `3`, shift expiry, an unrecoverable error, or explicit user direction ends the loop.
 
-Do not send a final response merely because the current planning action completed while the shift remains active. Baton cannot create a new Codex host turn after the agent ends one. In polling mode, continuous circulation requires repeated bounded `watch` calls. In explicitly enabled Codex peer-notification mode, a planner may end after its own obligations are complete and every ready successor was successfully notified, but it must retain `watch` for CR monitoring, unassigned role work, and notification fallback.
+In polling mode, do not send a final response merely because the current planning action completed while the shift remains active; continuous circulation requires repeated bounded `watch` calls. In explicitly enabled Codex peer-notification mode, a planner may instead become addressable idle and end its current host turn when it owns no active handoff or claimed review, every expected return path is an explicit planning handoff, and every producer can notify the planner's active session. Addressable idle is not a Baton workflow status and has no waiter lease. On the next host message, re-read Baton with `watch`, `next`, or the referenced `handoff show` before claiming anything.
+
+Retain `watch` for CR monitoring that has no notification path, unassigned planning-role work, stale or unavailable endpoints, failed delivery, and non-Codex hosts. A `sent` audit value means only host acceptance; inspect `notify status <job>` when claim acknowledgement is delayed. Never assume that host acceptance means the planner observed or claimed the handoff.
 
 ## Opt-In Peer Dispatch Policy
 
@@ -44,7 +46,7 @@ Do not send a final response merely because the current planning action complete
 - Every reachable Codex task registers a stable agent profile, runtime thread ID, role, host, and model with `agent session-set`. Runtime metadata never grants permissions.
 - `finish` immediately opens eligible direct dependents. After finishing a predecessor, use `notify targets <finished-job>` only to inspect opt-in Codex delivery candidates.
 - Send the Baton handoff ID to one existing candidate thread. Do not send the full job as an unaudited replacement contract and do not create a new thread.
-- Record the actual host result with `notify record --status sent|failed`. After failure, try another candidate or preserve the receiver's `wait`/`watch` fallback.
+- Record the actual host result with `notify record --status sent|failed`. Stored `sent` is displayed as `host_accepted` and does not prove observation or claim. Use `notify status <job> --stale-after <duration>` for derived liveness diagnosis. After failure, try another candidate or preserve the receiver's `wait`/`watch` fallback.
 - Treat `outside_shift` as a delivery prohibition, not as a missing assignment. Leave the ready handoff `open`; the target role will discover it after its project-local shift resumes.
 - Do not notify work that is blocked, cancelled, failed, or waiting on a Gate. The receiver must run `handoff show` and win `claim` before editing.
 - One successful delivery record per handoff attempt is the duplicate-suppression boundary. Reviewed retry creates a new attempt; additional agents discover the same attempt through Baton rather than repeated broadcast messages.

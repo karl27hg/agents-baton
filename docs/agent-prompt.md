@@ -69,6 +69,7 @@ Baton records and authorizes workflow operations, but cannot disable tools suppl
 
 - Use bounded waits by default.
 - `next` is a one-time non-blocking inspection command. It is not a substitute for `wait`.
+- Use `next --explain` only when identity, active-session role, workstream, or current ownership may be hiding an otherwise ready job. An active-session role mismatch is advisory because explicitly authorized multi-role operation remains possible.
 - If `next` reports no ready job, enter `wait` instead of ending the agent task.
 - A blocked handoff remains inside Baton until its job dependencies finish and named Gates are released; `wait` will detect its promotion to `open`.
 - Do not send periodic waiting updates while `baton wait` is running.
@@ -174,9 +175,11 @@ baton notify record HO-... \
   --detail "Codex accepted the follow-up."
 ```
 
-For an error, use `--status failed --detail <reason>`, then try the next listed candidate or fall back to the receiver's normal `wait`/`watch` loop. Codex peer messaging is an optional transport optimization, not a protocol assumed to exist in other model hosts. Baton permits only one successful notification record per handoff attempt to suppress duplicate wake-ups. An approved retry increments the attempt and permits one new notification carrying the corrected baseline. A delivered message never changes the handoff to `in_progress`; only `claim` does that.
+For an error, use `--status failed --detail <reason>`, then try the next listed candidate or fall back to the receiver's normal `wait`/`watch` loop. Codex peer messaging is an optional transport optimization, not a protocol assumed to exist in other model hosts. Baton stores a successful host delivery as `sent` for compatibility but displays it as `host_accepted`; it does not prove that the receiver observed the message. Use `notify status <job> --stale-after <duration>` to distinguish unclaimed, stale, and claimed delivery states. Baton permits only one successful notification record per handoff attempt to suppress duplicate wake-ups. An approved retry increments the attempt and permits one new notification carrying the corrected baseline. A delivered message never changes the handoff to `in_progress`; only `claim` does that.
 
 Notification does not reserve recipient capacity. Parallel senders may select the same idle profile before its first claim. Profiles that own an active handoff or claimed submitted CR review are excluded, but an incoming message never preempts the receiver's active work. Finish or safely transition the current unit first, then re-read Baton state and claim only still-eligible work. Do not abandon current work merely because a newer message arrived.
+
+`stop` and `resume` affect Baton polling and future claims; they do not interrupt, resume, or confirm observation by a Codex host task. A task that remains addressable by follow-up message may be idle without running a Baton waiter.
 
 ## Claim Rules
 

@@ -73,7 +73,7 @@
 12 retry_and_replacement_tracking
 ```
 
-`baton migrate --check`는 DB가 현재 binary가 아는 최신 schema version인지 읽기 전용으로 확인합니다.
+`baton upgrade preflight`는 실행 파일 교체 전에 인식 가능한 구버전 schema도 검사할 수 있는 읽기 전용 운영 점검입니다. 명시적인 global stop을 요구하고 blocker object ID를 출력합니다. Migration 후에는 `baton migrate --check`로 DB가 현재 binary가 아는 최신 schema version인지 확인합니다.
 
 ## `database_metadata`
 
@@ -541,7 +541,7 @@ Claim 동작:
 | `ended_at` | `text` | 아니오 | endpoint 비활성화 시각입니다. |
 | `end_reason` | `text` | 아니오 | 비활성화 또는 교체 사유입니다. |
 
-`unique(host, thread_id)`는 한 host thread가 두 profile을 나타내는 것을 방지하고 partial unique index는 `agent_id`마다 하나의 active endpoint만 허용합니다. session 교체에는 명시적 `--replace`가 필요합니다. `active`는 현재 실행 중이라는 뜻이 아니라 이후 follow-up을 받을 수 있다는 뜻입니다.
+`unique(host, thread_id)`는 한 host thread가 두 profile을 나타내는 것을 방지하고 partial unique index는 `agent_id`마다 하나의 active endpoint만 허용합니다. session 교체에는 명시적 `--replace`가 필요합니다. `active`는 현재 실행 중이라는 뜻이 아니라 이후 follow-up을 받을 수 있다는 뜻입니다. Planner가 waiter lease 대신 이 addressability에 의존하려면 문서화된 push-first idle 조건을 모두 충족해야 하며, session row 자체는 완전한 알림 경로를 증명하지 않습니다.
 
 ## `agent_workstreams`
 
@@ -584,12 +584,12 @@ Claim 동작:
 | `recipient_thread_id` | `text` | 예 | 전달을 시도한 host task입니다. |
 | `recipient_model` | `text` | 예 | recipient model snapshot입니다. |
 | `transport` | `text` | 예 | 전달에 사용한 runtime host입니다. |
-| `delivery_status` | `text` | 예 | `sent` 또는 `failed`입니다. |
+| `delivery_status` | `text` | 예 | 호환성 저장 값이며 `sent`(host가 수락함) 또는 `failed`입니다. |
 | `message_ref` | `text` | 아니오 | 선택적 host delivery/message reference입니다. |
 | `detail` | `text` | 아니오 | 결과 상세이며 CLI는 실패 시 필수로 요구합니다. |
 | `created_at` | `text` | 예 | 전달 시도 시각입니다. |
 
-partial unique index는 `(job_id, attempt)`마다 최대 하나의 `sent` row만 허용합니다. 실패 전달 기록은 fallback 진단을 위해 보존합니다. 심사된 retry는 handoff attempt를 증가시켜 과거 감사 row를 유지하면서 수정 baseline에 대한 새 성공 전달 1건을 허용합니다. 일반적으로 `finish`가 ready 직접 하위 작업을 승격하며, `notify targets`는 호환성 reconciliation을 위해 동일한 범위의 승격을 유지하고 선택적 workstream과 일치하며 현재 `in_progress` 또는 `cancel_requested` handoff나 claimed submitted CR review를 소유하지 않은 active Codex peer 후보를 반환합니다. 프로젝트 로컬 global 또는 대상 role stop이 적용되거나 shift가 만료된 경우에는 후보 없이 `outside_shift`를 반환하며 handoff는 `open`으로 유지됩니다. 이 명령은 message를 보내지 않으며 다른 model host가 호환되는 peer messaging을 제공한다고 가정하지 않습니다. `notify record`는 agent가 host messaging tool을 사용한 후 보고한 결과를 기록합니다. 어느 명령도 handoff를 claim하지 않습니다. 인증 token과 message 본문은 저장하지 않습니다.
+partial unique index는 `(job_id, attempt)`마다 최대 하나의 `sent` row만 허용합니다. CLI text는 이 저장 값을 `host_accepted`로 표시하며 recipient acknowledgement를 뜻하지 않습니다. `notify status`는 별도의 권위 상태를 추가하지 않고 현재 handoff와 최근 전달 기록에서 accepted-unclaimed, stale-unclaimed, claimed 결과를 계산합니다. 실패 전달 기록은 fallback 진단을 위해 보존합니다. 심사된 retry는 handoff attempt를 증가시켜 과거 감사 row를 유지하면서 수정 baseline에 대한 새 성공 전달 1건을 허용합니다. 일반적으로 `finish`가 ready 직접 하위 작업을 승격하며, `notify targets`는 호환성 reconciliation을 위해 동일한 범위의 승격을 유지하고 선택적 workstream과 일치하며 현재 `in_progress` 또는 `cancel_requested` handoff나 claimed submitted CR review를 소유하지 않은 active Codex peer 후보를 반환합니다. 프로젝트 로컬 global 또는 대상 role stop이 적용되거나 shift가 만료된 경우에는 후보 없이 `outside_shift`를 반환하며 handoff는 `open`으로 유지됩니다. 이 명령은 message를 보내지 않으며 다른 model host가 호환되는 peer messaging을 제공한다고 가정하지 않습니다. `notify record`는 agent가 host messaging tool을 사용한 후 보고한 결과를 기록합니다. 어느 명령도 handoff를 claim하지 않습니다. 인증 token과 message 본문은 저장하지 않습니다.
 
 ## `change_requests`
 
