@@ -414,6 +414,8 @@ bin/baton role permission-list sm
 
 Normal database-backed commands never apply pending migrations. They fail with `database migration required` until an operator runs `baton migrate`; this prevents an ordinary worker from changing shared schema unexpectedly. Project-specific permission removals made with `role permission-remove` are preserved: a later migration adds only permissions introduced by that migration and does not restore the full default set. `baton-report` is read-only and does not migrate the database.
 
+Schema 12 preserves existing jobs and notifications as attempt 1, then records each reviewed `retry` as a new attempt. It also adds explicit CR implementation-handoff replacement records; migration does not infer replacements from historical cancellations.
+
 `baton update` remains a deprecated alias for database migration for compatibility with v0.1.6. Use `migrate`; the `update` name is reserved for a future Baton binary update workflow.
 
 Use `bin/baton --version` to inspect the installed CLI version. `migrate --check` performs a read-only compatibility check and exits unsuccessfully when migrations are pending or the database is incompatible.
@@ -532,7 +534,7 @@ bin/baton notify record HO-READY \
   --detail "Codex accepted the follow-up."
 ```
 
-Use `--status failed --detail <reason>` when delivery fails, then try the next candidate or retain the receiver's `wait`/`watch` fallback. Baton records at most one successful notification for each handoff to avoid repeated wake-up messages. Delivery does not claim work, and no Baton agent may create a new task or send work that is not registered in Baton.
+Use `--status failed --detail <reason>` when delivery fails, then try the next candidate or retain the receiver's `wait`/`watch` fallback. Baton records at most one successful notification for each handoff attempt to avoid repeated wake-up messages. An approved `retry` increments the attempt, so a new baseline may be delivered and audited without colliding with the previous successful notification. Delivery does not claim work, and no Baton agent may create a new task or send work that is not registered in Baton.
 
 ```bash
 bin/baton agent session-list --status active
@@ -606,6 +608,8 @@ bin/baton register \
   --exit-criteria "QA evidence is recorded."
 ```
 
+Repeated `--depends-on` IDs are rejected before any row is written. A handoff registered after every listed predecessor is already `finished` starts directly as `open`. A failed predecessor keeps it `blocked` and emits a warning; use that scheduling edge only when the same failed job must be retried and finished. A standalone remediation should reference the failure in `--source-ref` rather than depend on the failed job.
+
 Promote ready blocked work:
 
 ```bash
@@ -645,7 +649,7 @@ bin/baton retry HO-YYYY-MM-DD-001 \
   --reason "Apply the reviewed correction."
 ```
 
-The target role must claim the reopened job again. If retry should not proceed, reject the failure CR first and then use `cancel`; cancellation recursively closes only that blocked dependency branch. Cancelling a submitted failure CR administratively also cancels its failed job and blocked descendants.
+The target role must claim the reopened job again. `retry` increments and displays the handoff attempt; notification deduplication also uses that attempt. If retry should not proceed, reject the failure CR first and then use `cancel`; cancellation recursively closes only that blocked dependency branch. Cancelling a submitted failure CR administratively also cancels its failed job and blocked descendants.
 
 `next` is a queue hint, not the full work contract. Before claiming, use `handoff show` to read the objective, source reference, dependencies, Gates, and exit criteria. Use `handoff list` for read-only queue inspection, and `handoff successors` to inspect direct downstream state without assigning it:
 
@@ -863,13 +867,20 @@ bin/baton cr create-handoff CR-YYYY-MM-DD-001 \
   --exit-criteria "UI behavior matches the approved CR."
 ```
 
-Mark a CR implemented only after every implementation handoff is finished:
+Mark a CR implemented only after every implementation handoff is finished. If an invalid implementation handoff was cancelled and replaced, first record the explicit audited relationship. Both jobs must already be linked to the same approved CR, the retired job must be `cancelled`, and the replacement must not be failed or cancelled:
 
 ```bash
+bin/baton cr supersede-handoff CR-YYYY-MM-DD-001 HO-OLD \
+  --replacement HO-NEW \
+  --role sm \
+  --reason "HO-NEW replaces the cancelled implementation route."
+
 bin/baton cr mark-implemented CR-YYYY-MM-DD-001 \
   --role sm \
   --evidence "Implementation handoffs finished."
 ```
+
+`mark-implemented` accepts a cancelled implementation only when its audited replacement chain reaches a `finished` implementation. It still rejects unrelated cancellations and unfinished, failed, or cancellation-requested replacements.
 
 Administrative CR remediation requires `cr.admin`:
 
@@ -1073,7 +1084,7 @@ Required agent loop:
 6. If the work cannot satisfy its exit criteria, use `fail`; never report unsuccessful work with `finish`.
 7. After `finish` or failure reporting, return to step 2 while the shift remains active.
 
-A blocked handoff is not returned by `next`. `finish` immediately promotes eligible direct successors, and Gate release does the same for its eligible dependents. `wait`, `watch`, and `promote-ready` retain reconciliation for older or externally restored state. A failed upstream keeps descendants blocked until its approved retry finishes. If a required upstream handoff or Gate is cancelled, Baton recursively marks that blocked dependency branch as `cancelled`; unrelated branches remain active.
+A blocked handoff is not returned by `next`. `finish` immediately promotes eligible direct successors, and Gate release does the same for its eligible dependents. A newly registered handoff starts as `open` when all declared predecessors are already finished. `wait`, `watch`, and `promote-ready` retain reconciliation for older or externally restored state. A failed upstream keeps descendants blocked until its approved retry finishes. If a required upstream handoff or Gate is cancelled, Baton recursively marks that blocked dependency branch as `cancelled`; unrelated branches remain active.
 
 `--timeout 0` means wait forever, but that should be used only in explicit experiments. Normal workers must repeat bounded waits until their shift expires or a stop control is set.
 

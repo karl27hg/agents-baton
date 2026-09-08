@@ -47,7 +47,7 @@ Do not send a final response merely because the current planning action complete
 - Record the actual host result with `notify record --status sent|failed`. After failure, try another candidate or preserve the receiver's `wait`/`watch` fallback.
 - Treat `outside_shift` as a delivery prohibition, not as a missing assignment. Leave the ready handoff `open`; the target role will discover it after its project-local shift resumes.
 - Do not notify work that is blocked, cancelled, failed, or waiting on a Gate. The receiver must run `handoff show` and win `claim` before editing.
-- One successful delivery record per handoff is the default duplicate-suppression boundary. Additional agents discover the job through Baton rather than repeated broadcast messages.
+- One successful delivery record per handoff attempt is the duplicate-suppression boundary. Reviewed retry creates a new attempt; additional agents discover the same attempt through Baton rather than repeated broadcast messages.
 - Keep a session active while its existing Codex task remains addressable by follow-up messages, even when it is not currently executing. End or replace stale endpoints explicitly.
 - Do not require peer delivery from non-Codex hosts or other models. Their interoperable baseline is Baton state plus `next`, `wait`, `watch`, and `claim`.
 - Candidate selection respects workstream registration and excludes agents that already own an active handoff or claimed CR review. Delivery still does not reserve capacity, so the receiver must claim before editing. At convergence points, register one fan-in handoff that depends on every required branch, optionally behind a Gate, so readiness and notification occur once after all inputs finish.
@@ -126,6 +126,8 @@ A failed handoff is not completed work. Its dependency descendants remain blocke
 - Approve the failure CR only when retrying the original handoff is the chosen recovery. Then run `baton retry` and let the target role claim the reopened job.
 - Reject the failure CR when the attempted approach must not be retried. Then use authorized `baton cancel` to cancel that failed job and its blocked dependency branch.
 - Request a CR revision when the failure report lacks enough evidence to decide. Do not create a parallel replacement that leaves the original dependency unresolved.
+- A standalone remediation handoff must cite the failed job in `--source-ref`; do not make it depend on that failed job. Use a scheduling dependency only when the remediation must wait for the original job to be retried and finished.
+- `retry` increments the original handoff attempt. If peer notification is enabled, record the corrected-baseline delivery against that new attempt.
 - Never use `promote-ready`, Gate release, or a replacement handoff to bypass a failed required dependency.
 
 ## Approved Design Changes
@@ -137,6 +139,7 @@ Do not edit an approved CR body. Classify the impact and preserve unrelated work
 - Supersession immediately cancels linked `blocked` and `open` implementation handoffs and their blocked dependency descendants.
 - A linked `in_progress` handoff becomes `cancel_requested`. Its claimant pauses before commit or integration while the reason is reviewed. If the work remains valid and its linked CR was not cancelled or superseded, use `cancel-withdraw --reason <review-result>` to preserve the original claim; otherwise direct the claimant to run `cancel-ack` with concrete evidence. Do not register replacement work that depends on an unacknowledged old result.
 - Finished handoffs remain immutable audit evidence. Register explicit remediation handoffs under the replacement CR when their output must change.
+- When one implementation route of the same approved CR was cancelled and replaced, record `cr supersede-handoff <cr> <cancelled-job> --replacement <new-job> --role <reviewer> --reason <reason>`. Do not mark the CR implemented until every replacement chain reaches a finished handoff.
 - A failed linked implementation must complete its failure-CR decision before its parent CR can be cancelled or superseded.
 - Use `cancel --force` only when the claimant cannot acknowledge cancellation. Record why cooperative cancellation was impossible.
 

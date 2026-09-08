@@ -271,6 +271,8 @@ New implementation and revision handoffs use the stable `cr:CR-ID` source refere
 of a branch-relative file path. General design documents remain Git artifacts and should use
 an immutable reference such as `<commit-sha>:docs/design.md`.
 
+When a cancelled implementation handoff is replaced under the same approved CR, the reviewer records the explicit relationship with `cr supersede-handoff`. Migration never infers this relationship from old cancellations. `cr mark-implemented` accepts the retired handoff only when its audited replacement chain reaches a finished implementation.
+
 ## AGENTS.md
 
 Add project-specific Baton rules to the consuming project's `AGENTS.md`.
@@ -556,13 +558,13 @@ The installed CLI does not call Codex or hold Codex credentials. Existing Codex 
 
 `finish` immediately opens eligible direct dependents. Any agent may inspect direct downstream state with `handoff successors <finished-job>`; the reported role is eligibility, and `unassigned` never means the inspecting agent owns the work. Only `claim` establishes the concrete worker.
 
-After a handoff finishes, its agent can optionally run `notify targets <finished-job> --role <role> --from-agent <profile>` to list existing Codex peer candidates, ranked by recent session update. A project-local global or target-role stop, including shift expiry, returns `outside_shift` instead of a candidate; the handoff stays `open` and no host message should be sent. The agent sends one `candidate` a host follow-up containing the receiving handoff ID, then records the actual result with `notify record --status sent|failed`. The receiver must inspect and claim the handoff before editing.
+After a handoff finishes, its agent can optionally run `notify targets <finished-job> --role <role> --from-agent <profile>` to list existing Codex peer candidates, ranked by recent session update. A project-local global or target-role stop, including shift expiry, returns `outside_shift` instead of a candidate; the handoff stays `open` and no host message should be sent. The agent sends one `candidate` a host follow-up containing the receiving handoff ID, then records the actual result with `notify record --status sent|failed`. Successful delivery is unique per handoff attempt; reviewed retry increments the attempt so its corrected baseline can produce a new audit record. The receiver must inspect and claim the handoff before editing.
 
 Registration itself is the opt-in switch; projects that do not register sessions retain the existing polling behavior. Baton does not assume that other models or hosts provide a compatible task-message protocol. Keep `wait`/`watch` for CR monitoring, unassigned role queues, inaccessible or stale tasks, failed messages, and non-Codex environments. Do not create new Codex tasks as part of this flow. End stale endpoints explicitly, and use `--replace` only after verifying the replacement task. Baton stores no host token or message body.
 
 ### Known Fan-In Limitation
 
-Notification candidate selection is advisory and does not reserve an agent. It currently considers a profile busy only when `claimed_by` identifies it on an `in_progress` or `cancel_requested` handoff. CR reviews have a `reviewer_role` but no concrete reviewer claim, so an agent already reviewing a CR may still appear available. Parallel finishers can also select the same idle profile before the first notified handoff is claimed.
+Notification candidate selection is advisory and does not reserve an agent. It excludes profiles that own an `in_progress` or `cancel_requested` handoff or a claimed submitted CR review. Parallel finishers can still select the same idle profile before the first notified handoff is claimed.
 
 Treat incoming messages as queue wake-ups, never as preemption:
 

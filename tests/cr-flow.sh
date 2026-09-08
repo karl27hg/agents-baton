@@ -39,6 +39,10 @@ CR_ID="$(awk '{print $1}' <<<"$CR_LINE")"
 CR_FILE="$(awk '{print $3}' <<<"$CR_LINE")"
 
 grep "status: draft" "$CR_FILE" >/dev/null
+if grep -n ' $' "$CR_FILE" >/dev/null; then
+  echo "ERROR: CR frontmatter contains trailing whitespace" >&2
+  exit 1
+fi
 "$CLI" --db "$DB" cr submit "$CR_ID" --role planning >/dev/null
 "$CLI" --db "$DB" cr wait-review --role sm --timeout 1 --interval 1 | grep "$CR_ID" >/dev/null
 
@@ -237,6 +241,47 @@ PY
 "$CLI" --db "$DB" cr cancel "$CANCEL_ID" --role sm --reason "Superseded by replacement CR" >/dev/null
 "$CLI" --db "$DB" cr status "$CANCEL_ID" | grep "cancelled" >/dev/null
 "$CLI" --db "$DB" cr events "$CANCEL_ID" | grep "cancelled" >/dev/null
+
+REPLACEMENT_LINE="$("$CLI" --db "$DB" cr create \
+  --title "Replacement implementation" \
+  --author-role planning \
+  --reviewer-role sm \
+  --dir "$CR_DIR")"
+REPLACEMENT_CR_ID="$(awk '{print $1}' <<<"$REPLACEMENT_LINE")"
+"$CLI" --db "$DB" cr submit "$REPLACEMENT_CR_ID" --role planning >/dev/null
+"$CLI" --db "$DB" cr approve "$REPLACEMENT_CR_ID" --role sm \
+  --evidence "Replacement workflow approved." >/dev/null
+RETIRED_JOB="$("$CLI" --db "$DB" cr create-handoff "$REPLACEMENT_CR_ID" \
+  --by-role sm \
+  --role frontend \
+  --title "Retired implementation" \
+  --objective "Represent the invalid implementation route." \
+  --exit-criteria "The route is replaced." | awk '{print $2}')"
+REPLACEMENT_JOB="$("$CLI" --db "$DB" cr create-handoff "$REPLACEMENT_CR_ID" \
+  --by-role sm \
+  --role frontend \
+  --title "Replacement implementation" \
+  --objective "Implement the approved CR through the corrected route." \
+  --exit-criteria "The replacement implementation finishes." | awk '{print $2}')"
+"$CLI" --db "$DB" cancel "$RETIRED_JOB" --role sm \
+  --reason "Replace the invalid implementation route." >/dev/null
+"$CLI" --db "$DB" claim "$REPLACEMENT_JOB" --role frontend \
+  --claimed-by replacement-frontend >/dev/null
+"$CLI" --db "$DB" finish "$REPLACEMENT_JOB" --role frontend \
+  --evidence "Replacement implementation completed." >/dev/null
+if "$CLI" --db "$DB" cr mark-implemented "$REPLACEMENT_CR_ID" --role sm \
+  --evidence "Replacement completed without an audited relation." >/dev/null 2>&1; then
+  echo "ERROR: cancelled implementation was ignored without supersession" >&2
+  exit 1
+fi
+"$CLI" --db "$DB" cr supersede-handoff "$REPLACEMENT_CR_ID" "$RETIRED_JOB" \
+  --replacement "$REPLACEMENT_JOB" \
+  --role sm \
+  --reason "The replacement handoff contains the accepted implementation." >/dev/null
+"$CLI" --db "$DB" cr mark-implemented "$REPLACEMENT_CR_ID" --role sm \
+  --evidence "Audited replacement implementation completed." >/dev/null
+"$CLI" --db "$DB" cr events "$REPLACEMENT_CR_ID" \
+  | grep "implementation_handoff_superseded.*$RETIRED_JOB.*$REPLACEMENT_JOB" >/dev/null
 
 WAIT_DB="$TMP/wait.sqlite3"
 WAIT_OUT="$TMP/wait-review.out"

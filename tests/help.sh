@@ -14,6 +14,7 @@ cmp "$TMP/root-short.txt" "$TMP/root-command.txt"
 grep 'help.*show command help' "$TMP/root-command.txt" >/dev/null
 grep "baton guide list" "$TMP/root-command.txt" >/dev/null
 grep "baton guide show" "$TMP/root-command.txt" >/dev/null
+grep "baton-report audit|summary" "$TMP/root-command.txt" >/dev/null
 grep "bootstrap|worker|planner" "$TMP/root-command.txt" >/dev/null
 grep -- '--workspace-root WORKSPACE_ROOT' "$TMP/root-command.txt" >/dev/null
 grep 'BATON_DB' "$TMP/root-command.txt" >/dev/null
@@ -46,6 +47,7 @@ grep -- '--plan-token PLAN_TOKEN' "$TMP/migrate-command.txt" >/dev/null
 "$CLI" help cr seal | grep -- '--evidence EVIDENCE' >/dev/null
 "$CLI" help cr supersede | grep -- '--by NEW_CR_ID' >/dev/null
 "$CLI" help cr supersede | grep -- '--by-source-ref SOURCE_REF' >/dev/null
+"$CLI" help cr supersede-handoff | grep -- '--replacement REPLACEMENT_JOB_ID' >/dev/null
 if "$CLI" help unknown-command >/dev/null 2>&1; then
   echo "ERROR: help accepted an unknown command" >&2
   exit 1
