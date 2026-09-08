@@ -125,6 +125,23 @@ baton-report summary
 
 Normal workflow commands do not migrate schemas automatically. A `database migration required` error is an operator action: keep workers stopped, run `baton migrate`, verify with `baton migrate --check`, and then resume the intended scopes.
 
+### v0.6.0rc3 / Schema v12 Upgrade Notice
+
+Upgrading the shared pipx executable to `v0.6.0rc3` does not modify any project database. Each existing project owns its own database and must be migrated separately from that project's root. A newly initialized RC3 project already uses schema v12. Projects already migrated with RC2 remain on schema v12 and need only `baton migrate --check`.
+
+Before migrating an existing schema v11 database, stop its workers and waiters, finish or cancel active handoffs, resolve cancellation acknowledgements, and decide or release claimed CR reviews. Then run:
+
+```bash
+baton stop --all --reason "Baton v0.6.0rc3 migration"
+baton migrate
+baton migrate --check
+baton resume --all
+```
+
+`baton migrate` writes a validated backup under `.baton/backups/` before applying schema v12 transactionally. Schema v12 preserves existing handoffs and notification records as attempt 1, adds retry-attempt-scoped notification deduplication, and adds audited replacement relationships for cancelled CR implementation handoffs. It does not infer replacement relationships from historical cancellations; a reviewer must record a valid replacement explicitly with `cr supersede-handoff` before such a CR can be marked implemented.
+
+Do not resume with an older Baton executable after schema v12 is applied. When multiple projects use the same pipx installation, repeat only the project-local database migration for each project; there is no global database migration command.
+
 Schema v7 introduces `failed` handoffs and `handoff.register`. Existing projects retain prior registration behavior because migration grants `handoff.register` to every active role already present. Review those grants after migration and use `role permission-remove <role> handoff.register` when registration should remain centralized in `sm` or `planning`.
 
 Schema v8 adds submitted and approved CR body hashes. It does not guess an approval hash

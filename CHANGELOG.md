@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## v0.6.0rc3
+
+- Added an installed bootstrap-guide notice for per-project schema v11-to-v12 migration, safety prerequisites, backup behavior, and RC3 compatibility boundaries.
+- Kept schema v12 unchanged from RC2; projects already migrated with RC2 require only a schema check.
+
 ## v0.6.0rc2
 
 - Added schema migration v12 with per-retry handoff attempts, attempt-scoped notification deduplication, and audited replacement relationships for cancelled CR implementation handoffs.
