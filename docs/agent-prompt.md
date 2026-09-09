@@ -277,7 +277,9 @@ baton --db <db> cr create-handoff <cr-id> \
   --exit-criteria "Completion criteria"
 ```
 
-If one linked implementation was cancelled and replaced under the same approved CR, the reviewer records the relationship with `cr supersede-handoff <cr-id> <cancelled-job> --replacement <new-job> --role <role> --reason <reason>`. Mark the CR implemented only after the replacement chain reaches a finished handoff; never treat an unrelated cancelled implementation as complete.
+Use `cr create-handoff` for normal assignment. If an exact `cr:<CR-ID>` general handoff already finished before it was officially linked, inspect it with `cr show` and `handoff show`. The assigned reviewer, holding both `cr.review` and `cr.assign_implementation`, may recover the relationship with `cr link-handoff <cr-id> <job-id> --role <role> --reason <reason>` only after confirming a non-blocking completion and effective commit evidence that is not `unresolved` or `legacy_unchecked`. Do not create a no-change synthetic handoff, infer a link from a similar title, or reuse one implementation for another CR.
+
+If one linked implementation was cancelled and replaced under the same approved CR, the reviewer records the relationship with `cr supersede-handoff <cr-id> <cancelled-job> --replacement <new-job> --role <role> --reason <reason>`. Mark the CR implemented only after the replacement chain reaches a finished, non-blocking handoff; never treat an unrelated cancellation or blocking completed result as complete.
 
 ## Finish Rules
 

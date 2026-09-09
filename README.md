@@ -921,7 +921,18 @@ bin/baton cr create-handoff CR-YYYY-MM-DD-001 \
   --exit-criteria "UI behavior matches the approved CR."
 ```
 
-Mark a CR implemented only after every implementation handoff is finished. If an invalid implementation handoff was cancelled and replaced, first record the explicit audited relationship. Both jobs must already be linked to the same approved CR, the retired job must be `cancelled`, and the replacement must not be failed or cancelled:
+Use `cr create-handoff` for the normal implementation path. If implementation was instead registered as a general handoff, the assigned reviewer may explicitly adopt it without creating a synthetic replacement:
+
+```bash
+bin/baton cr show CR-YYYY-MM-DD-001
+bin/baton cr link-handoff CR-YYYY-MM-DD-001 HO-YYYY-MM-DD-001 \
+  --role sm \
+  --reason "Adopt the already completed implementation."
+```
+
+Adoption requires the assigned reviewer role to hold `cr.review` and `cr.assign_implementation`, plus an approved CR with an unchanged body, a finished handoff whose `source_ref` is exactly `cr:<CR-ID>`, a non-blocking completion, and effective commit evidence that is neither `unresolved` nor `legacy_unchecked`. Correct unverifiable historical evidence with `handoff evidence-correct` first. Baton rejects reuse as another CR's implementation, records `implementation_handoff_linked`, and treats an identical link retry as `already-linked`; it never infers or backfills these links automatically. `cr status` and `cr show` distinguish official links from unlinked exact-source candidates.
+
+Mark a CR implemented only after every implementation handoff is closure-ready. If an invalid implementation handoff was cancelled and replaced, first record the explicit audited relationship. Both jobs must already be linked to the same approved CR, the retired job must be `cancelled`, and the replacement must not be failed or cancelled:
 
 ```bash
 bin/baton cr supersede-handoff CR-YYYY-MM-DD-001 HO-OLD \
@@ -934,7 +945,7 @@ bin/baton cr mark-implemented CR-YYYY-MM-DD-001 \
   --evidence "Implementation handoffs finished."
 ```
 
-`mark-implemented` accepts a cancelled implementation only when its audited replacement chain reaches a `finished` implementation. It still rejects unrelated cancellations and unfinished, failed, or cancellation-requested replacements.
+`mark-implemented` accepts a cancelled implementation only when its audited replacement chain reaches a `finished`, non-blocking implementation. It rejects unrelated cancellations, unfinished lifecycle states, failed or cancellation-requested replacements, and finished results marked `completion_blocking=1`. A non-blocking non-pass outcome remains an explicit reviewer acceptance decision and must be supported by the supplied implementation evidence.
 
 Administrative CR remediation requires `cr.admin`:
 
@@ -994,6 +1005,7 @@ State-changing commands run inside `BEGIN IMMEDIATE` transactions:
 - `cr cancel`
 - `cr supersede`
 - `cr create-handoff`
+- `cr link-handoff`
 - `cr mark-implemented`
 - `cr wait-review`
 
@@ -1045,19 +1057,25 @@ tests/gates.sh
 tests/workstream-routing.sh
 tests/rc4-operations.sh
 tests/rc5-evidence-outcomes.sh
+tests/rc6-cr-linkage.sh
 tests/handoff-cancel.sh
 tests/handoff-dependencies.sh
+tests/handoff-failure.sh
 tests/migrate.sh
 tests/project-migrate.sh
 tests/project-root.sh
 tests/multi-project.sh
 tests/handoff-inspect.sh
+tests/opt-in-notify.sh
+tests/plan-revision.sh
+tests/planner-watch.sh
 tests/guides.sh
 tests/help.sh
 tests/shift.sh
 tests/report.sh
 tests/update.sh
 tests/workspace-vcs.sh
+tests/worktree-control.sh
 ```
 
 Run the isolated installation test when `pipx` is available:

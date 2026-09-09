@@ -257,7 +257,7 @@ editable body. Baton hashes only the body, excluding managed frontmatter:
 1. `cr submit` and `cr resubmit` record the exact submitted body hash.
 2. `cr approve` refuses approval if the body changed after submission.
 3. Approval records an immutable approved body hash.
-4. `cr create-handoff`, implementation `claim`, `finish`, and `cr mark-implemented` refuse
+4. `cr create-handoff`, `cr link-handoff`, implementation `claim`, `finish`, and `cr mark-implemented` refuse
    to proceed if the approved body is missing or changed.
 5. `cr status` and `cr show` report `ok`, `mismatch`, `missing`, `unreadable`,
    `editable`, or `legacy-unsealed` integrity.
@@ -277,7 +277,9 @@ New implementation and revision handoffs use the stable `cr:CR-ID` source refere
 of a branch-relative file path. General design documents remain Git artifacts and should use
 an immutable reference such as `<commit-sha>:docs/design.md`.
 
-When a cancelled implementation handoff is replaced under the same approved CR, the reviewer records the explicit relationship with `cr supersede-handoff`. Migration never infers this relationship from old cancellations. `cr mark-implemented` accepts the retired handoff only when its audited replacement chain reaches a finished implementation.
+When a cancelled implementation handoff is replaced under the same approved CR, the reviewer records the explicit relationship with `cr supersede-handoff`. Migration never infers this relationship from old cancellations. `cr mark-implemented` accepts the retired handoff only when its audited replacement chain reaches a finished, non-blocking implementation.
+
+Use `cr create-handoff` for normal implementation assignment. When an existing general handoff was completed with the exact `cr:<CR-ID>` source reference, the assigned reviewer can inspect the candidate shown by `cr status` or `cr show` and adopt it with `cr link-handoff`. The command rejects unfinished or blocking results, unverifiable effective commit evidence, source mismatches, and cross-CR implementation reuse. Baton records the explicit link but never infers or backfills it automatically. A blocking completed implementation also prevents `cr mark-implemented`.
 
 ## AGENTS.md
 

@@ -725,6 +725,7 @@ cancelled
 superseded
 supersedes
 implementation_handoff_created
+implementation_handoff_linked
 implementation_handoff_superseded
 implemented
 ```
@@ -733,7 +734,7 @@ implemented
 
 Purpose:
 
-- Links CRs to generated handoff jobs.
+- Links CRs to generated or explicitly adopted handoff jobs.
 - Distinguishes revision handoffs from implementation handoffs.
 - Allows `cr mark-implemented` to enforce implementation completion.
 
@@ -751,6 +752,10 @@ Primary key:
 ```text
 (cr_id, job_id)
 ```
+
+`cr link-handoff` adds an implementation link only after the assigned reviewer passes both `cr.review` and `cr.assign_implementation` authorization and Baton validates an exact `cr:<CR-ID>` source reference, finished non-blocking completion, and verifiable effective commit evidence. It emits `implementation_handoff_linked`, is idempotent for an existing identical implementation link, and rejects implementation reuse across CRs. Schema migration never infers or backfills these relationships.
+
+`cr mark-implemented` requires each implementation path, including any audited replacement chain, to end in a finished result with `completion_blocking=0`.
 
 ## `cr_handoff_supersessions`
 

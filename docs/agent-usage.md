@@ -356,6 +356,11 @@ bin/baton --db /tmp/baton.sqlite3 cr create-handoff CR-YYYY-MM-DD-001 \
   --objective "Implement the approved upload policy UI." \
   --exit-criteria "UI behavior matches the approved CR."
 
+# Recover an existing finished general handoff with source_ref=cr:<CR-ID>.
+bin/baton --db /tmp/baton.sqlite3 cr link-handoff CR-YYYY-MM-DD-001 HO-YYYY-MM-DD-001 \
+  --role sm \
+  --reason "Adopt the verified completed implementation."
+
 # Record an explicit replacement after cancelling an invalid implementation route.
 bin/baton --db /tmp/baton.sqlite3 cr supersede-handoff CR-YYYY-MM-DD-001 HO-OLD \
   --replacement HO-NEW \
@@ -367,7 +372,9 @@ bin/baton --db /tmp/baton.sqlite3 cr mark-implemented CR-YYYY-MM-DD-001 \
   --evidence "Implementation handoffs finished."
 ```
 
-Both replacement jobs must be implementation handoffs of the same approved CR. The old job must be `cancelled`. `cr mark-implemented` accepts its audited replacement chain only after that chain reaches a `finished` handoff; unrelated cancelled jobs still block closure.
+`cr link-handoff` is a recovery command, not the normal assignment path. It requires the assigned reviewer to hold `cr.review` and `cr.assign_implementation`, plus an approved unchanged CR, an exact `cr:<CR-ID>` source reference, a finished non-blocking handoff, and effective commit evidence that is not `unresolved` or `legacy_unchecked`. It is audited, idempotent for the same link, rejects cross-CR implementation reuse, and performs no automatic backfill. `cr show` and `cr status` list exact-source unlinked candidates for inspection.
+
+Both replacement jobs must be implementation handoffs of the same approved CR. The old job must be `cancelled`. `cr mark-implemented` accepts its audited replacement chain only after that chain reaches a `finished`, non-blocking handoff; unrelated cancelled jobs and blocking completed results still block closure.
 
 ## Agent Identity
 

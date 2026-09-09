@@ -723,6 +723,7 @@ cancelled
 superseded
 supersedes
 implementation_handoff_created
+implementation_handoff_linked
 implementation_handoff_superseded
 implemented
 ```
@@ -731,7 +732,7 @@ implemented
 
 용도:
 
-- CR과 생성된 handoff job을 연결합니다.
+- CR과 생성되었거나 명시적으로 채택된 handoff job을 연결합니다.
 - revision handoff와 implementation handoff를 구분합니다.
 - `cr mark-implemented`가 구현 완료 여부를 검증할 수 있게 합니다.
 
@@ -749,6 +750,10 @@ Primary key:
 ```text
 (cr_id, job_id)
 ```
+
+`cr link-handoff`는 지정 reviewer의 `cr.review` 및 `cr.assign_implementation` 권한, 정확한 `cr:<CR-ID>` source reference, finished non-blocking 완료, 검증 가능한 effective commit evidence를 확인한 뒤에만 implementation 연결을 추가합니다. `implementation_handoff_linked` event를 기록하고 동일 연결은 idempotent하게 처리하며, 여러 CR에서 implementation을 재사용하는 것을 거부합니다. Schema migration은 이 관계를 추론하거나 자동 backfill하지 않습니다.
+
+`cr mark-implemented`는 감사된 replacement chain을 포함한 모든 implementation 경로가 `completion_blocking=0`인 finished 결과에 도달해야 허용됩니다.
 
 ## `cr_handoff_supersessions`
 

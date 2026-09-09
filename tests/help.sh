@@ -58,6 +58,7 @@ grep -- '--plan-token PLAN_TOKEN' "$TMP/migrate-command.txt" >/dev/null
 "$CLI" help cr supersede | grep -- '--by NEW_CR_ID' >/dev/null
 "$CLI" help cr supersede | grep -- '--by-source-ref SOURCE_REF' >/dev/null
 "$CLI" help cr supersede-handoff | grep -- '--replacement REPLACEMENT_JOB_ID' >/dev/null
+"$CLI" help cr link-handoff | grep -- '--reason REASON' >/dev/null
 if "$CLI" help unknown-command >/dev/null 2>&1; then
   echo "ERROR: help accepted an unknown command" >&2
   exit 1
