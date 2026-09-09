@@ -37,8 +37,13 @@ JOB_ID="$("$CLI" register \
   --objective "Implement the approved CR outside cr create-handoff." \
   --exit-criteria "Implementation and evidence are complete." | awk '{print $1}')"
 
-"$CLI" cr show "$CR_ID" \
-  | grep "source_ref_candidate_unlinked: $JOB_ID status=open" >/dev/null
+if "$CLI" cr show "$CR_ID" \
+  | grep "implementation_adoption_candidate: $JOB_ID" >/dev/null; then
+  echo "ERROR: unfinished handoff was shown as an adoption candidate" >&2
+  exit 1
+fi
+"$CLI" cr show "$CR_ID" --include-related-handoffs \
+  | grep "related_handoff_unlinked: $JOB_ID status=open" >/dev/null
 if "$CLI" cr link-handoff "$CR_ID" "$JOB_ID" \
   --role sm --reason "Premature adoption." >/dev/null 2>&1; then
   echo "ERROR: non-finished handoff was linked" >&2
@@ -49,13 +54,15 @@ fi
 "$CLI" finish "$JOB_ID" --role backend \
   --evidence "Implementation completed and verified." \
   --outcome pass --commit HEAD >/dev/null
+"$CLI" cr show "$CR_ID" \
+  | grep "implementation_adoption_candidate: $JOB_ID status=finished" >/dev/null
 
 if "$CLI" cr mark-implemented "$CR_ID" --role sm --evidence "Missing link." \
   >"$TMP/no-link.out" 2>&1; then
   echo "ERROR: CR without an implementation link was closed" >&2
   exit 1
 fi
-grep "exact source candidates: $JOB_ID:finished" "$TMP/no-link.out" >/dev/null
+grep "eligible adoption candidates: $JOB_ID:finished" "$TMP/no-link.out" >/dev/null
 grep "baton cr link-handoff $CR_ID" "$TMP/no-link.out" >/dev/null
 
 if "$CLI" cr link-handoff "$CR_ID" "$JOB_ID" \
@@ -69,7 +76,7 @@ fi
   | grep $'\tlinked\timplementation$' >/dev/null
 "$CLI" cr status "$CR_ID" \
   | grep "implementation_handoff: $JOB_ID status=finished outcome=pass blocking=0 commit_resolution=resolved" >/dev/null
-if "$CLI" cr status "$CR_ID" | grep "source_ref_candidate_unlinked: $JOB_ID" >/dev/null; then
+if "$CLI" cr status "$CR_ID" | grep "implementation_adoption_candidate: $JOB_ID" >/dev/null; then
   echo "ERROR: linked handoff remains an unlinked candidate" >&2
   exit 1
 fi
@@ -137,7 +144,8 @@ fi
 grep "commit evidence is unresolved" "$TMP/unresolved.out" >/dev/null
 "$CLI" handoff evidence-correct "$UNRESOLVED_JOB" \
   --role sm --commit HEAD --reason "Verified the implementation against local HEAD." >/dev/null
-"$CLI" cr show "$UNRESOLVED_CR" | grep "commit_resolution=resolved" >/dev/null
+"$CLI" cr show "$UNRESOLVED_CR" \
+  | grep "implementation_adoption_candidate: $UNRESOLVED_JOB.*commit_resolution=resolved" >/dev/null
 "$CLI" cr link-handoff "$UNRESOLVED_CR" "$UNRESOLVED_JOB" \
   --role sm --reason "Evidence verified and corrected." >/dev/null
 

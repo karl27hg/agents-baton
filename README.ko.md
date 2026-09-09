@@ -379,6 +379,8 @@ SQLite와 파일시스템은 하나의 transaction이 아니므로 비정상 종
 
 `submit`과 `resubmit`은 본문 hash를 기록하고 `approve`는 같은 본문인지 확인한 뒤 승인 hash를 고정합니다. 승인 후 본문이 바뀌면 implementation handoff 생성·claim·finish·최종 구현 완료 처리가 차단됩니다. 승인 후 요구 변경은 기존 본문을 고치지 않고 새 CR로 진행합니다.
 
+`cr status`, `cr show`와 managed frontmatter는 현재 심사 소유자인 `active_review_claimed_by`와 역사적 마지막 claimant인 `last_review_claimed_by`를 구분합니다. active 값은 CR이 `submitted`일 때만 표시됩니다. Frontmatter의 기존 `review_claimed_by` alias는 active 값을 따르고, SQLite 및 JSON의 같은 필드는 호환성을 위해 역사 값을 유지합니다. `cr list --claimed-by`는 현재 submitted review만 검색합니다.
+
 호환되지 않는 새 CR이 승인되면 `cr supersede OLD_CR --by NEW_CR --role sm --reason "..."`로 이전 승인을 대체합니다. planner/SM에게 직접 설계 권한이 있고 독립 심사가 필요하지 않다면 자기 심사용 CR을 만들지 않고 `--by-source-ref <불변-설계-참조>`를 사용합니다. 이전 CR은 `superseded` 상태와 승인 본문을 보존하고, 연결된 queued 구현 작업은 취소되며 active 구현 작업은 `cancel_requested`가 됩니다. 이미 finished인 결과는 보존하고 새 설계에 필요한 보강 handoff를 별도로 등록합니다. 단순 `cr cancel`도 연결된 미완료 구현 작업을 같은 규칙으로 정리합니다.
 
 같은 approved CR 안에서 취소된 구현 경로를 다른 implementation handoff로 대체했다면 `cr supersede-handoff CR-ID OLD --replacement NEW --role <reviewer> --reason <사유>`로 관계를 먼저 기록합니다. `mark-implemented`는 이 replacement chain이 finished이면서 non-blocking인 handoff에 도달해야만 취소된 old job을 완료된 것으로 인정합니다.
@@ -402,9 +404,13 @@ bin/baton cr link-handoff CR-YYYY-MM-DD-001 HO-YYYY-MM-DD-001 \
   --reason "이미 완료된 구현을 승인된 CR에 연결합니다."
 ```
 
-연결은 `cr.review`와 `cr.assign_implementation` 권한을 모두 가진 지정 reviewer만 수행할 수 있습니다. 대상은 승인 본문이 변하지 않은 approved CR, 정확히 `cr:<CR-ID>`인 `source_ref`, finished 상태, non-blocking 완료 결과, 검증 가능한 effective commit evidence를 모두 만족해야 합니다. `unresolved` 또는 `legacy_unchecked` 증거는 먼저 `handoff evidence-correct`로 검증해야 합니다. 같은 연결 재시도는 `already-linked`로 처리하고 다른 CR의 구현으로 재사용하지 않으며, migration이나 조회 명령이 자동으로 연결을 추론하지 않습니다. `cr status`와 `cr show`는 공식 연결과 아직 연결되지 않은 exact-source 후보를 구분해 표시합니다.
+연결은 `cr.review`와 `cr.assign_implementation` 권한을 모두 가진 지정 reviewer만 수행할 수 있습니다. 대상은 승인 본문이 변하지 않은 approved CR, 정확히 `cr:<CR-ID>`인 `source_ref`, finished 상태, non-blocking 완료 결과, 검증 가능한 effective commit evidence를 모두 만족해야 합니다. `unresolved` 또는 `legacy_unchecked` 증거는 먼저 `handoff evidence-correct`로 검증해야 합니다. 같은 연결 재시도는 `already-linked`로 처리하고 다른 CR의 구현으로 재사용하지 않으며, migration이나 조회 명령이 자동으로 연결을 추론하지 않습니다.
+
+기본 `cr status`와 `cr show`는 approved CR에 공식 implementation 연결이 없고 기계적 연결 조건을 통과한 경우에만 `implementation_adoption_candidate`를 표시합니다. 이는 구현 목적을 확정하는 증거가 아니라 reviewer가 내용을 확인해야 하는 힌트입니다. implementation이 연결됐거나 CR이 terminal이면 후보를 표시하지 않습니다. 모든 exact-source 미연결 기록을 감사하려면 `--include-related-handoffs`를 사용하며, 이 경우 validation/acceptance를 구현으로 오인하지 않도록 `related_handoff_unlinked`라는 중립 이름을 사용합니다.
 
 `cr mark-implemented`는 모든 구현 및 명시적 replacement chain이 finished이면서 `completion_blocking=0`일 때만 허용됩니다. blocking 완료 결과는 작업 자체가 끝났더라도 CR 종료를 막습니다. non-blocking인 non-pass 결과를 수용할지는 증거를 확인한 reviewer의 명시적 결정입니다.
+
+`baton status`와 `baton-report summary`의 기존 `outcome.blocking` 또는 `blocking`은 현재 blocker 수가 아니라 `completion_blocking=1`인 역사적 누적 총계입니다. RC7은 이를 `blocking_total`, `blocking_with_open_cr`, `blocking_with_implemented_cr`, `blocking_with_terminal_unimplemented_cr`, `blocking_without_cr`로 추가 분류합니다. rejected/cancelled/superseded CR은 해결로 추론하지 않고 terminal-unimplemented로 남깁니다. `handoff show`의 `blocking_context`와 `outcome_cr_status`로 개별 결과를 확인할 수 있습니다.
 
 ## Wait와 자원 사용
 

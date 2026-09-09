@@ -2726,7 +2726,14 @@ def next_cr_id(con: sqlite3.Connection) -> str:
     return f"{prefix}{current + 1:03d}"
 
 
+def active_review_claimant(row: sqlite3.Row) -> str:
+    if row["status"] != "submitted":
+        return ""
+    return str(row["review_claimed_by"] or "")
+
+
 def cr_frontmatter(row: sqlite3.Row) -> str:
+    last_review_claimant = str(row["review_claimed_by"] or "")
     values = {
         "cr_id": row["cr_id"],
         "title": row["title"],
@@ -2734,7 +2741,9 @@ def cr_frontmatter(row: sqlite3.Row) -> str:
         "author_role": row["author_role"],
         "reviewer_role": row["reviewer_role"],
         "reviewer_workstream": row["reviewer_workstream"] or "",
-        "review_claimed_by": row["review_claimed_by"] or "",
+        "active_review_claimed_by": active_review_claimant(row),
+        "last_review_claimed_by": last_review_claimant,
+        "review_claimed_by": active_review_claimant(row),
         "revision_count": str(row["revision_count"]),
         "active_revision_job_id": row["active_revision_job_id"] or "",
         "submitted_body_hash": row["submitted_body_hash"] or "",
@@ -4714,6 +4723,11 @@ def cr_handoff_inspection(
         """
         select h.job_id, h.status, h.completion_outcome,
                h.completion_blocking,
+               exists (
+                 select 1 from cr_handoffs other
+                 where other.job_id = h.job_id
+                   and other.kind = 'implementation'
+               ) as implementation_linked_elsewhere,
                coalesce(
                  (select ec.commit_resolution
                   from handoff_evidence_corrections ec
@@ -4734,8 +4748,30 @@ def cr_handoff_inspection(
     return linked, candidates
 
 
+def implementation_adoption_candidates(
+    cr_status: str,
+    linked: list[sqlite3.Row],
+    related: list[sqlite3.Row],
+) -> list[sqlite3.Row]:
+    if cr_status != "approved" or any(
+        item["kind"] == "implementation" for item in linked
+    ):
+        return []
+    return [
+        item
+        for item in related
+        if item["status"] == "finished"
+        and not item["completion_blocking"]
+        and item["commit_resolution"] not in {"legacy_unchecked", "unresolved"}
+        and not item["implementation_linked_elsewhere"]
+    ]
+
+
 def print_cr_handoff_inspection(
-    linked: list[sqlite3.Row], candidates: list[sqlite3.Row]
+    cr_status: str,
+    linked: list[sqlite3.Row],
+    related: list[sqlite3.Row],
+    include_related: bool,
 ) -> None:
     for item in linked:
         print(
@@ -4744,9 +4780,15 @@ def print_cr_handoff_inspection(
             f"blocking={item['completion_blocking']} "
             f"commit_resolution={item['commit_resolution']}"
         )
-    for item in candidates:
+    if include_related:
+        label = "related_handoff_unlinked"
+        output = related
+    else:
+        label = "implementation_adoption_candidate"
+        output = implementation_adoption_candidates(cr_status, linked, related)
+    for item in output:
         print(
-            f"source_ref_candidate_unlinked: {item['job_id']} status={item['status']} "
+            f"{label}: {item['job_id']} status={item['status']} "
             f"outcome={item['completion_outcome']} "
             f"blocking={item['completion_blocking']} "
             f"commit_resolution={item['commit_resolution']}"
@@ -5034,13 +5076,16 @@ def command_cr_mark_implemented(args: argparse.Namespace) -> int:
         require_cr_body_hash(con, row, "approved_body_hash", "approval")
         implementations, unresolved = unresolved_cr_implementation_handoffs(con, args.cr_id)
         if not implementations:
-            _, candidates = cr_handoff_inspection(con, args.cr_id)
+            linked, related = cr_handoff_inspection(con, args.cr_id)
+            candidates = implementation_adoption_candidates(
+                str(row["status"]), linked, related
+            )
             candidate_text = ", ".join(
                 f"{item['job_id']}:{item['status']}"
                 for item in candidates
             )
             hint = (
-                f"; exact source candidates: {candidate_text}; "
+                f"; eligible adoption candidates: {candidate_text}; "
                 f"run 'baton cr link-handoff {args.cr_id} <job-id> "
                 "--role <reviewer-role> --reason <reason>'"
                 if candidate_text
@@ -5078,6 +5123,7 @@ def command_cr_list(args: argparse.Namespace) -> int:
         conditions.append("reviewer_workstream = ?")
         params.append(normalize_workstream(args.reviewer_workstream))
     if args.claimed_by:
+        conditions.append("status = 'submitted'")
         if args.claimed_by == "unassigned":
             conditions.append("review_claimed_by is null")
         else:
@@ -5103,6 +5149,8 @@ def command_cr_list(args: argparse.Namespace) -> int:
             integrity, _ = cr_body_integrity(con, row)
             if args.body_integrity and integrity != args.body_integrity:
                 continue
+            last_review_claimant = str(row["review_claimed_by"] or "")
+            active_claimant = active_review_claimant(row)
             payload.append(
                 {
                     "cr_id": row["cr_id"],
@@ -5111,7 +5159,9 @@ def command_cr_list(args: argparse.Namespace) -> int:
                     "author_role": row["author_role"],
                     "reviewer_role": row["reviewer_role"],
                     "reviewer_workstream": row["reviewer_workstream"] or "",
-                    "review_claimed_by": row["review_claimed_by"] or "",
+                    "review_claimed_by": last_review_claimant,
+                    "active_review_claimed_by": active_claimant,
+                    "last_review_claimed_by": last_review_claimant,
                     "body_integrity": integrity,
                     "file_path": str(project_file_path(con, row["file_path"])),
                 }
@@ -5127,7 +5177,8 @@ def command_cr_list(args: argparse.Namespace) -> int:
     for item in payload:
         print(
             f"{item['cr_id']}\t{item['status']}\t{item['reviewer_role']}\t"
-            f"{item['reviewer_workstream']}\t{item['review_claimed_by'] or 'unassigned'}\t"
+            f"{item['reviewer_workstream']}\t"
+            f"{item['active_review_claimed_by'] or 'unassigned'}\t"
             f"{item['body_integrity']}\t{item['title']}"
         )
     return 0
@@ -5155,7 +5206,8 @@ def command_cr_status(args: argparse.Namespace) -> int:
     print(f"author_role: {row['author_role']}")
     print(f"reviewer_role: {row['reviewer_role']}")
     print(f"reviewer_workstream: {row['reviewer_workstream'] or ''}")
-    print(f"review_claimed_by: {row['review_claimed_by'] or ''}")
+    print(f"active_review_claimed_by: {active_review_claimant(row)}")
+    print(f"last_review_claimed_by: {row['review_claimed_by'] or ''}")
     print(f"revision_count: {row['revision_count']}")
     print(f"body_integrity: {integrity}")
     if expected_hash:
@@ -5172,7 +5224,9 @@ def command_cr_status(args: argparse.Namespace) -> int:
             f"{item['replacement_job_id']} role={item['actor_role']} "
             f"at={item['created_at']} reason={item['reason']}"
         )
-    print_cr_handoff_inspection(linked, candidates)
+    print_cr_handoff_inspection(
+        str(row["status"]), linked, candidates, args.include_related_handoffs
+    )
     return 0
 
 
@@ -5201,7 +5255,8 @@ def command_cr_show(args: argparse.Namespace) -> int:
     print(f"author_role: {row['author_role']}")
     print(f"reviewer_role: {row['reviewer_role']}")
     print(f"reviewer_workstream: {row['reviewer_workstream'] or ''}")
-    print(f"review_claimed_by: {row['review_claimed_by'] or ''}")
+    print(f"active_review_claimed_by: {active_review_claimant(row)}")
+    print(f"last_review_claimed_by: {row['review_claimed_by'] or ''}")
     if row["superseded_by_cr_id"]:
         print(f"superseded_by_cr_id: {row['superseded_by_cr_id']}")
     if row["superseded_by_ref"]:
@@ -5212,7 +5267,9 @@ def command_cr_show(args: argparse.Namespace) -> int:
             f"{item['replacement_job_id']} role={item['actor_role']} "
             f"at={item['created_at']} reason={item['reason']}"
         )
-    print_cr_handoff_inspection(linked, candidates)
+    print_cr_handoff_inspection(
+        str(row["status"]), linked, candidates, args.include_related_handoffs
+    )
     print(f"file_path: {path}")
     print(f"body_integrity: {integrity}")
     if expected_hash:
@@ -5526,6 +5583,57 @@ def handoff_evidence_corrections(
     ).fetchall()
 
 
+BLOCKING_CONTEXT_KEYS = (
+    "with_open_cr",
+    "with_implemented_cr",
+    "with_terminal_unimplemented_cr",
+    "without_cr",
+)
+
+
+def blocking_context_for_status(
+    completion_blocking: object,
+    outcome_cr_id: object,
+    outcome_cr_status: object,
+) -> str:
+    if not completion_blocking:
+        return "not_blocking"
+    if not outcome_cr_id or not outcome_cr_status:
+        return "no_outcome_cr"
+    if outcome_cr_status == "implemented":
+        return "implemented_cr"
+    if outcome_cr_status in {"draft", "submitted", "revision_requested", "approved"}:
+        return "open_cr"
+    return "terminal_unimplemented_cr"
+
+
+def blocking_outcome_context_counts(
+    con: sqlite3.Connection,
+) -> dict[str, int]:
+    counts = {"total": 0, **{key: 0 for key in BLOCKING_CONTEXT_KEYS}}
+    rows = con.execute(
+        """
+        select
+          case
+            when h.outcome_cr_id is null or cr.status is null then 'without_cr'
+            when cr.status = 'implemented' then 'with_implemented_cr'
+            when cr.status in ('draft', 'submitted', 'revision_requested', 'approved')
+              then 'with_open_cr'
+            else 'with_terminal_unimplemented_cr'
+          end as context,
+          count(*) as count
+        from handoff_jobs h
+        left join change_requests cr on cr.cr_id = h.outcome_cr_id
+        where h.status = 'finished' and h.completion_blocking = 1
+        group by context
+        """
+    ).fetchall()
+    for row in rows:
+        counts[str(row["context"])] = int(row["count"])
+        counts["total"] += int(row["count"])
+    return counts
+
+
 def command_status(args: argparse.Namespace) -> int:
     with connect(args.db) as con:
         init_schema(con)
@@ -5541,20 +5649,16 @@ def command_status(args: argparse.Namespace) -> int:
             order by completion_outcome
             """
         ).fetchall()
-        blocking_count = con.execute(
-            """
-            select count(*)
-            from handoff_jobs
-            where status = 'finished' and completion_blocking = 1
-            """
-        ).fetchone()[0]
+        blocking_counts = blocking_outcome_context_counts(con)
     counts = {status: 0 for status in sorted(STATUSES)}
     counts.update({row["status"]: row["count"] for row in rows})
     for status, count in counts.items():
         print(f"{status}: {count}")
     for row in outcome_rows:
         print(f"outcome.{row['outcome']}: {row['count']}")
-    print(f"outcome.blocking: {blocking_count}")
+    print(f"outcome.blocking: {blocking_counts['total']}")
+    for key in ("total", *BLOCKING_CONTEXT_KEYS):
+        print(f"outcome.blocking_{key}: {blocking_counts[key]}")
     return 0
 
 
@@ -5598,11 +5702,22 @@ def command_handoff_show(args: argparse.Namespace) -> int:
             {key: item[key] for key in item.keys()}
             for item in handoff_evidence_corrections(con, args.job_id)
         ]
+        outcome_cr_status = ""
+        if row["outcome_cr_id"]:
+            outcome_cr = con.execute(
+                "select status from change_requests where cr_id = ?",
+                (row["outcome_cr_id"],),
+            ).fetchone()
+            outcome_cr_status = str(outcome_cr["status"] if outcome_cr else "")
     payload = {key: row[key] for key in row.keys()}
     payload["depends_on"] = dependencies
     payload["depends_on_gates"] = gates
     payload["failure_reviews"] = failures
     payload["evidence_corrections"] = corrections
+    payload["outcome_cr_status"] = outcome_cr_status
+    payload["blocking_context"] = blocking_context_for_status(
+        row["completion_blocking"], row["outcome_cr_id"], outcome_cr_status
+    )
     if corrections:
         payload["effective_related_commit"] = corrections[-1]["corrected_commit"]
         payload["effective_commit_resolution"] = corrections[-1]["commit_resolution"]
@@ -5637,6 +5752,8 @@ def command_handoff_show(args: argparse.Namespace) -> int:
         "completion_outcome",
         "completion_blocking",
         "outcome_cr_id",
+        "outcome_cr_status",
+        "blocking_context",
         "evidence_corrections",
         "failure_reviews",
     )
@@ -7597,7 +7714,7 @@ def build_parser() -> argparse.ArgumentParser:
     cr_list.add_argument(
         "--claimed-by",
         default="",
-        help="concrete review claimant, or 'unassigned'",
+        help="active submitted-review claimant, or 'unassigned'",
     )
     cr_list.add_argument(
         "--body-integrity",
@@ -7738,10 +7855,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     cr_status = cr_sub.add_parser("status")
     cr_status.add_argument("cr_id")
+    cr_status.add_argument(
+        "--include-related-handoffs",
+        action="store_true",
+        help="show exact-source unlinked handoffs as neutral related records",
+    )
     cr_status.set_defaults(func=command_cr_status)
 
     cr_show = cr_sub.add_parser("show", help="show CR metadata and the shared Markdown body")
     cr_show.add_argument("cr_id", metavar="CR_ID")
+    cr_show.add_argument(
+        "--include-related-handoffs",
+        action="store_true",
+        help="show exact-source unlinked handoffs as neutral related records",
+    )
     cr_show.set_defaults(func=command_cr_show)
 
     cr_sync = cr_sub.add_parser("sync", help="reconcile managed Markdown frontmatter from SQLite state")

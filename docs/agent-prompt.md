@@ -277,7 +277,7 @@ baton --db <db> cr create-handoff <cr-id> \
   --exit-criteria "Completion criteria"
 ```
 
-Use `cr create-handoff` for normal assignment. If an exact `cr:<CR-ID>` general handoff already finished before it was officially linked, inspect it with `cr show` and `handoff show`. The assigned reviewer, holding both `cr.review` and `cr.assign_implementation`, may recover the relationship with `cr link-handoff <cr-id> <job-id> --role <role> --reason <reason>` only after confirming a non-blocking completion and effective commit evidence that is not `unresolved` or `legacy_unchecked`. Do not create a no-change synthetic handoff, infer a link from a similar title, or reuse one implementation for another CR.
+Use `cr create-handoff` for normal assignment. If an exact `cr:<CR-ID>` general handoff already finished before it was officially linked, inspect it with `cr show` and `handoff show`. The assigned reviewer, holding both `cr.review` and `cr.assign_implementation`, may recover the relationship with `cr link-handoff <cr-id> <job-id> --role <role> --reason <reason>` only after confirming a non-blocking completion and effective commit evidence that is not `unresolved` or `legacy_unchecked`. The default `implementation_adoption_candidate` is only a mechanically eligible hint shown for an approved CR without an official implementation; verify the handoff objective before linking. Use `--include-related-handoffs` for neutral audit output. Do not create a no-change synthetic handoff, infer a link from a similar title, or reuse one implementation for another CR.
 
 If one linked implementation was cancelled and replaced under the same approved CR, the reviewer records the relationship with `cr supersede-handoff <cr-id> <cancelled-job> --replacement <new-job> --role <role> --reason <reason>`. Mark the CR implemented only after the replacement chain reaches a finished, non-blocking handoff; never treat an unrelated cancellation or blocking completed result as complete.
 
@@ -301,6 +301,8 @@ baton --db <db> finish <job-id> --role <role> --evidence "Evidence summary" --co
 The supplied commit must resolve to a local commit and Baton stores its canonical full ID, even when optional workspace policy is `off`. Do not use `--allow-unresolved-commit` for a typo or missing local commit. Use it only for an intentional external or not-yet-fetched reference and always provide `--unresolved-reason`.
 
 For completed validation or analysis, choose `--outcome pass|fail|conditional|inconclusive`. Add `--blocking` only to a non-pass result that requires planner or reviewer action before success-dependent work, and use `--outcome-cr <cr-id>` when an existing CR records that decision. Lifecycle `failed` remains the state for work that did not meet its own exit criteria.
+
+Treat `outcome.blocking` and report `blocking` as cumulative audit totals, not active-blocker counts. Inspect `blocking_context` and `outcome_cr_status`; an implemented outcome CR is structurally complete, while rejected, cancelled, or superseded outcome CRs remain terminal-unimplemented and require human interpretation.
 
 Do not rewrite completion evidence. If the commit is wrong, the original claimant may append a correction while acting under the target role. Otherwise, ask `planning` or `sm`, which hold `handoff.evidence_correct` by default:
 

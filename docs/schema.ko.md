@@ -286,6 +286,8 @@ cancelled
 
 `finish`와 `completion_outcome`은 서로 다른 차원을 표현합니다. `finished`는 배정된 작업이 끝나 증거를 만들었다는 뜻이므로 완료된 검수는 `completion_outcome=fail`일 수 있습니다. handoff 자체가 exit criteria를 충족하지 못해 failure CR의 retry/cancel 판단이 필요하면 lifecycle `failed`를 사용합니다. `completion_blocking=1`은 `fail`, `conditional`, `inconclusive`에서만 허용됩니다.
 
+RC7은 `completion_blocking`을 불변으로 유지하고 현재 `outcome_cr_id` 관계에서 `open_cr`, `implemented_cr`, `terminal_unimplemented_cr`, `no_outcome_cr` context를 파생합니다. 기존 `outcome.blocking`과 report `blocking_outcomes`는 역사적 누적 총계로 유지됩니다. rejected/cancelled/superseded CR은 해결로 추론하지 않고 terminal-unimplemented로 분류합니다. Schema migration이나 backfill은 감사되지 않은 결정을 만들지 않습니다.
+
 명시적 완료 commit은 로컬 Git commit으로 해석되어 canonical ID로 저장됩니다. unresolved reference는 명시적인 override와 사유가 필요합니다. Schema v13은 과거 완료 행을 `completion_outcome=unspecified`로 보존하고, 기존 commit reference는 검증 여부를 추측하지 않고 `legacy_unchecked`로 표시합니다.
 
 최소 ready job 예:
@@ -679,11 +681,12 @@ cancelled
 - `submitted -> revision_requested`, `approved`, `rejected`는 reviewer role이 수행합니다.
 - Workstream으로 라우팅된 submitted review는 자격이 있는 구체 agent가 먼저 claim해야 하며, 해당 claimant만 심사 결정을 할 수 있습니다.
 - Resubmit과 reviewer 재지정은 이전 review claim을 해제합니다. `cr release-review`는 결정하지 않은 submitted review claim을 감사 사유와 함께 해제합니다.
+- CLI와 managed Markdown은 submitted CR의 현재 소유권만 `active_review_claimed_by`로 표시하고 역사적 attribution은 `last_review_claimed_by`로 보존합니다. Frontmatter의 기존 `review_claimed_by` alias는 active 값을 따르며, SQLite와 JSON에서는 호환용 역사 값으로 유지됩니다.
 - `revision_requested -> submitted`는 Markdown 본문 보강 후 author role이 수행합니다.
 - 승인은 현재 본문이 `submitted_body_hash`와 일치해야 하며 `approved_body_hash`를 기록합니다.
 - implementation handoff 생성, claim, finish와 최종 구현 완료 처리는 승인 본문 hash가 유지돼야 합니다.
 - hash 없이 migration된 과거 approved CR은 새 구현 전에 reviewer가 명시적으로 `cr seal`해야 합니다.
-- `approved -> implemented`는 연결된 implementation handoff가 최소 1개 있어야 합니다. 모든 implementation은 `finished`이거나, 명시적인 replacement chain이 finished implementation에 도달하는 `cancelled` 상태여야 합니다.
+- `approved -> implemented`는 연결된 implementation handoff가 최소 1개 있어야 합니다. 모든 implementation은 finished이면서 non-blocking이거나, 명시적인 replacement chain이 finished non-blocking implementation에 도달하는 `cancelled` 상태여야 합니다.
 - `approved -> superseded`는 `cr.admin`과 approved replacement CR 또는 `handoff.register` 권한을 가진 role의 불변 authoritative design reference가 필요합니다. 연결된 queued 구현 작업은 취소되고 active 작업은 `cancel_requested`가 되며 finished 작업은 보존됩니다.
 - `cancelled`는 `cr.admin` 권한을 가진 role이 수행하고 연결된 미완료 구현 작업을 같은 취소 규칙으로 정리하며 audit event를 남깁니다.
 - `reviewer_role`은 terminal review 전까지 `cr.admin` 권한을 가진 role이 재지정할 수 있습니다.
@@ -752,6 +755,8 @@ Primary key:
 ```
 
 `cr link-handoff`는 지정 reviewer의 `cr.review` 및 `cr.assign_implementation` 권한, 정확한 `cr:<CR-ID>` source reference, finished non-blocking 완료, 검증 가능한 effective commit evidence를 확인한 뒤에만 implementation 연결을 추가합니다. `implementation_handoff_linked` event를 기록하고 동일 연결은 idempotent하게 처리하며, 여러 CR에서 implementation을 재사용하는 것을 거부합니다. Schema migration은 이 관계를 추론하거나 자동 backfill하지 않습니다.
+
+기본 CR 조회는 CR이 approved이고 공식 implementation 연결이 없을 때만 기계적으로 유효한 `implementation_adoption_candidate`를 표시합니다. `--include-related-handoffs`는 후보 대신 중립적인 `related_handoff_unlinked` 기록을 표시합니다. Source reference만으로 implementation 목적을 확정하지 않습니다.
 
 `cr mark-implemented`는 감사된 replacement chain을 포함한 모든 implementation 경로가 `completion_blocking=0`인 finished 결과에 도달해야 허용됩니다.
 
