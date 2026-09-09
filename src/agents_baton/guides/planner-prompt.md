@@ -21,7 +21,7 @@ Examples use the pipx-installed `baton` command from `PATH`. From a Baton source
 - At a validation fan-in, register independent evidence-producing workstreams in parallel, then one final integration handoff that depends on every required result. The final merge, acceptance decision, and Gate release remain serialized.
 - Do not create duplicate handoffs for the same output. Use `baton handoff list` and `baton handoff show` to inspect existing status and payload before replacing or retrying work.
 - Do not use execution speed as evidence that jobs are independent.
-- A predecessor marked `finished` does not prove that its commit exists in a downstream worktree. Before releasing integration-dependent work, merge or cherry-pick the required commit into its base, or hold the work behind an integration Gate.
+- A predecessor marked `finished` does not prove that its commit exists in a downstream worktree or that its structured completion outcome passed. Handoff dependencies are after-completion edges. Before releasing success-dependent or integration-dependent work, inspect the outcome and effective commit, merge or cherry-pick the required commit into its base, and use an integration Gate for the acceptance decision.
 - When planning requires a later reconciliation step, register a planning-role handoff that depends on every required worker handoff. If the final predecessor set is not known yet, keep that follow-up behind a named Gate until the plan is complete.
 - A planning handoff belongs to the role queue, not to the agent instance that registered it. Write the objective, inputs, decisions, and exit criteria so another planning agent can safely continue it without hidden conversation context.
 - A planner or SM with direct design authority does not create and self-review a CR. Record the authoritative contract in the handoff or an immutable design reference, then register implementation work directly. Use a CR when another role proposes a change or independent/user review is required.
@@ -131,6 +131,16 @@ A failed handoff is not completed work. Its dependency descendants remain blocke
 - A standalone remediation handoff must cite the failed job in `--source-ref`; do not make it depend on that failed job. Use a scheduling dependency only when the remediation must wait for the original job to be retried and finished.
 - `retry` increments the original handoff attempt. If peer notification is enabled, record the corrected-baseline delivery against that new attempt.
 - Never use `promote-ready`, Gate release, or a replacement handoff to bypass a failed required dependency.
+
+## Completed Validation Outcomes
+
+A validation or analysis handoff may complete with `completion_outcome=fail|conditional|inconclusive` and `completion_blocking=1`. This differs from lifecycle `failed`: the assigned check completed, so ordinary handoff dependencies are satisfied.
+
+- Inspect blocking completed results with `handoff list --status finished --blocking yes`, `status`, or `baton-report summary`.
+- Put implementation that requires a passing result behind a named Gate. Release or cancel it only after reviewing `handoff show`, the effective commit evidence, and any `outcome_cr_id`.
+- Do not change the finished row to hide a verdict. Register remediation or a new validation handoff with an explicit source reference.
+- If commit evidence is wrong, append a reviewed correction with `handoff evidence-correct --reason ...`. `planning` and `sm` receive `handoff.evidence_correct` by default; the original claimant may also correct its own finished handoff under the target role.
+- Treat an unresolved or `legacy_unchecked` commit as evidence requiring independent verification before integration. The unresolved override is for deliberate external or not-yet-fetched references, not ordinary typos.
 
 ## Approved Design Changes
 

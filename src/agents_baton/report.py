@@ -192,6 +192,24 @@ def command_summary(args: argparse.Namespace) -> int:
         check_schema(con)
         summary = {
             "handoffs": count_by_status(con, "handoff_jobs"),
+            "completion_outcomes": [
+                row_dict(row)
+                for row in con.execute(
+                    """
+                    select completion_outcome as outcome, count(*) as count
+                    from handoff_jobs
+                    where status = 'finished'
+                    group by completion_outcome
+                    order by completion_outcome
+                    """
+                ).fetchall()
+            ],
+            "blocking_outcomes": con.execute(
+                """
+                select count(*) from handoff_jobs
+                where status = 'finished' and completion_blocking = 1
+                """
+            ).fetchone()[0],
             "change_requests": count_by_status(con, "change_requests"),
             "gates": count_by_status(con, "workflow_gates"),
             "failure_reviews": [
@@ -218,6 +236,11 @@ def command_summary(args: argparse.Namespace) -> int:
     print("Handoffs:")
     for row in summary["handoffs"]:
         print(f"{row['status']}: {row['count']}")
+    print("")
+    print("Completion Outcomes:")
+    for row in summary["completion_outcomes"]:
+        print(f"{row['outcome']}: {row['count']}")
+    print(f"blocking: {summary['blocking_outcomes']}")
     print("")
     print("Change Requests:")
     for row in summary["change_requests"]:

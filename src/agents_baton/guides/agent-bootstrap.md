@@ -45,6 +45,8 @@ The default database is `<project-root>/.baton/baton.sqlite3`, selected by the n
 baton project info
 ```
 
+Treat `last_migrated_with_baton_version` as diagnostic history, not compatibility authority. `cli_schema_compatible=true` means this CLI understands the database; `database_schema_current=true` and `workflow_commands_ready=true` are required for normal workflow commands. When `migration_required=true`, keep agents stopped and migrate first.
+
 For isolated Git worktrees, do not initialize each checkout. Set `BATON_DB` to the one
 branch-independent control database, set `BATON_WORKSPACE_ROOT` to the current checkout,
 and confirm that every project agent reports the same database path:
@@ -125,9 +127,9 @@ baton-report summary
 
 Normal workflow commands do not migrate schemas automatically. A `database migration required` error is an operator action: keep workers stopped, run `baton migrate`, verify with `baton migrate --check`, and then resume the intended scopes.
 
-### Schema v12 Upgrade Notice
+### Schema v13 Upgrade Notice
 
-Installing a shared pipx executable does not modify any project database. Baton `v0.6.0rc3` and later use schema v12. Each existing project owns its own database and must be migrated separately from that project's root. Projects already on schema v12 need only `baton migrate --check`.
+Installing a shared pipx executable does not modify any project database. Baton `v0.6.0rc5` uses schema v13. Each existing project owns its own database and must be migrated separately from that project's root. Projects already on schema v13 need only `baton migrate --check`.
 
 Before replacing the executable, run the read-only preflight with the currently compatible Baton. It returns exit `0` only when the project has a global maintenance stop and no active waiter, handoff, cancellation acknowledgement, or claimed CR review:
 
@@ -137,7 +139,7 @@ baton stop --all --reason "Baton upgrade"
 baton upgrade preflight
 ```
 
-Drain every listed object and repeat preflight until it reports `READY`. Only then replace the executable. For an existing schema v11 database, continue with:
+Drain every listed object and repeat preflight until it reports `READY`. Only then replace the executable. For an existing schema v12 database, continue with:
 
 ```bash
 baton migrate
@@ -145,9 +147,11 @@ baton migrate --check
 baton resume --all
 ```
 
-`baton migrate` writes a validated backup under `.baton/backups/` before applying schema v12 transactionally. Schema v12 preserves existing handoffs and notification records as attempt 1, adds retry-attempt-scoped notification deduplication, and adds audited replacement relationships for cancelled CR implementation handoffs. It does not infer replacement relationships from historical cancellations; a reviewer must record a valid replacement explicitly with `cr supersede-handoff` before such a CR can be marked implemented.
+`baton migrate` writes a validated backup under `.baton/backups/` before applying schema v13 transactionally. Schema v13 preserves existing handoffs and audit records, adds structured completion outcomes and append-only commit-evidence corrections, backfills historical outcomes as `unspecified`, and marks existing commit references `legacy_unchecked`. It does not claim that historical commit evidence was validated. Schema v12 retry attempts and cancelled implementation replacement relationships remain preserved.
 
-If the executable was replaced too early, the new Baton can still run `upgrade preflight` against a known older schema and print blocker IDs, but workflow transitions must be drained with the previous compatible Baton. Do not resume with an older Baton executable after schema v12 is applied. When multiple projects use the same pipx installation, repeat preflight and the project-local database migration for each project; there is no global database migration command.
+If the executable was replaced too early, the new Baton can still run `upgrade preflight` and `project info` against a known older schema and print compatibility and blocker details, but workflow transitions must be drained with the previous compatible Baton. Do not resume with an older Baton executable after schema v13 is applied. When multiple projects use the same pipx installation, repeat preflight and the project-local database migration for each project; there is no global database migration command.
+
+Schema v13 grants `handoff.evidence_correct` to `planning` and `sm`. This permission appends an audited correction to a finished job; it never rewrites the original completion evidence.
 
 Schema v7 introduces `failed` handoffs and `handoff.register`. Existing projects retain prior registration behavior because migration grants `handoff.register` to every active role already present. Review those grants after migration and use `role permission-remove <role> handoff.register` when registration should remain centralized in `sm` or `planning`.
 

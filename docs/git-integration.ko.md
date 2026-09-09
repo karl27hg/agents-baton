@@ -54,6 +54,10 @@ Register commit은 claim의 baseline입니다. Claim commit은 finish의 baselin
 
 `finished`는 agent가 handoff를 완료했다는 기록일 뿐입니다. `related_commit`이 후행 worktree에 merge 또는 cherry-pick됐음을 보장하지 않으므로, planner 또는 integrator가 통합을 확인한 뒤 통합 의존 작업을 release해야 합니다.
 
+명시적 완료 증거 검증은 workspace policy와 별개입니다. policy가 `off`여도 `finish --commit <ref>`와 `handoff evidence-correct --commit <ref>`는 `BATON_WORKSPACE_ROOT` 또는 현재 디렉터리에서 reference를 commit으로 해석하고 canonical full commit ID를 저장합니다. 없는 object나 commit으로 해석할 수 없는 object는 거부합니다. 외부 또는 아직 fetch하지 않은 reference를 의도적으로 기록하려면 `--allow-unresolved-commit`과 구체적인 `--unresolved-reason`을 함께 사용해야 하며, Baton은 unresolved 상태와 사유를 감사 기록으로 남깁니다.
+
+완료 증거는 append-only입니다. 잘못된 reference는 SQLite를 변경하지 말고 `handoff evidence-correct`로 정정합니다. 원 claimant는 target role로 자기 job을 정정할 수 있고 `planning`과 `sm`은 심사된 복구를 위한 `handoff.evidence_correct` 권한을 받습니다. `handoff show`는 원본, 유효 값, resolution 상태, 전체 정정 이력을 표시합니다.
+
 ## 사용법
 
 ```bash
@@ -70,7 +74,7 @@ Git 검사는 기본적으로 현재 디렉터리를 대상으로 합니다. con
 BATON_WORKSPACE_ROOT=/absolute/path/to/worktree baton workspace check
 ```
 
-Git 검사는 명시적인 workspace 검사와 세 handoff 상태 변경에서만 실행됩니다. `wait` 또는 `cr wait-review` polling loop에서는 실행하지 않습니다.
+Workspace policy 검사는 명시적인 workspace 검사와 handoff register, claim, finish, fail 전환에서만 실행됩니다. Commit 증거 해석은 호출자가 `finish` 또는 `handoff evidence-correct`에 commit을 명시했을 때만 실행됩니다. 두 검사 모두 `wait` 또는 `cr wait-review` polling loop에서는 실행하지 않습니다.
 
 `strict` 상태에서 의도적으로 branch를 이관해야 한다면 다음처럼 사유와 `workspace.override` 권한 role을 지정합니다.
 

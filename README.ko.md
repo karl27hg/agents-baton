@@ -198,6 +198,7 @@ bin/baton --db /tmp/baton.sqlite3 init
 8. [선택적 Git workspace 연동](docs/git-integration.ko.md) 또는 [영문 원본](docs/git-integration.md): `off`, `warn`, `strict`, checkout 및 override 정책
 9. [SQLite schema](docs/schema.md) 또는 [한국어 번역](docs/schema.ko.md): 테이블과 migration 명세
 10. [CHANGELOG.md](CHANGELOG.md): 버전별 변경 사항
+11. [Release process](docs/release-process.md): 배포 승인 전 구현·문서·가이드 정합성 점검
 
 `docs/agent-prompt.md`는 Codex role agent가 직접 따를 명령 규칙이므로 영문 원본을 agent 지시 사항에 연결하는 것을 권장합니다.
 
@@ -231,7 +232,7 @@ bin/baton role permission-add architecture cr.approve
 bin/baton role permission-add architecture handoff.register
 ```
 
-`sm`은 기본적으로 CR 권한, `handoff.cancel`, `handoff.register`, 긴급 `gate.manage`, `workspace.override` 권한을 갖습니다. 신규 프로젝트의 `planning`도 실패 handoff를 결정하는 데 필요한 등록·취소·CR 심사 권한을 받습니다. Schema v7로 올리는 기존 프로젝트는 이전 등록 동작을 깨지 않도록 기존 active role 모두에게 `handoff.register`를 승계하며, SM이 정책 검토 후 불필요한 권한을 철회할 수 있습니다. 사용자 수준 인증은 Baton의 범위가 아니므로 OS 계정, 저장소 권한 및 agent 운영 정책으로 별도 통제해야 합니다.
+`sm`은 기본적으로 CR 권한, `handoff.cancel`, `handoff.register`, `handoff.evidence_correct`, 긴급 `gate.manage`, `workspace.override` 권한을 갖습니다. 신규 프로젝트의 `planning`도 실패 handoff 또는 blocking 완료 결과를 결정하는 데 필요한 등록·취소·증거 정정·CR 심사 권한을 받습니다. Schema v7로 올리는 기존 프로젝트는 이전 등록 동작을 깨지 않도록 기존 active role 모두에게 `handoff.register`를 승계하며, SM이 정책 검토 후 불필요한 권한을 철회할 수 있습니다. 사용자 수준 인증은 Baton의 범위가 아니므로 OS 계정, 저장소 권한 및 agent 운영 정책으로 별도 통제해야 합니다.
 
 ## 기본 Handoff 흐름
 
@@ -257,8 +258,23 @@ bin/baton handoff show HO-YYYY-MM-DD-001
 bin/baton claim HO-YYYY-MM-DD-001 --role frontend
 bin/baton finish HO-YYYY-MM-DD-001 \
   --role frontend \
-  --evidence "Verification passed."
+  --evidence "Verification passed." \
+  --outcome pass \
+  --commit HEAD
 ```
+
+`finish`는 lifecycle 완료를 기록합니다. 완료된 검수나 분석 결과는 `--outcome pass|fail|conditional|inconclusive`로 구분하고, 성공을 전제로 한 후행 작업을 막아야 하는 non-pass 결과에는 `--blocking`을 사용합니다. 필요하면 `--outcome-cr CR-...`로 판단 CR을 연결합니다. 반면 handoff 자체가 exit criteria를 충족하지 못해 재시도 또는 취소 심사가 필요하면 `finish --outcome fail`이 아니라 `baton fail`을 사용합니다.
+
+명시한 `--commit`은 로컬 Git commit으로 해석되어 canonical full ID로 저장됩니다. 외부 또는 아직 fetch하지 않은 reference를 의도적으로 기록하려면 `--allow-unresolved-commit`과 `--unresolved-reason`을 함께 사용해야 합니다. 잘못 기록한 완료 commit은 원 행을 수정하지 말고 원 claimant 또는 `handoff.evidence_correct` 권한 role이 다음처럼 정정 이력을 추가합니다.
+
+```bash
+bin/baton handoff evidence-correct HO-YYYY-MM-DD-001 \
+  --role planning \
+  --commit <correct-commit> \
+  --reason "완료 보고의 commit reference를 정정합니다."
+```
+
+일반 dependency는 lifecycle의 `finished` 이후를 의미하며 검수 성공을 뜻하지는 않습니다. 따라서 `completion_outcome=fail`인 finished 작업도 일반 후행 작업을 열 수 있습니다. 성공 결과가 필수인 구현은 named Gate 뒤에 두고 planner 또는 reviewer가 결과를 확인한 뒤 Gate를 release 또는 cancel해야 합니다.
 
 Claim한 작업이 exit criteria를 충족할 수 없다면 `finish` 대신 실패를 보고합니다.
 
@@ -320,7 +336,7 @@ provider = "git"
 policy = "warn"
 ```
 
-설정이 없으면 `off`, Git provider만 설정하면 `warn`이 기본입니다. `strict`는 불일치한 register, claim, finish를 차단하며 `workspace.override` 권한을 가진 role의 사유 있는 override만 허용합니다. 단, 실패 보고는 차단하지 않고 warning event를 기록해 작업이 `in_progress`에 갇히지 않게 합니다.
+설정이 없으면 workspace policy는 `off`, Git provider만 설정하면 `warn`이 기본입니다. `strict`는 불일치한 register, claim, finish를 차단하며 `workspace.override` 권한을 가진 role의 사유 있는 override만 허용합니다. 단, 실패 보고는 차단하지 않고 warning event를 기록해 작업이 `in_progress`에 갇히지 않게 합니다. 명시적 완료 증거는 예외로, policy가 `off`여도 `finish --commit`과 `handoff evidence-correct --commit`은 선택한 로컬 workspace에서 reference를 검증합니다.
 
 ```bash
 bin/baton workspace check
@@ -466,9 +482,9 @@ bin/baton migrate
 bin/baton migrate --check
 ```
 
-Migration은 version이 지정되어 있고 transaction 단위로 실행되며 반복 실행할 수 있습니다. 기존 handoff, CR, event, control, role, permission 데이터는 보존되고 실패한 migration은 rollback됩니다. Schema v8은 CR hash 필드를 추가하지만 과거 승인 본문의 hash를 추측하지 않습니다. Schema v12는 기존 job과 notification을 attempt 1로 보존하고 retry 세대 및 명시적인 implementation 대체 관계를 추가합니다. DB보다 오래된 Baton binary는 더 새로운 schema를 수정할 수 없습니다.
+Migration은 version이 지정되어 있고 transaction 단위로 실행되며 반복 실행할 수 있습니다. 기존 handoff, CR, event, control, role, permission 데이터는 보존되고 실패한 migration은 rollback됩니다. Schema v8은 CR hash 필드를 추가하지만 과거 승인 본문의 hash를 추측하지 않습니다. Schema v12는 기존 job과 notification을 attempt 1로 보존하고 retry 세대 및 명시적인 implementation 대체 관계를 추가합니다. Schema v13은 완료 결과와 append-only 증거 정정을 추가하며 기존 완료 job은 `completion_outcome=unspecified`, 기존 commit은 `legacy_unchecked`로 보존합니다. DB보다 오래된 Baton binary는 더 새로운 schema를 수정할 수 없습니다.
 
-일반 workflow 명령은 pending migration을 자동 적용하지 않습니다. `baton migrate`가 변경 전에 검증된 backup을 만들며, migration이 필요한 DB에 일반 명령을 실행하면 명시적으로 실패합니다. Schema migration 5는 생성 및 최근 migration에 사용된 Baton 버전을 진단 정보로 기록하지만 호환성은 계속 `schema_migrations`로 판단합니다.
+일반 workflow 명령은 pending migration을 자동 적용하지 않습니다. `baton migrate`가 변경 전에 검증된 backup을 만들며, migration이 필요한 DB에 일반 명령을 실행하면 명시적으로 실패합니다. Schema migration 5는 생성 및 최근 migration에 사용된 Baton 버전을 진단 정보로 기록하지만 호환성은 계속 `schema_migrations`로 판단합니다. `project info`와 `upgrade preflight`의 `cli_schema_compatible`, `database_schema_current`, `migration_required`, `workflow_commands_ready`로 현재 실행 가능 여부를 판단합니다.
 
 ## 감사와 요약
 
@@ -482,12 +498,12 @@ bin/baton-report audit --role frontend
 bin/baton-report audit --format csv
 ```
 
-Summary에는 handoff, CR, Gate와 실패 심사 건수가 포함되며 아직 결정되지 않은 실패 심사는 `pending`으로 표시됩니다.
+Summary에는 handoff lifecycle, 구조화된 완료 결과, blocking 결과, CR, Gate와 실패 심사 건수가 포함되며 아직 결정되지 않은 실패 심사는 `pending`으로 표시됩니다.
 
 ## 제한 사항
 
 - Markdown handoff 파일 자체의 import/export는 제공하지 않습니다.
-- Handoff claim/finish/fail 권한은 대상 role 기준이고, register와 심사된 retry에는 `handoff.register`, 관리 취소에는 `handoff.cancel`이 필요합니다. 사용자 인증은 외부 정책에 맡깁니다.
+- Handoff claim/finish/fail 권한은 대상 role 기준이고, register와 심사된 retry에는 `handoff.register`, 관리 취소에는 `handoff.cancel`, 심사된 append-only commit 정정에는 `handoff.evidence_correct`가 필요합니다. 사용자 인증은 외부 정책에 맡깁니다.
 - CR 심사는 role 권한을 사용하지만 Baton만으로 실제 사용자를 인증하지 않습니다.
 - pipx 실행 파일은 OS 사용자 범위에서 공유되지만 DB와 stop/wait 상태는 Baton marker별로 분리됩니다. 여러 프로젝트가 같은 명시적 `--db`를 공유하도록 구성하면 ID, CR 경로, control까지 하나의 workflow로 합쳐지므로 피해야 합니다.
 - 같은 논리 프로젝트의 분리 Git worktree는 하나의 canonical 로컬 DB를 공유해야 합니다. Baton은 source branch의 commit을 자동 병합하거나 겹치는 파일 수정을 감지하지 않습니다.

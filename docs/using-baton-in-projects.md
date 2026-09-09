@@ -330,7 +330,9 @@ Use `tools/baton/bin/baton` for role handoff and CR workflow state.
 - Do not report ordinary wait timeouts or unchanged waiting state; report actual state transitions once.
 - Start a shift before long-running waits.
 - Finish already-claimed work even if the shift expires.
-- If claimed work cannot satisfy its exit criteria, use `fail` instead of `finish`; the linked failure CR keeps downstream work blocked until a reviewed retry finishes or the branch is cancelled.
+- If claimed work cannot satisfy its exit criteria, use lifecycle `fail`; the linked failure CR keeps downstream work blocked until a reviewed retry finishes or the branch is cancelled. A completed validation may instead use `finish --outcome fail|conditional|inconclusive --blocking`.
+- Treat handoff dependencies as after-completion edges. Put success-dependent implementation behind a Gate and inspect structured completion outcomes before releasing it.
+- Explicit `finish --commit` values must resolve locally unless an audited unresolved override is intentional. Correct wrong finished commit evidence with `handoff evidence-correct`, never by editing SQLite.
 - Do not create CRs with the same author and reviewer role.
 - Ask an SM/admin role to use `cr reassign-reviewer` or `cr cancel` for stuck legacy CRs.
 - Configure least privilege with `role permission-add` and `role permission-remove`; do not edit permission rows directly.
@@ -376,11 +378,11 @@ tools/baton/bin/baton wait --role frontend --timeout 900
 Do not use repeated next commands as a substitute for wait, and do not stop when next reports no ready job.
 Exit 2 means only that the bounded wait timed out: check the shift and run wait again silently while it remains active.
 Do not send periodic or duplicate waiting updates. Report once when work becomes ready, a claim or completion changes state, waiting stops or the shift expires, an error needs intervention, or the user asks for status.
-When work appears, re-check with next, claim it, complete only the claimed task, then finish it with concrete evidence.
+When work appears, re-check with next, claim it, complete only the claimed task, then finish it with concrete evidence and an explicit completion outcome.
 Before commit, integration, or finish, inspect the handoff again. If it is `cancel_requested`, pause and inspect `events`; resume only after an authorized `cancel-withdraw` restores `in_progress`, otherwise use `cancel-ack` with evidence once cancellation is confirmed instead of `finish` or `fail`.
-If the exit criteria cannot be met, report it with baton fail and the available evidence. Never use finish for unsuccessful work.
+If the exit criteria cannot be met, report it with baton fail and the available evidence. If an assigned validation completed and found a problem, finish it with a non-pass outcome and `--blocking` instead of treating the validation execution as failed.
 After finish or failure reporting, return to bounded wait while the shift remains active.
-Blocked handoffs are promoted automatically after their dependencies finish. A failed dependency remains blocked pending its failure CR decision; cancelled dependency branches will not become ready, while unrelated queue branches remain active.
+Blocked handoffs are promoted automatically after their dependencies finish. This is after-completion, not after-success; success-dependent work must also wait on a planner/reviewer Gate. A lifecycle-failed dependency remains blocked pending its failure CR decision; cancelled dependency branches will not become ready, while unrelated queue branches remain active.
 Do not edit Baton SQLite records directly.
 ```
 
@@ -409,6 +411,7 @@ On exit 2, check the shift and re-enter the wait silently while it remains activ
 Do not send a final response while the shift remains active merely because one action completed or the queue is empty; Baton cannot create a new Codex turn after this one ends.
 The watcher returns assigned CRs before handoffs. When a workstream-routed CR appears, claim it with `cr claim-review` before inspection, then approve, reject, request revision, or release the claim through Baton.
 If approved implementation should proceed, create implementation handoffs through Baton.
+Inspect `handoff list --status finished --blocking yes` and each result's `handoff show` before releasing success-dependent Gates. A finished non-pass validation satisfies ordinary dependency edges but does not authorize implementation.
 If your role has direct design authority, do not create and self-review a CR. Record the authoritative contract and register implementation handoffs directly unless independent or user review is required.
 When worker results require planning reconciliation, register a planning handoff depending on every required worker job, then return to watch. Make that handoff complete enough for another planning agent to claim.
 When peer notification is enabled, the planner may instead remain addressable without a waiter lease only if it owns no active Baton work, has an active registered Codex session, has an explicit planning return handoff, and every producer that can release it can notify that session. Re-read Baton when messaged. Keep `watch` for CR arrival, unassigned work, incomplete notification coverage, and failed or stale delivery.
@@ -552,6 +555,8 @@ tools/baton/bin/baton resume --all
 ```
 
 `migrate` applies pending migrations in one transaction, records them in `schema_migrations`, validates database and foreign-key integrity, and seeds newly introduced default roles or permissions. It does not rewrite existing handoff, CR, event, control, role, or permission content. Permissions removed with `role permission-remove` remain revoked across later migrations unless a migration explicitly introduces that same permission as a new default. Migration 7 is the deliberate exception for the newly explicit `handoff.register`: it grants the permission to existing active roles so an upgrade does not silently remove their former ability to register work. Review and revoke those compatibility grants after migration when the project requires centralized registration. Re-running `migrate` is safe.
+
+Schema v13 adds structured completion outcomes and append-only commit-evidence corrections. Existing finished jobs remain intact with `completion_outcome=unspecified`, and old commit references are marked `legacy_unchecked`. It grants the new `handoff.evidence_correct` permission to `planning` and `sm`. Use the compatibility booleans from `project info` or `upgrade preflight`; the last package version recorded in metadata is diagnostic and does not decide compatibility.
 
 If migration fails, Baton rolls back the transaction and leaves the previous database records in place. A Baton binary also refuses to open a database containing migration versions it does not recognize, which prevents an older checkout from modifying a newer database.
 

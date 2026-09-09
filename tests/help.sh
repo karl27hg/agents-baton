@@ -49,6 +49,10 @@ grep -- '--plan-token PLAN_TOKEN' "$TMP/migrate-command.txt" >/dev/null
 "$CLI" help wait | grep -- '--explain' >/dev/null
 "$CLI" help next | grep -- '--explain' >/dev/null
 "$CLI" help cr list | grep -- '--body-integrity' >/dev/null
+"$CLI" help finish | grep -- '--outcome' >/dev/null
+"$CLI" help finish | grep -- '--allow-unresolved-commit' >/dev/null
+"$CLI" help handoff list | grep -- '--blocking' >/dev/null
+"$CLI" help handoff evidence-correct | grep -- '--commit COMMIT' >/dev/null
 "$CLI" help cr show | grep 'CR_ID' >/dev/null
 "$CLI" help cr seal | grep -- '--evidence EVIDENCE' >/dev/null
 "$CLI" help cr supersede | grep -- '--by NEW_CR_ID' >/dev/null

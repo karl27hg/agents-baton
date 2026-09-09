@@ -82,7 +82,7 @@ bin/baton register \
   --exit-criteria "All required evidence is recorded."
 ```
 
-The job becomes `open` only after every handoff dependency is `finished` and every Gate dependency is `released`.
+The job becomes `open` only after every handoff dependency is `finished` and every Gate dependency is `released`. A handoff dependency is an after-completion edge: a finished validation with a non-pass `completion_outcome` satisfies it. Use the Gate as the after-success decision boundary and inspect blocking outcomes before release.
 
 A dependency on an already-released Gate does not block a newly registered job. A dependency on an already-cancelled Gate creates the job as `cancelled`.
 

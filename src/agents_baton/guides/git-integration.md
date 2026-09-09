@@ -58,6 +58,10 @@ The current integration guards handoff `register`, `claim`, `finish`, and `fail`
 
 `finished` records that an agent completed its handoff. It does not prove that `related_commit` was merged or cherry-picked into a downstream worktree. The planner or integrator must establish that source relationship before releasing integration-dependent work.
 
+Explicit completion evidence is validated independently of the workspace policy. `finish --commit <ref>` and `handoff evidence-correct --commit <ref>` resolve the reference as a commit in `BATON_WORKSPACE_ROOT` or the current directory, even when policy is `off`, and store the canonical full commit ID. Missing objects and objects that do not resolve to commits are rejected. A deliberately external or not-yet-fetched reference requires `--allow-unresolved-commit` plus a concrete `--unresolved-reason`; Baton records both the unresolved state and reason for audit.
+
+Completion evidence remains append-only. Correct a wrong reference with `handoff evidence-correct` rather than changing SQLite. The original claimant acting as the target role may correct its job; `planning` and `sm` receive `handoff.evidence_correct` for reviewed recovery. `handoff show` displays the original value, effective value, resolution state, and correction history.
+
 ## Inspect The Workspace
 
 Inspect the current project:
@@ -87,7 +91,7 @@ baton workspace events --job HO-YYYY-MM-DD-001
 baton-report audit --job HO-YYYY-MM-DD-001
 ```
 
-Workspace checks run only for explicit inspection and the three state-changing handoff commands. They do not run inside `wait` or `cr wait-review` polling loops.
+Workspace policy checks run only for explicit inspection and handoff register, claim, finish, and fail transitions. Commit-evidence resolution runs only when a caller explicitly supplies a commit to `finish` or `handoff evidence-correct`. Neither check runs inside `wait` or `cr wait-review` polling loops.
 
 ## Strict Override
 
