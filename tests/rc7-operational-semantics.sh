@@ -201,5 +201,5 @@ fi
 "$CLI" cr status "$ADOPTION_CR" --include-related-handoffs \
   | grep "related_handoff_unlinked: $RELATED_JOB" >/dev/null
 
-"$CLI" migrate --check | grep 'schema=13' >/dev/null
+"$CLI" migrate --check | grep 'schema=14' >/dev/null
 echo "OK RC7 operational semantics blocking=4 adoption=$ADOPTION_JOB related=$RELATED_JOB"

@@ -6,9 +6,9 @@ This checklist is mandatory before approving or publishing any Baton version.
 
 1. Freeze the intended code and schema scope. Do not include project-local `.baton/` data or feedback unless the release explicitly changes those files.
 2. Run focused tests for each changed behavior, then the complete test suite and isolated pipx lifecycle test.
-3. Compare the implementation and CLI help with `README.md`, `README.ko.md`, `CHANGELOG.md`, `docs/schema.md`, `docs/schema.ko.md`, and every affected operating guide.
+3. Compare the implementation and CLI help with `README.md`, `README.ko.md`, `CHANGELOG.md`, `docs/schema.md`, `docs/schema.ko.md`, `docs/upgrade-guide.md`, and every affected operating guide.
 4. Verify command names, options, defaults, exit behavior, lifecycle semantics, permissions, migration numbers, compatibility boundaries, and recovery instructions.
-5. Update the canonical guides and their packaged copies. `tests/guides.sh` must confirm that each `baton guide show` result is byte-for-byte identical to its source document.
+5. Update the current-release changes, migration actions, and `AGENTS.md` review requirements in `docs/upgrade-guide.md`, then update every canonical guide, the bundled changelog, and packaged copies. `tests/guides.sh` must confirm that each `baton guide show` result is byte-for-byte identical to its source document.
 6. Search for stale current-version and current-schema claims. Historical release notes may retain older values when they are clearly scoped to that release.
 7. Run `git diff --check`, syntax or compile checks, and the complete test suite again after documentation changes.
 8. Inspect the final diff and package version. Only then commit, open or update the pull request, merge, tag, push, and replace the local pipx installation when requested.

@@ -74,6 +74,8 @@ baton guide show bootstrap
 baton guide show worker
 baton guide show planner
 baton guide show git
+baton guide show upgrade
+baton guide show changelog
 ```
 
 `pipx` 명령이 없다면 Baton을 설치하기 전에 pipx를 먼저 설치합니다.
@@ -118,7 +120,7 @@ cd /path/to/project-b
 baton init
 ```
 
-두 프로젝트는 동일한 stateless 설치 실행파일을 사용하지만 각각 독립된 marker, DB, waiter, control 및 실행 프로세스를 사용합니다. pipx 패키지는 실행파일과 현재 버전에 맞는 agent guide를 함께 설치하지만 프로젝트의 `AGENTS.md`는 자동으로 변경하지 않습니다. `AGENTS.md`에서 `baton guide show bootstrap`, `baton guide show worker`, `baton guide show planner`를 역할에 맞게 읽도록 요구해야 합니다.
+두 프로젝트는 동일한 stateless 설치 실행파일을 사용하지만 각각 독립된 marker, DB, waiter, control 및 실행 프로세스를 사용합니다. pipx 패키지는 실행파일과 현재 버전에 맞는 agent guide를 함께 설치하지만 프로젝트의 `AGENTS.md`는 자동으로 변경하지 않습니다. `AGENTS.md`에서 `baton guide show bootstrap`, `baton guide show worker`, `baton guide show planner`를 역할에 맞게 읽도록 요구해야 합니다. 실행파일을 업데이트한 뒤에는 agent를 재개하기 전에 `baton guide show upgrade`로 현재 릴리스 조치와 `AGENTS.md` 점검 항목을 확인하고, 이전 버전을 건너뛴 경우 `baton guide show changelog`에서 그 사이 변경점도 확인합니다.
 
 기존에 `tools/baton` 아래에서 Baton을 사용한 프로젝트라면 기본 DB가 보이지 않는다는 이유로 새 DB를 초기화하지 않습니다. 먼저 쓰기 없이 자동 탐색과 migration 가능 여부를 검사합니다.
 
@@ -151,15 +153,18 @@ baton upgrade preflight
 pipx install --force "git+https://github.com/karl27hg/agents-baton.git@vNEW.VERSION"
 baton --version
 
+baton guide show upgrade
+baton guide show changelog
 baton migrate
 baton migrate --check
 baton project info
+# bundled upgrade guide와 프로젝트 AGENTS.md를 대조합니다.
 baton resume --all
 ```
 
 preflight가 출력한 ID를 모두 정리한 뒤 실행파일을 교체합니다. 새 실행파일을 먼저 설치한 경우에도 알려진 구버전 schema에 대해 preflight 진단은 가능하지만, 실제 finish/fail/review transition은 이전 호환 Baton으로 처리해야 합니다. 이전 Baton이 새 schema를 지원하지 않을 수 있으므로 schema migration 후 임의로 downgrade하지 않습니다. 설치 버전을 고정하려면 `pipx pin agents-baton`, 다시 업그레이드를 허용하려면 `pipx unpin agents-baton`을 사용합니다.
 
-정식 배포된 schema migration은 append-only로 유지하므로 오래 사용하지 않은 프로젝트도 다음 사용 시 여러 tag를 건너뛰어 최신 schema로 올릴 수 있습니다. 지원 범위는 정식 Baton schema와 인식 가능한 과거 unversioned DB이며 임의의 개발 snapshot, 수동 변경 schema 및 downgrade는 포함하지 않습니다.
+정식 배포된 schema migration은 append-only로 유지하므로 오래 사용하지 않은 프로젝트도 다음 사용 시 여러 tag를 건너뛰어 최신 schema로 올릴 수 있습니다. 지원 범위는 정식 Baton schema와 인식 가능한 과거 unversioned DB이며 임의의 개발 snapshot, 수동 변경 schema 및 downgrade는 포함하지 않습니다. Schema v14는 기존 알림 row를 보존하면서 handoff attempt 내부의 `delivery_attempt`, recovery 원본 알림 ID와 사유를 추가합니다.
 
 ```bash
 pipx uninstall agents-baton
@@ -189,16 +194,17 @@ bin/baton --db /tmp/baton.sqlite3 init
 영문 문서를 기준으로 다음 순서로 읽는 것을 권장합니다.
 
 1. [Agent bootstrap](docs/agent-bootstrap.md): 설치 명령, 프로젝트 확인, 기존 DB migration 안전 절차
-2. [README.md](README.md): 전체 기능, 기본값, 명령 및 운영 규칙
-3. [다른 프로젝트에서 사용하기](docs/using-baton-in-projects.md): 설치, 버전 고정, 프로젝트 설정
-4. [Named Gate 운영](docs/gates.md): Gate 소유권, 해제, 취소, 긴급 이관
-5. [Planner prompt](docs/planner-prompt.md): 병렬 작업의 독립성 판정과 의존성 등록 정책
-6. [Agent prompt](docs/agent-prompt.md): Baton worker agent에 추가할 영문 prompt
-7. [Agent 사용법](docs/agent-usage.md): role, CR, wait, shift 명령 예시
-8. [선택적 Git workspace 연동](docs/git-integration.ko.md) 또는 [영문 원본](docs/git-integration.md): `off`, `warn`, `strict`, checkout 및 override 정책
-9. [SQLite schema](docs/schema.md) 또는 [한국어 번역](docs/schema.ko.md): 테이블과 migration 명세
-10. [CHANGELOG.md](CHANGELOG.md): 버전별 변경 사항
-11. [Release process](docs/release-process.md): 배포 승인 전 구현·문서·가이드 정합성 점검
+2. [Upgrade guide](docs/upgrade-guide.md): 현재 릴리스 변경점, migration 및 `AGENTS.md` 재검토 항목
+3. [README.md](README.md): 전체 기능, 기본값, 명령 및 운영 규칙
+4. [다른 프로젝트에서 사용하기](docs/using-baton-in-projects.md): 설치, 버전 고정, 프로젝트 설정
+5. [Named Gate 운영](docs/gates.md): Gate 소유권, 해제, 취소, 긴급 이관
+6. [Planner prompt](docs/planner-prompt.md): 병렬 작업의 독립성 판정과 의존성 등록 정책
+7. [Agent prompt](docs/agent-prompt.md): Baton worker agent에 추가할 영문 prompt
+8. [Agent 사용법](docs/agent-usage.md): role, CR, wait, shift 명령 예시
+9. [선택적 Git workspace 연동](docs/git-integration.ko.md) 또는 [영문 원본](docs/git-integration.md): `off`, `warn`, `strict`, checkout 및 override 정책
+10. [SQLite schema](docs/schema.md) 또는 [한국어 번역](docs/schema.ko.md): 테이블과 migration 명세
+11. [CHANGELOG.md](CHANGELOG.md): 버전별 변경 사항
+12. [Release process](docs/release-process.md): 배포 승인 전 구현·문서·가이드 정합성 점검
 
 `docs/agent-prompt.md`는 Codex role agent가 직접 따를 명령 규칙이므로 영문 원본을 agent 지시 사항에 연결하는 것을 권장합니다.
 
@@ -305,7 +311,7 @@ bin/baton retry HO-YYYY-MM-DD-001 \
 
 Baton이 Codex 메시지를 직접 보내지는 않습니다. 기존 Codex task가 `agent session-set --role <role> --agent-id <profile> --host codex --thread-id <id> --model <model>`로 자신의 런타임 주소와 모델을 등록하면 해당 프로젝트가 알림 방식을 선택한 것으로 봅니다. 안정적인 profile이 claim identity이고 thread ID와 모델명은 로컬 진단·라우팅 메타데이터일 뿐 권한을 부여하지 않습니다.
 
-선행 작업을 `finish`한 agent는 `notify targets <finished-job> --role <role> --from-agent <profile>`로 모든 의존성과 Gate가 충족된 직접 후속 작업 및 현재 다른 active handoff를 소유하지 않은 peer task 후보를 확인합니다. 후보 하나에 handoff ID와 `handoff show`·`claim` 지시를 메시지로 보낸 뒤 실제 결과를 다음처럼 기록합니다.
+선행 작업을 `finish`한 agent는 `notify targets <finished-job> --role <role> --from-agent <profile>`로 모든 의존성과 Gate가 충족된 직접 후속 작업 및 현재 다른 active handoff를 소유하지 않은 peer task 후보를 확인합니다. 선행 scheduling edge가 없는 ready CR 구현 handoff 등은 가짜 dependency를 만들지 않고 `notify candidates <ready-handoff> --role <role> --from-agent <profile>`로 직접 후보를 확인합니다. 후보 하나에 handoff ID와 `handoff show`·`claim` 지시를 메시지로 보낸 뒤 실제 결과를 다음처럼 기록합니다.
 
 ```bash
 baton notify record HO-READY \
@@ -316,7 +322,7 @@ baton notify record HO-READY \
   --detail "Codex가 follow-up을 수락함"
 ```
 
-실패하면 `--status failed --detail <사유>`를 기록하고 다음 후보를 시도하거나 기존 `wait`/`watch`로 복구합니다. 호환성을 위해 DB에는 `sent`로 저장하지만 사람용 출력은 `host_accepted`로 표시하며, 이는 수신 task가 메시지를 읽거나 claim했다는 뜻이 아닙니다. `notify status HO-... --stale-after 15m`으로 미청구, stale, 수신자 claim, 다른 agent claim 상태를 진단할 수 있으며 자동 재전송은 하지 않습니다. 성공 알림은 handoff attempt마다 하나만 기록되어 반복 메시지를 막고, 심사된 retry는 새 attempt에서 한 번 더 알릴 수 있습니다. 메시지는 claim이 아니며 새 task나 subagent를 만들거나 Baton에 없는 작업을 지시해서는 안 됩니다.
+실패하면 `--status failed --detail <사유>`를 기록하고 다음 후보를 시도하거나 기존 `wait`/`watch`로 복구합니다. 성공 기록은 target role이 stop 또는 shift 밖이면 거부됩니다. 호환성을 위해 DB에는 `sent`로 저장하지만 사람용 출력은 `host_accepted`로 표시하며, 이는 수신 task가 메시지를 읽거나 claim했다는 뜻이 아닙니다. `notify status HO-... --stale-after 15m`은 기존 `notification_state`와 함께 사실 기반 context, 최신 delivery attempt, recovery 횟수를 표시합니다. 최신 성공 전달이 stale이고 작업이 open/unclaimed이며 같은 recipient session과 shift가 유효할 때만 같은 task에 recovery follow-up을 한 번 보내고 `notify retry ... --notification <id> --reason stale_unclaimed --status sent|failed`로 결과를 기록할 수 있습니다. 이 명령도 메시지를 직접 보내지 않으며 실패 recovery도 1회 한도를 소비합니다. 이후에는 반복 broadcast하지 않고 `wait`/`watch`로 복구합니다. 메시지는 claim이 아니며 새 task나 subagent를 만들거나 Baton에 없는 작업을 지시해서는 안 됩니다.
 
 메시지로 다시 깨울 수 있는 Codex planner는 active handoff와 claimed review가 없고, 모든 복귀 지점이 명시적 planning handoff이며, 각 producer가 active planner session에 알릴 수 있을 때 CLI waiter 없이 `addressable idle` 상태로 현재 turn을 끝낼 수 있습니다. 이는 Baton 상태가 아닙니다. CR 알림 경로가 없거나 미지정 planning 작업, stale endpoint, 전송 실패, 비 Codex host가 있으면 `watch`를 유지합니다.
 
@@ -501,7 +507,7 @@ bin/baton migrate
 bin/baton migrate --check
 ```
 
-Migration은 version이 지정되어 있고 transaction 단위로 실행되며 반복 실행할 수 있습니다. 기존 handoff, CR, event, control, role, permission 데이터는 보존되고 실패한 migration은 rollback됩니다. Schema v8은 CR hash 필드를 추가하지만 과거 승인 본문의 hash를 추측하지 않습니다. Schema v12는 기존 job과 notification을 attempt 1로 보존하고 retry 세대 및 명시적인 implementation 대체 관계를 추가합니다. Schema v13은 완료 결과와 append-only 증거 정정을 추가하며 기존 완료 job은 `completion_outcome=unspecified`, 기존 commit은 `legacy_unchecked`로 보존합니다. DB보다 오래된 Baton binary는 더 새로운 schema를 수정할 수 없습니다.
+Migration은 version이 지정되어 있고 transaction 단위로 실행되며 반복 실행할 수 있습니다. 기존 handoff, CR, event, control, role, permission 데이터는 보존되고 실패한 migration은 rollback됩니다. Schema v8은 CR hash 필드를 추가하지만 과거 승인 본문의 hash를 추측하지 않습니다. Schema v12는 기존 job과 notification을 attempt 1로 보존하고 retry 세대 및 명시적인 implementation 대체 관계를 추가합니다. Schema v13은 완료 결과와 append-only 증거 정정을 추가하며 기존 완료 job은 `completion_outcome=unspecified`, 기존 commit은 `legacy_unchecked`로 보존합니다. Schema v14는 기존 notification을 보존하고 delivery attempt 순서 및 명시적인 recovery 관계를 추가합니다. DB보다 오래된 Baton binary는 더 새로운 schema를 수정할 수 없습니다.
 
 일반 workflow 명령은 pending migration을 자동 적용하지 않습니다. `baton migrate`가 변경 전에 검증된 backup을 만들며, migration이 필요한 DB에 일반 명령을 실행하면 명시적으로 실패합니다. Schema migration 5는 생성 및 최근 migration에 사용된 Baton 버전을 진단 정보로 기록하지만 호환성은 계속 `schema_migrations`로 판단합니다. `project info`와 `upgrade preflight`의 `cli_schema_compatible`, `database_schema_current`, `migration_required`, `workflow_commands_ready`로 현재 실행 가능 여부를 판단합니다.
 

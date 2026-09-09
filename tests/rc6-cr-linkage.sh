@@ -158,5 +158,5 @@ fi
 grep "already linked as implementation to another CR: $UNRESOLVED_CR" \
   "$TMP/other-cr.out" >/dev/null
 
-"$CLI" migrate --check | grep 'schema=13' >/dev/null
+"$CLI" migrate --check | grep 'schema=14' >/dev/null
 echo "OK RC6 CR linkage cr=$CR_ID job=$JOB_ID blocking=$BLOCKING_JOB"

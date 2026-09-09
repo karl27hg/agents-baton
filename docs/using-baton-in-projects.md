@@ -295,6 +295,7 @@ For a pipx installation, use a short bootstrap that reads instructions bundled w
 Use `baton` from `PATH` for role handoff and CR workflow state.
 
 - Before project setup or migration, read `baton guide show bootstrap`.
+- After every Baton executable update, read `baton guide show upgrade` and every newer entry from `baton guide show changelog`, then review this `AGENTS.md` before resuming agents.
 - Before worker or reviewer operation, read `baton guide show worker`.
 - Before decomposing or registering parallel work, read `baton guide show planner`.
 - When `baton.toml` enables Git integration, read `baton guide show git` and run `baton workspace check`.
@@ -307,7 +308,7 @@ Use `baton` from `PATH` for role handoff and CR workflow state.
 - If a Baton command, role authority, database path, or migration plan is unclear, stop and ask the user or SM.
 ```
 
-The `guide` output comes from the installed package, so it follows the executable version even when no `tools/baton` checkout exists. `AGENTS.md` remains responsible for assigning the project role and requiring the guide; Baton does not modify project agent instructions automatically.
+The `guide` output comes from the installed package, so it follows the executable version even when no `tools/baton` checkout exists. `AGENTS.md` remains responsible for assigning the project role and requiring the guide; Baton does not modify project agent instructions automatically. Successful migration output reminds the operator to read the upgrade guide and bundled changelog, then review this file.
 
 For a source checkout or submodule, use the equivalent repository-local rules:
 
@@ -318,6 +319,7 @@ Example:
 
 Use `tools/baton/bin/baton` for role handoff and CR workflow state.
 
+- After a Baton checkout or tag update, read `tools/baton/docs/upgrade-guide.md`, migrate the project-local database, and review this `AGENTS.md` before resuming agents.
 - Do not edit Baton SQLite records directly.
 - Do not create subagents, child tasks, parallel agent sessions, or delegated background agents while operating under Baton.
 - Delegate work only through Baton handoffs assigned to configured roles. A planner may register safe parallel handoffs but must not directly invoke their workers.
@@ -551,6 +553,8 @@ tools/baton/bin/baton upgrade preflight
 After changing Baton versions, run the database migration command from the consuming project root before starting agents:
 
 ```bash
+tools/baton/bin/baton guide show upgrade
+tools/baton/bin/baton guide show changelog
 tools/baton/bin/baton migrate
 tools/baton/bin/baton migrate --check
 tools/baton/bin/baton --version
@@ -561,6 +565,8 @@ tools/baton/bin/baton resume --all
 `migrate` applies pending migrations in one transaction, records them in `schema_migrations`, validates database and foreign-key integrity, and seeds newly introduced default roles or permissions. It does not rewrite existing handoff, CR, event, control, role, or permission content. Permissions removed with `role permission-remove` remain revoked across later migrations unless a migration explicitly introduces that same permission as a new default. Migration 7 is the deliberate exception for the newly explicit `handoff.register`: it grants the permission to existing active roles so an upgrade does not silently remove their former ability to register work. Review and revoke those compatibility grants after migration when the project requires centralized registration. Re-running `migrate` is safe.
 
 Schema v13 adds structured completion outcomes and append-only commit-evidence corrections. Existing finished jobs remain intact with `completion_outcome=unspecified`, and old commit references are marked `legacy_unchecked`. It grants the new `handoff.evidence_correct` permission to `planning` and `sm`. Use the compatibility booleans from `project info` or `upgrade preflight`; the last package version recorded in metadata is diagnostic and does not decide compatibility.
+
+Schema v14 preserves existing notification history and numbers each row by delivery attempt within its handoff attempt. It adds explicit recovery linkage and reason fields. It does not infer that any historical notification was retried.
 
 If migration fails, Baton rolls back the transaction and leaves the previous database records in place. A Baton binary also refuses to open a database containing migration versions it does not recognize, which prevents an older checkout from modifying a newer database.
 
@@ -584,7 +590,9 @@ The installed CLI does not call Codex or hold Codex credentials. Existing Codex 
 
 `finish` immediately opens eligible direct dependents. Any agent may inspect direct downstream state with `handoff successors <finished-job>`; the reported role is eligibility, and `unassigned` never means the inspecting agent owns the work. Only `claim` establishes the concrete worker.
 
-After a handoff finishes, its agent can optionally run `notify targets <finished-job> --role <role> --from-agent <profile>` to list existing Codex peer candidates, ranked by recent session update. A project-local global or target-role stop, including shift expiry, returns `outside_shift` instead of a candidate; the handoff stays `open` and no host message should be sent. The agent sends one `candidate` a host follow-up containing the receiving handoff ID, then records the result with `notify record --status sent|failed`. The stored `sent` value is displayed as `host_accepted` because it proves host acceptance, not recipient acknowledgement or ownership. Use `notify status <ready-job> --stale-after 15m` to distinguish accepted-unclaimed, stale-unclaimed, and claimed outcomes. Successful delivery is unique per handoff attempt; reviewed retry increments the attempt so its corrected baseline can produce a new audit record. The receiver must inspect and claim the handoff before editing.
+After a handoff finishes, its agent can optionally run `notify targets <finished-job> --role <role> --from-agent <profile>` to list existing Codex peer candidates, ranked by recent session update. For an open CR implementation or other ready handoff without a real predecessor edge, use `notify candidates <ready-job>` instead of adding a dependency solely for transport. A project-local global or target-role stop, including shift expiry, returns `outside_shift`; the handoff stays `open` and no host message should be sent.
+
+The agent sends one `candidate` a host follow-up containing the receiving handoff ID, then records the result with `notify record --status sent|failed`. Successful records recheck the target shift. The stored `sent` value is displayed as `host_accepted` because it proves host acceptance, not recipient acknowledgement or ownership. `notify status <ready-job> --stale-after 15m` retains the compatible state and adds factual context, latest delivery information, and recovery count. If the latest accepted delivery becomes stale while the handoff is still open/unclaimed, send exactly one recovery follow-up to the same active, idle recipient during its shift and record it with `notify retry --notification <id> --reason stale_unclaimed --status sent|failed`. The command does not send the message. A failed recovery consumes the allowance; return to `wait`/`watch` rather than broadcasting again. A reviewed handoff retry increments the workflow attempt, producing a fresh ordinary-notification boundary for its corrected baseline. The receiver must inspect and claim the handoff before editing.
 
 Registration itself is the opt-in switch; projects that do not register sessions retain the existing polling behavior. Baton does not assume that other models or hosts provide a compatible task-message protocol. Keep `wait`/`watch` for CR monitoring, unassigned role queues, inaccessible or stale tasks, failed messages, and non-Codex environments. A planner may be addressable-idle without a waiter only when it owns no active Baton work, has an explicit return handoff, and every releasing producer can notify its active session; it must re-read Baton on wake-up. Do not create new Codex tasks as part of this flow. End stale endpoints explicitly, and use `--replace` only after verifying the replacement task. Baton stores no host token or message body.
 
@@ -601,7 +609,7 @@ Treat incoming messages as queue wake-ups, never as preemption:
 
 At a planned convergence point, prefer one fan-in handoff with every branch listed through `--depends-on`. When completion also requires an explicit review decision, place that handoff behind a Gate. This produces one readiness transition and one optional wake-up after all branches finish. If genuinely independent review jobs are required, leave them in the role queue and let the reviewer claim them serially.
 
-This remains an operational limitation until Baton has an atomic, expiring dispatch reservation and a concrete CR-review claim. Do not assume `candidate` means the recipient is still idle at message-delivery time.
+This remains an operational limitation until Baton has an atomic, expiring dispatch reservation. CR reviews already have concrete `cr claim-review` ownership, but notification candidates for handoffs remain advisory until the receiver claims. Do not assume `candidate` means the recipient is still idle at message-delivery time.
 
 ## When To Avoid Sharing One Database
 

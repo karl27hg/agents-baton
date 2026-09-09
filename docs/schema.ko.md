@@ -73,6 +73,7 @@
 11 workstream_routing
 12 retry_and_replacement_tracking
 13 completion_evidence
+14 notification_recovery
 ```
 
 `baton upgrade preflight`는 실행 파일 교체 전에 인식 가능한 구버전 schema도 검사할 수 있는 읽기 전용 운영 점검입니다. 명시적인 global stop을 요구하고 blocker object ID를 출력합니다. Migration 후에는 `baton migrate --check`로 DB가 현재 binary가 아는 최신 schema version인지 확인합니다.
@@ -610,9 +611,12 @@ Claim 동작:
 
 | 컬럼 | 타입 | 필수 | 용도 |
 | --- | --- | --- | --- |
-| `id` | `integer primary key autoincrement` | 예 | 전달 시도 순서입니다. |
+| `id` | `integer primary key autoincrement` | 예 | 전역 notification record ID입니다. |
 | `job_id` | `text` | 예 | message에 포함된 ready handoff입니다. |
 | `attempt` | `integer` | 예 | 이 전달 기록과 연결된 handoff 실행 세대입니다. |
+| `delivery_attempt` | `integer` | 예 | `(job_id, attempt)` 내부의 단조 증가 host 전달 순서입니다. |
+| `retry_of_notification_id` | `integer` | 아니오 | 제어된 recovery 전달이 참조하는 원본 host-accepted record입니다. |
+| `recovery_reason` | `text` | 아니오 | Recovery 전달의 필수 사유입니다. |
 | `sender_session_id` | `text` | 예 | 발신 runtime session입니다. |
 | `recipient_session_id` | `text` | 예 | 선택한 기존 peer runtime session입니다. |
 | `sender_agent_id` | `text` | 예 | stable sender profile snapshot입니다. |
@@ -626,7 +630,9 @@ Claim 동작:
 | `detail` | `text` | 아니오 | 결과 상세이며 CLI는 실패 시 필수로 요구합니다. |
 | `created_at` | `text` | 예 | 전달 시도 시각입니다. |
 
-partial unique index는 `(job_id, attempt)`마다 최대 하나의 `sent` row만 허용합니다. CLI text는 이 저장 값을 `host_accepted`로 표시하며 recipient acknowledgement를 뜻하지 않습니다. `notify status`는 별도의 권위 상태를 추가하지 않고 현재 handoff와 최근 전달 기록에서 accepted-unclaimed, stale-unclaimed, claimed 결과를 계산합니다. 실패 전달 기록은 fallback 진단을 위해 보존합니다. 심사된 retry는 handoff attempt를 증가시켜 과거 감사 row를 유지하면서 수정 baseline에 대한 새 성공 전달 1건을 허용합니다. 일반적으로 `finish`가 ready 직접 하위 작업을 승격하며, `notify targets`는 호환성 reconciliation을 위해 동일한 범위의 승격을 유지하고 선택적 workstream과 일치하며 현재 `in_progress` 또는 `cancel_requested` handoff나 claimed submitted CR review를 소유하지 않은 active Codex peer 후보를 반환합니다. 프로젝트 로컬 global 또는 대상 role stop이 적용되거나 shift가 만료된 경우에는 후보 없이 `outside_shift`를 반환하며 handoff는 `open`으로 유지됩니다. 이 명령은 message를 보내지 않으며 다른 model host가 호환되는 peer messaging을 제공한다고 가정하지 않습니다. `notify record`는 agent가 host messaging tool을 사용한 후 보고한 결과를 기록합니다. 어느 명령도 handoff를 claim하지 않습니다. 인증 token과 message 본문은 저장하지 않습니다.
+Schema v14는 `(job_id, attempt)`마다 일반 host-accepted row를 하나만 유지하고 `retry_of_notification_id`로 연결된 recovery row를 추가로 최대 하나 허용합니다. Host acceptance 이후에는 명시적 recovery 경로를 우회할 수 없도록 일반 row 추가를 거부합니다. 실패를 포함한 모든 기록된 host 시도에는 다음 `delivery_attempt`가 부여되며 migration은 결과를 바꾸지 않고 legacy row를 ID 순서로 번호화합니다. CLI text는 저장된 `sent`를 `host_accepted`로 표시하며 recipient acknowledgement를 뜻하지 않습니다. `notify status`는 호환되는 기존 state field를 유지하면서 별도의 권위 lifecycle 상태를 만들지 않고 사실 기반 no-record context, 최신 delivery 정보 및 recovery 횟수를 추가합니다.
+
+`notify targets`는 ready 직접 후속 작업을 처리하고 `notify candidates`는 선행 edge를 요구하거나 만들어내지 않고 이미 open인 handoff 하나를 처리합니다. 두 명령은 workstream, recipient capacity와 프로젝트 로컬 stop/shift control을 따릅니다. 성공 `notify record`도 이 control을 다시 확인합니다. `notify retry`는 최신 host-accepted record가 stale이고 handoff가 open/unclaimed이며 원 recipient session이 계속 active/eligible이고 target shift도 active일 때만 허용됩니다. 같은 recipient에 대한 recovery 결과를 한 번 기록하지만 host message를 직접 보내지는 않습니다. 실패 recovery도 recovery 한도를 소비하며 이후에는 영속 polling fallback을 사용합니다. 심사된 handoff `retry`는 계속 workflow attempt를 증가시키므로 수정 baseline에는 새로운 일반 알림 경계가 생깁니다. 어떤 notification 명령도 handoff를 claim하지 않습니다. 인증 token과 message 본문은 저장하지 않습니다.
 
 ## `change_requests`
 
@@ -797,7 +803,9 @@ idx_gate_events_gate on gate_events(gate_name)
 idx_agent_sessions_active_agent on agent_sessions(agent_id) where status = 'active'
 idx_agent_sessions_role_status on agent_sessions(role_id, status, updated_at)
 idx_handoff_notifications_job on handoff_notifications(job_id, id)
-idx_handoff_notifications_sent_attempt on handoff_notifications(job_id, attempt) where delivery_status = 'sent'
+idx_handoff_notifications_delivery_attempt on handoff_notifications(job_id, attempt, delivery_attempt)
+idx_handoff_notifications_initial_sent on handoff_notifications(job_id, attempt) where delivery_status = 'sent' and retry_of_notification_id is null
+idx_handoff_notifications_recovery on handoff_notifications(job_id, attempt) where retry_of_notification_id is not null
 idx_handoff_notifications_recipient on handoff_notifications(recipient_agent_id, created_at)
 idx_cr_status_reviewer on change_requests(status, reviewer_role)
 idx_cr_handoffs_cr on cr_handoffs(cr_id)
@@ -814,7 +822,7 @@ idx_cr_handoff_supersessions_replacement on cr_handoff_supersessions(cr_id, repl
 - `handoff_gate_dependencies`: job별 Gate 확인과 Gate별 dependent job 조회를 빠르게 처리합니다.
 - `gate_events.gate_name`: Gate 감사 이력 조회를 빠르게 처리합니다.
 - `agent_sessions`: profile별 active endpoint uniqueness와 role별 후보 조회를 처리합니다.
-- `handoff_notifications`: job/recipient별 감사 조회와 job attempt별 단일 성공 전달을 처리합니다.
+- `handoff_notifications`: job/recipient별 감사 조회, 순서가 있는 전달 시도, job attempt별 단일 초기 성공 전달과 최대 1회의 통제된 복구 전달을 처리합니다.
 - `cr.status, reviewer_role`: `cr wait-review` 조회를 빠르게 처리합니다.
 - `cr_handoffs.cr_id`: implementation 완료 검사를 빠르게 처리합니다.
 - `cr_handoff_supersessions`: CR 종료 시 replacement chain 검증을 빠르게 처리합니다.

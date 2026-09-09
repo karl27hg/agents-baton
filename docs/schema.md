@@ -73,6 +73,7 @@ Known migrations:
 11 workstream_routing
 12 retry_and_replacement_tracking
 13 completion_evidence
+14 notification_recovery
 ```
 
 `baton upgrade preflight` is a read-only operational check that can inspect a recognized older schema before the executable is replaced. It requires an explicit global stop and reports blocker object IDs. `baton migrate --check` then verifies that the database is at the latest known schema version after migration.
@@ -612,9 +613,12 @@ Columns:
 
 | Column | Type | Required | Purpose |
 | --- | --- | --- | --- |
-| `id` | `integer primary key autoincrement` | yes | Delivery-attempt sequence. |
+| `id` | `integer primary key autoincrement` | yes | Global notification record ID. |
 | `job_id` | `text` | yes | Ready receiving handoff named in the message. |
 | `attempt` | `integer` | yes | Handoff execution generation associated with this delivery record. |
+| `delivery_attempt` | `integer` | yes | Monotonic host-delivery sequence within `(job_id, attempt)`. |
+| `retry_of_notification_id` | `integer` | no | Original host-accepted record for one controlled recovery delivery. |
+| `recovery_reason` | `text` | no | Required reason for a recovery delivery. |
 | `sender_session_id` | `text` | yes | Sending runtime session. |
 | `recipient_session_id` | `text` | yes | Selected existing peer runtime session. |
 | `sender_agent_id` | `text` | yes | Stable sender profile snapshot. |
@@ -628,7 +632,9 @@ Columns:
 | `detail` | `text` | no | Result detail; required by CLI for failures. |
 | `created_at` | `text` | yes | Attempt time. |
 
-A partial unique index permits at most one `sent` row per `(job_id, attempt)`. CLI text presents that stored value as `host_accepted`; it is not recipient acknowledgement. `notify status` derives accepted-unclaimed, stale-unclaimed, and claimed outcomes from the current handoff and latest delivery record without adding a second authoritative state. Failed delivery records remain available for fallback diagnosis. A reviewed retry increments the handoff attempt, permitting one new successful delivery record for the corrected baseline while retaining earlier audit rows. `finish` normally promotes ready direct dependents; `notify targets` retains the same scoped promotion as a compatibility reconciliation path and returns active Codex peer candidates that match the optional workstream and do not currently own an `in_progress` or `cancel_requested` handoff or claimed submitted CR review. An applicable project-local global or target-role stop, including an expired shift, returns `outside_shift` without a candidate and leaves the handoff `open`. It does not send a message, and compatible peer messaging is not assumed for other model hosts. `notify record` records what the agent reports after using a host messaging tool. Neither operation claims the handoff. Authentication tokens and message bodies are not stored.
+Schema v14 retains one ordinary host-accepted row per `(job_id, attempt)` and permits at most one additional recovery row linked through `retry_of_notification_id`. After host acceptance, further ordinary rows are rejected so recovery cannot bypass the explicit path. Every recorded host attempt, including failures, receives the next `delivery_attempt`; migration numbers legacy rows in ID order without changing their result. CLI text presents stored `sent` as `host_accepted`, not recipient acknowledgement. `notify status` preserves its compatible state field and adds factual no-record context, latest delivery information, and recovery count without creating another authoritative lifecycle state.
+
+`notify targets` handles ready direct successors; `notify candidates` handles one already-open handoff without requiring or inventing a predecessor edge. Both honor workstream, recipient capacity, and applicable project-local stop/shift controls. A successful `notify record` rechecks those controls. `notify retry` requires the latest host-accepted record to be stale, the handoff to remain open and unclaimed, the original recipient session to remain active and eligible, and the target shift to remain active. It records one same-recipient recovery result but does not send the host message. A failed recovery consumes the recovery allowance and returns delivery to the persistent polling fallback. A reviewed handoff `retry` still increments the workflow attempt and creates a fresh ordinary-notification boundary for the corrected baseline. None of these notification operations claims the handoff. Authentication tokens and message bodies are not stored.
 
 ## `change_requests`
 
@@ -799,7 +805,9 @@ idx_gate_events_gate on gate_events(gate_name)
 idx_agent_sessions_active_agent on agent_sessions(agent_id) where status = 'active'
 idx_agent_sessions_role_status on agent_sessions(role_id, status, updated_at)
 idx_handoff_notifications_job on handoff_notifications(job_id, id)
-idx_handoff_notifications_sent_attempt on handoff_notifications(job_id, attempt) where delivery_status = 'sent'
+idx_handoff_notifications_delivery_attempt on handoff_notifications(job_id, attempt, delivery_attempt)
+idx_handoff_notifications_initial_sent on handoff_notifications(job_id, attempt) where delivery_status = 'sent' and retry_of_notification_id is null
+idx_handoff_notifications_recovery on handoff_notifications(job_id, attempt) where retry_of_notification_id is not null
 idx_handoff_notifications_recipient on handoff_notifications(recipient_agent_id, created_at)
 idx_cr_status_reviewer on change_requests(status, reviewer_role)
 idx_cr_handoffs_cr on cr_handoffs(cr_id)
@@ -816,7 +824,7 @@ Purpose:
 - `handoff_gate_dependencies`: Fast Gate checks by job and dependent-job lookup by Gate.
 - `gate_events.gate_name`: Fast Gate audit history lookup.
 - `agent_sessions`: Unique active profile endpoints and fast role candidate lookup.
-- `handoff_notifications`: Fast job/recipient audit lookup and one successful delivery per job attempt.
+- `handoff_notifications`: Fast job/recipient audit lookup, ordered delivery attempts, one accepted initial delivery, and at most one controlled recovery delivery per job attempt.
 - `cr.status, reviewer_role`: Fast `cr wait-review` lookup.
 - `cr_handoffs.cr_id`: Fast implementation completion checks.
 - `cr_handoff_supersessions`: Fast replacement-chain validation for CR closure.

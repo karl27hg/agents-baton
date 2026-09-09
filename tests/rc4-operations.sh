@@ -154,7 +154,8 @@ with cli.connect(str(path), create=True) as con:
 PY
 "$CLI" --db "$OLD_DB" upgrade preflight \
   | grep 'schema_version: 11' >/dev/null
-"$CLI" --db "$OLD_DB" migrate | grep 'schema=11->13' >/dev/null
-"$CLI" --db "$OLD_DB" migrate --check | grep 'schema=13' >/dev/null
+"$CLI" --db "$OLD_DB" migrate \
+  | grep 'schema=11->14 applied=12:retry_and_replacement_tracking,13:completion_evidence,14:notification_recovery' >/dev/null
+"$CLI" --db "$OLD_DB" migrate --check | grep 'schema=14' >/dev/null
 
 echo "OK RC4 operations routed=$ROUTED_JOB notification=$TARGET_JOB cr=$CR_ID db=$DB"
