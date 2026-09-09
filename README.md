@@ -701,6 +701,8 @@ bin/baton status
 bin/baton-report summary
 ```
 
+`outcome.blocking` is a compatibility total of every historical finished result recorded with `completion_blocking=1`; it is not the number of currently actionable blockers. RC7 also reports `blocking_total`, `blocking_with_open_cr`, `blocking_with_implemented_cr`, `blocking_with_terminal_unimplemented_cr`, and `blocking_without_cr`. A rejected, cancelled, or superseded outcome CR is deliberately classified as terminal-unimplemented rather than automatically resolved. `handoff show` reports the corresponding `blocking_context` and current `outcome_cr_status` without modifying the completed row.
+
 Completion evidence is append-only. If a finished job contains the wrong commit reference, the original claimant or a role with `handoff.evidence_correct` appends a correction instead of rewriting the original row:
 
 ```bash
@@ -844,6 +846,8 @@ bin/baton cr claim-review CR-YYYY-MM-DD-001 \
 
 Only the claimant may approve, reject, or request revision for a claimed review. Use `cr release-review --reason ...` to yield an undecided submitted review. Role-only CRs retain the earlier unclaimed review flow for compatibility.
 
+`cr status`, `cr show`, and managed CR frontmatter distinguish `active_review_claimed_by` from `last_review_claimed_by`. The active value is populated only while the CR remains `submitted`; the last value preserves historical attribution after a decision. The legacy frontmatter `review_claimed_by` alias mirrors the active value, while the SQLite and JSON field retains the historical value for compatibility. `cr list --claimed-by` filters active submitted reviews only.
+
 If the CR needs more work, request a revision. Baton creates a revision handoff for the CR author role, includes the review reason in its objective, and prevents another revision request until the CR is resubmitted. `--assign-back` may only name that author role; delegated resubmission is not supported.
 
 ```bash
@@ -930,7 +934,9 @@ bin/baton cr link-handoff CR-YYYY-MM-DD-001 HO-YYYY-MM-DD-001 \
   --reason "Adopt the already completed implementation."
 ```
 
-Adoption requires the assigned reviewer role to hold `cr.review` and `cr.assign_implementation`, plus an approved CR with an unchanged body, a finished handoff whose `source_ref` is exactly `cr:<CR-ID>`, a non-blocking completion, and effective commit evidence that is neither `unresolved` nor `legacy_unchecked`. Correct unverifiable historical evidence with `handoff evidence-correct` first. Baton rejects reuse as another CR's implementation, records `implementation_handoff_linked`, and treats an identical link retry as `already-linked`; it never infers or backfills these links automatically. `cr status` and `cr show` distinguish official links from unlinked exact-source candidates.
+Adoption requires the assigned reviewer role to hold `cr.review` and `cr.assign_implementation`, plus an approved CR with an unchanged body, a finished handoff whose `source_ref` is exactly `cr:<CR-ID>`, a non-blocking completion, and effective commit evidence that is neither `unresolved` nor `legacy_unchecked`. Correct unverifiable historical evidence with `handoff evidence-correct` first. Baton rejects reuse as another CR's implementation, records `implementation_handoff_linked`, and treats an identical link retry as `already-linked`; it never infers or backfills these links automatically.
+
+By default, `cr status` and `cr show` display `implementation_adoption_candidate` only when the CR is approved, has no official implementation link, and the related handoff passes the mechanical link checks. This is an inspection hint, not proof that the handoff's purpose was implementation. Once an implementation is linked or the CR becomes terminal, no actionable candidate is shown. Use `--include-related-handoffs` to audit all exact-source unlinked records under the neutral `related_handoff_unlinked` label; validation and acceptance handoffs are never automatically linked.
 
 Mark a CR implemented only after every implementation handoff is closure-ready. If an invalid implementation handoff was cancelled and replaced, first record the explicit audited relationship. Both jobs must already be linked to the same approved CR, the retired job must be `cancelled`, and the replacement must not be failed or cancelled:
 
@@ -1058,6 +1064,7 @@ tests/workstream-routing.sh
 tests/rc4-operations.sh
 tests/rc5-evidence-outcomes.sh
 tests/rc6-cr-linkage.sh
+tests/rc7-operational-semantics.sh
 tests/handoff-cancel.sh
 tests/handoff-dependencies.sh
 tests/handoff-failure.sh
@@ -1114,7 +1121,7 @@ bin/baton-report summary
 bin/baton-report summary --format json
 ```
 
-The summary includes handoff lifecycle, structured completion outcome, blocking outcome, CR, Gate, and failure-review counts. Unresolved failure reviews appear as `pending`.
+The summary includes handoff lifecycle, structured completion outcome, cumulative blocking outcome, CR, Gate, and failure-review counts. RC7 preserves `blocking` and JSON `blocking_outcomes` as compatibility totals and adds relationship-aware `blocking_contexts`; these contexts describe recorded CR relationships, not an inferred risk-acceptance decision. Unresolved failure reviews appear as `pending`.
 
 ## Wait
 

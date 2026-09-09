@@ -286,6 +286,8 @@ An authorized `cancel` operation immediately changes a selected `blocked`, `open
 
 `finish` and `completion_outcome` describe different dimensions. `finished` means the assigned work completed and produced evidence; a completed validation may legitimately record `completion_outcome=fail`. Use lifecycle `failed` when the handoff itself could not meet its exit criteria and requires the failure-CR retry/cancel decision. `completion_blocking=1` is allowed only for `fail`, `conditional`, or `inconclusive`.
 
+RC7 keeps `completion_blocking` immutable and derives `open_cr`, `implemented_cr`, `terminal_unimplemented_cr`, or `no_outcome_cr` from the current `outcome_cr_id` relationship. The legacy `outcome.blocking` and report `blocking_outcomes` values remain historical totals. A rejected, cancelled, or superseded CR is terminal-unimplemented, not an inferred resolution. No schema migration or backfill records a decision that was not explicitly audited.
+
 An explicit completion commit is resolved as a local Git commit and stored canonically. An audited unresolved reference requires an explicit override and reason. Schema v13 preserves existing completion rows as `completion_outcome=unspecified` and marks existing commit references `legacy_unchecked` rather than claiming they were validated.
 
 Minimal ready job example:
@@ -681,11 +683,12 @@ State rules:
 - `submitted -> revision_requested`, `approved`, or `rejected` is performed by the reviewer role.
 - A workstream-routed submitted review must be claimed by an eligible concrete agent before a decision. Only that claimant may decide it.
 - Resubmission and reviewer reassignment clear the previous review claim. `cr release-review` clears an undecided submitted claim with an audited reason.
+- CLI and managed Markdown project current ownership as `active_review_claimed_by` only for submitted CRs and preserve historical attribution as `last_review_claimed_by`. The legacy frontmatter `review_claimed_by` alias mirrors the active value; SQLite and JSON retain it as the compatibility historical value.
 - `revision_requested -> submitted` is performed by the author role after editing the Markdown body.
 - Approval requires the current body to match `submitted_body_hash` and records `approved_body_hash`.
 - Implementation handoff creation, claim, finish, and final implementation marking require the approved body hash to remain unchanged.
 - Existing approved CRs migrated without a hash require an explicit reviewer `cr seal` before new implementation work.
-- `approved -> implemented` requires at least one linked implementation handoff. Every linked implementation must be `finished` or be `cancelled` with an explicit replacement chain that reaches a finished implementation.
+- `approved -> implemented` requires at least one linked implementation handoff. Every linked implementation must be finished and non-blocking or be `cancelled` with an explicit replacement chain that reaches a finished, non-blocking implementation.
 - `approved -> superseded` requires `cr.admin` and either an approved replacement CR or an immutable authoritative design reference from a role with `handoff.register`. Linked queued implementation handoffs are cancelled, linked active handoffs receive `cancel_requested`, and finished handoffs are preserved.
 - `cancelled` is performed by a role with `cr.admin`, retires linked unfinished implementation work using the same cancellation rules, and records an audit event.
 - `reviewer_role` can be reassigned before terminal review by a role with `cr.admin`.
@@ -754,6 +757,8 @@ Primary key:
 ```
 
 `cr link-handoff` adds an implementation link only after the assigned reviewer passes both `cr.review` and `cr.assign_implementation` authorization and Baton validates an exact `cr:<CR-ID>` source reference, finished non-blocking completion, and verifiable effective commit evidence. It emits `implementation_handoff_linked`, is idempotent for an existing identical implementation link, and rejects implementation reuse across CRs. Schema migration never infers or backfills these relationships.
+
+Default CR inspection reports a mechanically eligible `implementation_adoption_candidate` only while the CR is approved and has no official implementation link. `--include-related-handoffs` replaces candidate output with neutral `related_handoff_unlinked` records for auditing. Source reference alone never establishes implementation purpose.
 
 `cr mark-implemented` requires each implementation path, including any audited replacement chain, to end in a finished result with `completion_blocking=0`.
 

@@ -11,7 +11,13 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from agents_baton.cli import MigrationError, check_schema, default_database_path
+from agents_baton.cli import (
+    BLOCKING_CONTEXT_KEYS,
+    MigrationError,
+    blocking_outcome_context_counts,
+    check_schema,
+    default_database_path,
+)
 
 
 def connect_readonly(db_path: str) -> sqlite3.Connection:
@@ -190,6 +196,7 @@ def count_by_status(con: sqlite3.Connection, table: str) -> list[dict[str, objec
 def command_summary(args: argparse.Namespace) -> int:
     with connect_readonly(args.db) as con:
         check_schema(con)
+        blocking_contexts = blocking_outcome_context_counts(con)
         summary = {
             "handoffs": count_by_status(con, "handoff_jobs"),
             "completion_outcomes": [
@@ -204,12 +211,8 @@ def command_summary(args: argparse.Namespace) -> int:
                     """
                 ).fetchall()
             ],
-            "blocking_outcomes": con.execute(
-                """
-                select count(*) from handoff_jobs
-                where status = 'finished' and completion_blocking = 1
-                """
-            ).fetchone()[0],
+            "blocking_outcomes": blocking_contexts["total"],
+            "blocking_contexts": blocking_contexts,
             "change_requests": count_by_status(con, "change_requests"),
             "gates": count_by_status(con, "workflow_gates"),
             "failure_reviews": [
@@ -241,6 +244,8 @@ def command_summary(args: argparse.Namespace) -> int:
     for row in summary["completion_outcomes"]:
         print(f"{row['outcome']}: {row['count']}")
     print(f"blocking: {summary['blocking_outcomes']}")
+    for key in ("total", *BLOCKING_CONTEXT_KEYS):
+        print(f"blocking_{key}: {summary['blocking_contexts'][key]}")
     print("")
     print("Change Requests:")
     for row in summary["change_requests"]:

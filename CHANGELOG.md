@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.6.0rc7
+
+- Added derived blocking-result contexts to `status`, `handoff show`, and `baton-report summary`, separating historical totals by open, implemented, terminal-unimplemented, and missing outcome-CR relationships without rewriting completion evidence.
+- Kept the RC6 `outcome.blocking` and report `blocking_outcomes` totals as compatibility aliases while making their cumulative audit meaning explicit.
+- Replaced broad exact-source CR candidates with mechanically eligible adoption candidates only for approved CRs without an official implementation link, and added opt-in neutral related-handoff inspection.
+- Split active and historical CR review claimant projections while preserving the legacy database field and JSON compatibility value.
+- Kept schema v13 unchanged; RC6 projects require only `baton migrate --check` and no data backfill.
+
 ## v0.6.0rc6
 
 - Added reviewer-authorized `cr link-handoff` recovery for adopting an existing finished handoff with an exact `cr:<CR-ID>` source reference, verified effective commit evidence, and a non-blocking completion result.

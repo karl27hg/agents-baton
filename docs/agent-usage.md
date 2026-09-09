@@ -133,6 +133,8 @@ One concrete agent identity may own one active handoff or claimed submitted CR r
 
 `finish` records lifecycle completion. A completed validation or analysis should also record `--outcome pass|fail|conditional|inconclusive`; add `--blocking` to a non-pass result that needs review before success-dependent work. `--outcome-cr` links an existing decision CR. Use lifecycle `fail` instead when the handoff itself could not meet its exit criteria.
 
+The compatibility `outcome.blocking` and report `blocking` values are cumulative audit totals. Use the open, implemented, terminal-unimplemented, and no-CR context counts plus `handoff show` fields `blocking_context` and `outcome_cr_status` to interpret current workflow context. Do not infer that rejected, cancelled, or superseded outcome CRs resolved or accepted the recorded risk.
+
 Handoff dependencies are after-completion edges, so a finished non-pass validation satisfies them. Put success-dependent work behind a named Gate and have the planner or reviewer inspect the outcome before releasing it.
 
 An explicit `--commit` must resolve to a local commit and is stored canonically. The audited unresolved override requires both `--allow-unresolved-commit` and `--unresolved-reason`. Correct a wrong finished reference with `handoff evidence-correct`; the original claimant or a role with `handoff.evidence_correct` appends the correction without rewriting history.
@@ -296,6 +298,8 @@ bin/baton --db /tmp/baton.sqlite3 cr claim-review CR-YYYY-MM-DD-001 \
 
 Only that claimant may approve, reject, or request revision. Use `cr release-review --reason ...` to yield an undecided submitted review before taking other Baton work.
 
+Read `active_review_claimed_by` as current ownership only while status is `submitted`. `last_review_claimed_by` remains historical after a decision. The legacy SQLite and JSON `review_claimed_by` value is retained for compatibility, and `cr list --claimed-by` searches active submitted claims only.
+
 Possible review actions:
 
 ```bash
@@ -372,7 +376,7 @@ bin/baton --db /tmp/baton.sqlite3 cr mark-implemented CR-YYYY-MM-DD-001 \
   --evidence "Implementation handoffs finished."
 ```
 
-`cr link-handoff` is a recovery command, not the normal assignment path. It requires the assigned reviewer to hold `cr.review` and `cr.assign_implementation`, plus an approved unchanged CR, an exact `cr:<CR-ID>` source reference, a finished non-blocking handoff, and effective commit evidence that is not `unresolved` or `legacy_unchecked`. It is audited, idempotent for the same link, rejects cross-CR implementation reuse, and performs no automatic backfill. `cr show` and `cr status` list exact-source unlinked candidates for inspection.
+`cr link-handoff` is a recovery command, not the normal assignment path. It requires the assigned reviewer to hold `cr.review` and `cr.assign_implementation`, plus an approved unchanged CR, an exact `cr:<CR-ID>` source reference, a finished non-blocking handoff, and effective commit evidence that is not `unresolved` or `legacy_unchecked`. It is audited, idempotent for the same link, rejects cross-CR implementation reuse, and performs no automatic backfill. `cr show` and `cr status` display a mechanically eligible adoption candidate only for an approved CR without an official implementation link. Use `--include-related-handoffs` to inspect all unlinked exact-source handoffs under a neutral label.
 
 Both replacement jobs must be implementation handoffs of the same approved CR. The old job must be `cancelled`. `cr mark-implemented` accepts its audited replacement chain only after that chain reaches a `finished`, non-blocking handoff; unrelated cancelled jobs and blocking completed results still block closure.
 
