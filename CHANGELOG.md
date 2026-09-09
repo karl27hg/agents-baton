@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## v0.6.0rc6
+
+- Added reviewer-authorized `cr link-handoff` recovery for adopting an existing finished handoff with an exact `cr:<CR-ID>` source reference, verified effective commit evidence, and a non-blocking completion result.
+- Added official CR link and unlinked exact-source candidate diagnostics to `cr status` and `cr show`, while keeping adoption explicit, audited, and idempotent instead of backfilling links automatically.
+- Prevented `cr mark-implemented` from accepting a linked implementation or replacement chain whose finished result is marked blocking.
+- Kept schema v13 unchanged; RC5 projects require a compatibility check but no schema migration for RC6.
+
 ## v0.6.0rc5
 
 - Added schema migration v13 with structured handoff completion outcomes, blocking-result flags, optional outcome CR links, and append-only completion-evidence corrections.

@@ -4671,6 +4671,187 @@ def command_cr_create_handoff(args: argparse.Namespace) -> int:
     return 0
 
 
+def effective_commit_resolution(con: sqlite3.Connection, job: sqlite3.Row) -> str:
+    correction = con.execute(
+        """
+        select commit_resolution
+        from handoff_evidence_corrections
+        where job_id = ?
+        order by id desc
+        limit 1
+        """,
+        (job["job_id"],),
+    ).fetchone()
+    return str(
+        correction["commit_resolution"]
+        if correction
+        else job["related_commit_resolution"]
+    )
+
+
+def cr_handoff_inspection(
+    con: sqlite3.Connection, cr_id: str
+) -> tuple[list[sqlite3.Row], list[sqlite3.Row]]:
+    linked = con.execute(
+        """
+        select ch.kind, h.job_id, h.status, h.completion_outcome,
+               h.completion_blocking,
+               coalesce(
+                 (select ec.commit_resolution
+                  from handoff_evidence_corrections ec
+                  where ec.job_id = h.job_id
+                  order by ec.id desc limit 1),
+                 h.related_commit_resolution
+               ) as commit_resolution
+        from cr_handoffs ch
+        join handoff_jobs h on h.job_id = ch.job_id
+        where ch.cr_id = ?
+        order by ch.kind, h.created_at, h.job_id
+        """,
+        (cr_id,),
+    ).fetchall()
+    candidates = con.execute(
+        """
+        select h.job_id, h.status, h.completion_outcome,
+               h.completion_blocking,
+               coalesce(
+                 (select ec.commit_resolution
+                  from handoff_evidence_corrections ec
+                  where ec.job_id = h.job_id
+                  order by ec.id desc limit 1),
+                 h.related_commit_resolution
+               ) as commit_resolution
+        from handoff_jobs h
+        where h.source_ref = ?
+          and not exists (
+            select 1 from cr_handoffs ch
+            where ch.cr_id = ? and ch.job_id = h.job_id
+          )
+        order by h.created_at, h.job_id
+        """,
+        (f"cr:{cr_id}", cr_id),
+    ).fetchall()
+    return linked, candidates
+
+
+def print_cr_handoff_inspection(
+    linked: list[sqlite3.Row], candidates: list[sqlite3.Row]
+) -> None:
+    for item in linked:
+        print(
+            f"{item['kind']}_handoff: {item['job_id']} status={item['status']} "
+            f"outcome={item['completion_outcome']} "
+            f"blocking={item['completion_blocking']} "
+            f"commit_resolution={item['commit_resolution']}"
+        )
+    for item in candidates:
+        print(
+            f"source_ref_candidate_unlinked: {item['job_id']} status={item['status']} "
+            f"outcome={item['completion_outcome']} "
+            f"blocking={item['completion_blocking']} "
+            f"commit_resolution={item['commit_resolution']}"
+        )
+
+
+def command_cr_link_handoff(args: argparse.Namespace) -> int:
+    reason = args.reason.strip()
+    if not reason:
+        raise SystemExit("ERROR: --reason cannot be blank")
+    with connect(args.db) as con:
+        init_schema(con)
+        begin_immediate(con)
+        cr, actor_role = assert_reviewer_action(
+            con,
+            args.cr_id,
+            args.role,
+            "cr.assign_implementation",
+        )
+        if cr["status"] != "approved":
+            raise SystemExit(
+                f"ERROR: CR must be approved: {args.cr_id} status={cr['status']}"
+            )
+        require_cr_body_hash(con, cr, "approved_body_hash", "approval")
+        job = con.execute(
+            "select * from handoff_jobs where job_id = ?",
+            (args.job_id,),
+        ).fetchone()
+        if not job:
+            raise SystemExit(f"ERROR: unknown job: {args.job_id}")
+        existing = con.execute(
+            "select kind from cr_handoffs where cr_id = ? and job_id = ?",
+            (args.cr_id, args.job_id),
+        ).fetchone()
+        if existing:
+            if existing["kind"] != "implementation":
+                raise SystemExit(
+                    f"ERROR: handoff is already linked to this CR as {existing['kind']}: "
+                    f"{args.job_id}"
+                )
+            con.rollback()
+            print(f"{args.cr_id}\t{args.job_id}\talready-linked\timplementation")
+            return 0
+        other_crs = [
+            row["cr_id"]
+            for row in con.execute(
+                """
+                select cr_id from cr_handoffs
+                where job_id = ? and cr_id != ? and kind = 'implementation'
+                order by cr_id
+                """,
+                (args.job_id, args.cr_id),
+            ).fetchall()
+        ]
+        if other_crs:
+            raise SystemExit(
+                f"ERROR: handoff is already linked as implementation to another CR: "
+                f"{', '.join(other_crs)}"
+            )
+        if job["status"] != "finished":
+            raise SystemExit(
+                f"ERROR: linked implementation handoff must be finished: "
+                f"{args.job_id} status={job['status']}"
+            )
+        expected_source = f"cr:{args.cr_id}"
+        if job["source_ref"] != expected_source:
+            raise SystemExit(
+                f"ERROR: handoff source_ref must be exactly {expected_source}: "
+                f"{args.job_id} source_ref={job['source_ref'] or ''}"
+            )
+        if job["completion_blocking"]:
+            raise SystemExit(
+                f"ERROR: blocking completion cannot be linked as accepted implementation: "
+                f"{args.job_id} outcome={job['completion_outcome']}"
+            )
+        resolution = effective_commit_resolution(con, job)
+        if resolution in {"legacy_unchecked", "unresolved"}:
+            raise SystemExit(
+                f"ERROR: implementation commit evidence is {resolution}: {args.job_id}; "
+                "verify it with 'baton handoff evidence-correct' before linking"
+            )
+        con.execute(
+            """
+            insert into cr_handoffs(cr_id, job_id, kind, created_at)
+            values (?, ?, 'implementation', ?)
+            """,
+            (args.cr_id, args.job_id, utc_now()),
+        )
+        cr_event(
+            con,
+            args.cr_id,
+            "implementation_handoff_linked",
+            actor_role=actor_role,
+            from_status="approved",
+            to_status="approved",
+            message=(
+                f"job={args.job_id} mode=existing_finished_handoff "
+                f"commit_resolution={resolution}; {reason}"
+            ),
+        )
+        con.commit()
+    print(f"{args.cr_id}\t{args.job_id}\tlinked\timplementation")
+    return 0
+
+
 def command_cr_supersede_handoff(args: argparse.Namespace) -> int:
     reason = args.reason.strip()
     if not reason:
@@ -4775,17 +4956,21 @@ def unresolved_cr_implementation_handoffs(
     con: sqlite3.Connection,
     cr_id: str,
 ) -> tuple[dict[str, str], list[tuple[str, str]]]:
-    statuses = {
-        row["job_id"]: row["status"]
+    implementation_rows = {
+        row["job_id"]: row
         for row in con.execute(
             """
-            select h.job_id, h.status
+            select h.job_id, h.status, h.completion_outcome, h.completion_blocking
             from cr_handoffs ch
             join handoff_jobs h on h.job_id = ch.job_id
             where ch.cr_id = ? and ch.kind = 'implementation'
             """,
             (cr_id,),
         ).fetchall()
+    }
+    statuses = {
+        job_id: str(row["status"])
+        for job_id, row in implementation_rows.items()
     }
     replacements = {
         row["retired_job_id"]: row["replacement_job_id"]
@@ -4804,9 +4989,10 @@ def unresolved_cr_implementation_handoffs(
         current = job_id
         while current not in visited:
             visited.add(current)
-            status = statuses.get(current)
+            row = implementation_rows.get(current)
+            status = str(row["status"]) if row else None
             if status == "finished":
-                return True
+                return not bool(row["completion_blocking"])
             if status != "cancelled":
                 return False
             current = replacements.get(current, "")
@@ -4815,7 +5001,15 @@ def unresolved_cr_implementation_handoffs(
         return False
 
     unresolved = [
-        (job_id, status)
+        (
+            job_id,
+            (
+                f"finished:blocking:{implementation_rows[job_id]['completion_outcome']}"
+                if status == "finished"
+                and implementation_rows[job_id]["completion_blocking"]
+                else status
+            ),
+        )
         for job_id, status in sorted(statuses.items())
         if not is_resolved(job_id)
     ]
@@ -4840,10 +5034,26 @@ def command_cr_mark_implemented(args: argparse.Namespace) -> int:
         require_cr_body_hash(con, row, "approved_body_hash", "approval")
         implementations, unresolved = unresolved_cr_implementation_handoffs(con, args.cr_id)
         if not implementations:
-            raise SystemExit(f"ERROR: CR has no implementation handoffs: {args.cr_id}")
+            _, candidates = cr_handoff_inspection(con, args.cr_id)
+            candidate_text = ", ".join(
+                f"{item['job_id']}:{item['status']}"
+                for item in candidates
+            )
+            hint = (
+                f"; exact source candidates: {candidate_text}; "
+                f"run 'baton cr link-handoff {args.cr_id} <job-id> "
+                "--role <reviewer-role> --reason <reason>'"
+                if candidate_text
+                else ""
+            )
+            raise SystemExit(
+                f"ERROR: CR has no implementation handoffs: {args.cr_id}{hint}"
+            )
         if unresolved:
             details = ", ".join(f"{job_id}:{status}" for job_id, status in unresolved)
-            raise SystemExit(f"ERROR: implementation handoffs are not finished: {details}")
+            raise SystemExit(
+                f"ERROR: implementation handoffs are not closure-ready: {details}"
+            )
         now = utc_now()
         con.execute(
             "update change_requests set status = 'implemented', implemented_at = ?, updated_at = ? where cr_id = ?",
@@ -4940,6 +5150,7 @@ def command_cr_status(args: argparse.Namespace) -> int:
             """,
             (args.cr_id,),
         ).fetchall()
+        linked, candidates = cr_handoff_inspection(con, args.cr_id)
     print(f"{row['cr_id']}\t{row['status']}\t{row['title']}\t{resolved_path}")
     print(f"author_role: {row['author_role']}")
     print(f"reviewer_role: {row['reviewer_role']}")
@@ -4961,6 +5172,7 @@ def command_cr_status(args: argparse.Namespace) -> int:
             f"{item['replacement_job_id']} role={item['actor_role']} "
             f"at={item['created_at']} reason={item['reason']}"
         )
+    print_cr_handoff_inspection(linked, candidates)
     return 0
 
 
@@ -4982,6 +5194,7 @@ def command_cr_show(args: argparse.Namespace) -> int:
             """,
             (args.cr_id,),
         ).fetchall()
+        linked, candidates = cr_handoff_inspection(con, args.cr_id)
     print(f"cr_id: {row['cr_id']}")
     print(f"status: {row['status']}")
     print(f"title: {row['title']}")
@@ -4999,6 +5212,7 @@ def command_cr_show(args: argparse.Namespace) -> int:
             f"{item['replacement_job_id']} role={item['actor_role']} "
             f"at={item['created_at']} reason={item['reason']}"
         )
+    print_cr_handoff_inspection(linked, candidates)
     print(f"file_path: {path}")
     print(f"body_integrity: {integrity}")
     if expected_hash:
@@ -7494,6 +7708,16 @@ def build_parser() -> argparse.ArgumentParser:
     cr_create_handoff.add_argument("--depends-on", action="append", default=[])
     cr_create_handoff.add_argument("--depends-on-gate", action="append", default=[])
     cr_create_handoff.set_defaults(func=command_cr_create_handoff)
+
+    cr_link_handoff = cr_sub.add_parser(
+        "link-handoff",
+        help="link an existing finished handoff as an approved CR implementation",
+    )
+    cr_link_handoff.add_argument("cr_id")
+    cr_link_handoff.add_argument("job_id")
+    cr_link_handoff.add_argument("--role", required=True)
+    cr_link_handoff.add_argument("--reason", required=True)
+    cr_link_handoff.set_defaults(func=command_cr_link_handoff)
 
     cr_supersede_handoff = cr_sub.add_parser(
         "supersede-handoff",

@@ -381,7 +381,7 @@ SQLite와 파일시스템은 하나의 transaction이 아니므로 비정상 종
 
 호환되지 않는 새 CR이 승인되면 `cr supersede OLD_CR --by NEW_CR --role sm --reason "..."`로 이전 승인을 대체합니다. planner/SM에게 직접 설계 권한이 있고 독립 심사가 필요하지 않다면 자기 심사용 CR을 만들지 않고 `--by-source-ref <불변-설계-참조>`를 사용합니다. 이전 CR은 `superseded` 상태와 승인 본문을 보존하고, 연결된 queued 구현 작업은 취소되며 active 구현 작업은 `cancel_requested`가 됩니다. 이미 finished인 결과는 보존하고 새 설계에 필요한 보강 handoff를 별도로 등록합니다. 단순 `cr cancel`도 연결된 미완료 구현 작업을 같은 규칙으로 정리합니다.
 
-같은 approved CR 안에서 취소된 구현 경로를 다른 implementation handoff로 대체했다면 `cr supersede-handoff CR-ID OLD --replacement NEW --role <reviewer> --reason <사유>`로 관계를 먼저 기록합니다. `mark-implemented`는 이 replacement chain이 finished handoff에 도달해야만 취소된 old job을 완료된 것으로 인정합니다.
+같은 approved CR 안에서 취소된 구현 경로를 다른 implementation handoff로 대체했다면 `cr supersede-handoff CR-ID OLD --replacement NEW --role <reviewer> --reason <사유>`로 관계를 먼저 기록합니다. `mark-implemented`는 이 replacement chain이 finished이면서 non-blocking인 handoff에 도달해야만 취소된 old job을 완료된 것으로 인정합니다.
 
 Schema migration 후 과거 approved CR이 `legacy-unsealed`로 표시되면 지정 reviewer가 본문을 확인하고 새 구현 전에 명시적으로 봉인합니다.
 
@@ -392,6 +392,19 @@ bin/baton cr seal CR-YYYY-MM-DD-001 \
 ```
 
 승인과 구현 handoff 생성은 별도 결정입니다. 자세한 명령과 심사 권한은 [영문 README의 Change Request Flow](README.md#change-request-flow)를 따릅니다.
+
+정상 경로에서는 reviewer가 `cr create-handoff`로 구현 작업을 생성합니다. 일반 `register`로 이미 완료된 구현이 있다면 합성 작업을 새로 만들지 말고, 지정 reviewer가 다음과 같이 명시적으로 연결합니다.
+
+```bash
+bin/baton cr show CR-YYYY-MM-DD-001
+bin/baton cr link-handoff CR-YYYY-MM-DD-001 HO-YYYY-MM-DD-001 \
+  --role sm \
+  --reason "이미 완료된 구현을 승인된 CR에 연결합니다."
+```
+
+연결은 `cr.review`와 `cr.assign_implementation` 권한을 모두 가진 지정 reviewer만 수행할 수 있습니다. 대상은 승인 본문이 변하지 않은 approved CR, 정확히 `cr:<CR-ID>`인 `source_ref`, finished 상태, non-blocking 완료 결과, 검증 가능한 effective commit evidence를 모두 만족해야 합니다. `unresolved` 또는 `legacy_unchecked` 증거는 먼저 `handoff evidence-correct`로 검증해야 합니다. 같은 연결 재시도는 `already-linked`로 처리하고 다른 CR의 구현으로 재사용하지 않으며, migration이나 조회 명령이 자동으로 연결을 추론하지 않습니다. `cr status`와 `cr show`는 공식 연결과 아직 연결되지 않은 exact-source 후보를 구분해 표시합니다.
+
+`cr mark-implemented`는 모든 구현 및 명시적 replacement chain이 finished이면서 `completion_blocking=0`일 때만 허용됩니다. blocking 완료 결과는 작업 자체가 끝났더라도 CR 종료를 막습니다. non-blocking인 non-pass 결과를 수용할지는 증거를 확인한 reviewer의 명시적 결정입니다.
 
 ## Wait와 자원 사용
 
