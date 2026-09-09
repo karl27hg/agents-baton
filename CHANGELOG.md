@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.6.0rc5
+
+- Added schema migration v13 with structured handoff completion outcomes, blocking-result flags, optional outcome CR links, and append-only completion-evidence corrections.
+- Validated explicit completion commit references as local Git commits, stored canonical commit IDs, rejected missing or non-commit objects by default, and added an audited unresolved-reference override.
+- Added completion outcome filters and status/report summaries without changing the existing lifecycle states or after-completion dependency behavior.
+- Added explicit project schema compatibility and workflow-readiness fields to `project info` and `upgrade preflight`, including read-only diagnosis of recognized older schemas.
+- Added a mandatory pre-release documentation and guide alignment gate.
+
 ## v0.6.0rc4
 
 - Added read-only `upgrade preflight` checks that work against known older schemas and report maintenance-stop, waiter, active handoff, and claimed CR-review blockers by ID before executable replacement.

@@ -71,7 +71,7 @@ Baton records and authorizes workflow operations, but cannot disable tools suppl
 - `next` is a one-time non-blocking inspection command. It is not a substitute for `wait`.
 - Use `next --explain` only when identity, active-session role, workstream, or current ownership may be hiding an otherwise ready job. An active-session role mismatch is advisory because explicitly authorized multi-role operation remains possible.
 - If `next` reports no ready job, enter `wait` instead of ending the agent task.
-- A blocked handoff remains inside Baton until its job dependencies finish and named Gates are released; `wait` will detect its promotion to `open`.
+- A blocked handoff remains inside Baton until its job dependencies finish and named Gates are released; `wait` will detect its promotion to `open`. A job dependency is after-completion, not after-success. Success-dependent work must also use a Gate controlled by the planner or reviewer.
 - Do not send periodic waiting updates while `baton wait` is running.
 - Treat an ordinary timeout as an internal loop boundary, not as user-visible progress.
 - After exit `2`, check the shift and re-enter the bounded wait without sending a status message while the shift remains active.
@@ -222,7 +222,7 @@ If claim fails, do not work on the job. Re-check with `next`, then return to bou
 - Work only on the claimed handoff.
 - Do not claim work for another role unless the user explicitly authorizes it.
 - Do not treat stop/resume as job cancellation.
-- If claimed work cannot meet its exit criteria, use `baton fail` with a concrete reason and available evidence. Never use `finish` to report an unsuccessful result.
+- If claimed work cannot meet its exit criteria, use `baton fail` with a concrete reason and available evidence. Use `finish --outcome fail|conditional|inconclusive` only when the assigned validation or analysis itself completed and produced that result.
 - `fail` submits a linked CR and keeps downstream handoffs blocked. After reporting it, return to the normal wait loop; do not retry, cancel, or bypass the failed dependency without the failure CR decision.
 - Before committing, integrating, or reporting completion, inspect the claimed handoff again. If its status is `cancel_requested`, pause work and inspect `events` for the request reason. Do not use `finish` or `fail` while cancellation is requested.
 - If an authorized planner/SM withdraws the request after review, resume only after `handoff show` reports `in_progress`; the original claim remains valid, so do not claim again. Otherwise, once cancellation is confirmed, run `cancel-ack` with evidence describing retained changes and whether anything was committed.
@@ -284,13 +284,29 @@ If one linked implementation was cancelled and replaced under the same approved 
 Finish only after completing the task and collecting concrete evidence:
 
 ```bash
-baton --db <db> finish <job-id> --role <role> --evidence "Evidence summary"
+baton --db <db> finish <job-id> \
+  --role <role> \
+  --evidence "Evidence summary" \
+  --outcome pass
 ```
 
 If a commit exists for the handoff output, include it:
 
 ```bash
 baton --db <db> finish <job-id> --role <role> --evidence "Evidence summary" --commit <commit-sha>
+```
+
+The supplied commit must resolve to a local commit and Baton stores its canonical full ID, even when optional workspace policy is `off`. Do not use `--allow-unresolved-commit` for a typo or missing local commit. Use it only for an intentional external or not-yet-fetched reference and always provide `--unresolved-reason`.
+
+For completed validation or analysis, choose `--outcome pass|fail|conditional|inconclusive`. Add `--blocking` only to a non-pass result that requires planner or reviewer action before success-dependent work, and use `--outcome-cr <cr-id>` when an existing CR records that decision. Lifecycle `failed` remains the state for work that did not meet its own exit criteria.
+
+Do not rewrite completion evidence. If the commit is wrong, the original claimant may append a correction while acting under the target role. Otherwise, ask `planning` or `sm`, which hold `handoff.evidence_correct` by default:
+
+```bash
+baton handoff evidence-correct <job-id> \
+  --role <role> \
+  --commit <correct-commit> \
+  --reason "Concrete correction reason"
 ```
 
 ## Reporting Rules

@@ -26,7 +26,7 @@ bin/baton --db /tmp/baton.sqlite3 shift start --role frontend
 bin/baton --db /tmp/baton.sqlite3 wait --role frontend --timeout 900
 bin/baton --db /tmp/baton.sqlite3 next --role frontend --explain
 bin/baton --db /tmp/baton.sqlite3 claim HO-YYYY-MM-DD-001 --role frontend
-bin/baton --db /tmp/baton.sqlite3 finish HO-YYYY-MM-DD-001 --role frontend --evidence "Evidence summary"
+bin/baton --db /tmp/baton.sqlite3 finish HO-YYYY-MM-DD-001 --role frontend --evidence "Evidence summary" --outcome pass
 bin/baton --db /tmp/baton.sqlite3 shift status --role frontend
 bin/baton --db /tmp/baton.sqlite3 wait --role frontend --timeout 900
 ```
@@ -89,7 +89,7 @@ bin/baton --db /tmp/baton.sqlite3 role alias-add cd content-design
 bin/baton --db /tmp/baton.sqlite3 next --role cd
 ```
 
-Workflow authority is configured with role permissions. `sm` is seeded with all CR permissions, `handoff.cancel`, `handoff.register`, emergency `gate.manage`, and `workspace.override` authority. `planning` is seeded with the CR review, retry registration, and cancellation permissions required for failure decisions.
+Workflow authority is configured with role permissions. `sm` is seeded with all CR permissions, `handoff.cancel`, `handoff.register`, `handoff.evidence_correct`, emergency `gate.manage`, and `workspace.override` authority. `planning` is seeded with the CR review, retry registration, cancellation, and evidence-correction permissions required for failure and blocking-result decisions.
 
 ```bash
 bin/baton --db /tmp/baton.sqlite3 role permission-list sm
@@ -97,6 +97,7 @@ bin/baton --db /tmp/baton.sqlite3 role permission-add architecture cr.review
 bin/baton --db /tmp/baton.sqlite3 role permission-add architecture cr.approve
 bin/baton --db /tmp/baton.sqlite3 role permission-add architecture handoff.cancel
 bin/baton --db /tmp/baton.sqlite3 role permission-add architecture handoff.register
+bin/baton --db /tmp/baton.sqlite3 role permission-add architecture handoff.evidence_correct
 bin/baton --db /tmp/baton.sqlite3 role permission-add architecture gate.manage
 bin/baton --db /tmp/baton.sqlite3 role permission-add architecture workspace.override
 bin/baton --db /tmp/baton.sqlite3 role permission-remove sm cr.approve
@@ -127,6 +128,14 @@ bin/baton --db /tmp/baton.sqlite3 register \
 Use `--agent-id`, `BATON_AGENT_ID`, or the local identity file with `next`, `wait`, `watch`, and CR review waiting so Baton can match specialized work. Role-only records remain compatible and do not require workstream registration.
 
 One concrete agent identity may own one active handoff or claimed submitted CR review. At integration fan-in, parallelize independent evidence checks across workstreams, then make one final integration handoff depend on all required checks. Keep the final merge, acceptance, shared-environment mutation, and Gate release under one owner.
+
+## Completion Outcomes And Evidence
+
+`finish` records lifecycle completion. A completed validation or analysis should also record `--outcome pass|fail|conditional|inconclusive`; add `--blocking` to a non-pass result that needs review before success-dependent work. `--outcome-cr` links an existing decision CR. Use lifecycle `fail` instead when the handoff itself could not meet its exit criteria.
+
+Handoff dependencies are after-completion edges, so a finished non-pass validation satisfies them. Put success-dependent work behind a named Gate and have the planner or reviewer inspect the outcome before releasing it.
+
+An explicit `--commit` must resolve to a local commit and is stored canonically. The audited unresolved override requires both `--allow-unresolved-commit` and `--unresolved-reason`. Correct a wrong finished reference with `handoff evidence-correct`; the original claimant or a role with `handoff.evidence_correct` appends the correction without rewriting history.
 
 ## Handoff Failure And Retry
 

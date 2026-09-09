@@ -69,6 +69,7 @@ REVIEW_PERMISSIONS = {
 }
 HANDOFF_PERMISSIONS = {
     "handoff.cancel",
+    "handoff.evidence_correct",
     "handoff.register",
 }
 GATE_PERMISSIONS = {
@@ -88,7 +89,14 @@ FAILURE_REVIEW_PERMISSIONS = {
 KNOWN_PERMISSIONS = (
     REVIEW_PERMISSIONS | HANDOFF_PERMISSIONS | GATE_PERMISSIONS | WORKSPACE_PERMISSIONS
 )
-LATEST_SCHEMA_VERSION = 12
+COMPLETION_OUTCOMES = {
+    "unspecified",
+    "pass",
+    "fail",
+    "conditional",
+    "inconclusive",
+}
+LATEST_SCHEMA_VERSION = 13
 PROJECT_FORMAT_VERSION = 1
 PROJECT_MARKER_NAME = "project.json"
 PROJECT_CONFIG_NAME = "baton.toml"
@@ -1004,6 +1012,69 @@ def migration_v12_retry_and_replacement_tracking(con: sqlite3.Connection) -> Non
     )
 
 
+def migration_v13_completion_evidence(con: sqlite3.Connection) -> None:
+    handoff_columns = {
+        row["name"] for row in con.execute("PRAGMA table_info(handoff_jobs)").fetchall()
+    }
+    additions = {
+        "completion_outcome": (
+            "text not null default 'unspecified' "
+            "check (completion_outcome in "
+            "('unspecified', 'pass', 'fail', 'conditional', 'inconclusive'))"
+        ),
+        "completion_blocking": (
+            "integer not null default 0 check (completion_blocking in (0, 1))"
+        ),
+        "outcome_cr_id": "text references change_requests(cr_id)",
+        "related_commit_resolution": (
+            "text not null default 'not_provided' "
+            "check (related_commit_resolution in "
+            "('not_provided', 'resolved', 'unresolved', 'legacy_unchecked'))"
+        ),
+        "related_commit_resolution_reason": "text",
+    }
+    for column, definition in additions.items():
+        if column not in handoff_columns:
+            con.execute(f"alter table handoff_jobs add column {column} {definition}")
+    con.execute(
+        """
+        update handoff_jobs
+        set related_commit_resolution = 'legacy_unchecked'
+        where related_commit is not null and trim(related_commit) != ''
+          and related_commit_resolution = 'not_provided'
+        """
+    )
+    execute_sql_script(
+        con,
+        """
+        create table if not exists handoff_evidence_corrections (
+          id integer primary key autoincrement,
+          job_id text not null references handoff_jobs(job_id) on delete cascade,
+          previous_commit text,
+          corrected_commit text not null,
+          commit_resolution text not null
+            check (commit_resolution in ('resolved', 'unresolved')),
+          reason text not null,
+          actor_role text not null references roles(role_id),
+          actor_id text not null,
+          created_at text not null
+        );
+
+        create index if not exists idx_handoff_evidence_corrections_job
+          on handoff_evidence_corrections(job_id, id);
+        """,
+    )
+    for role_id in ("sm", "planning"):
+        con.execute(
+            """
+            insert into role_permissions(role_id, permission)
+            values (?, 'handoff.evidence_correct')
+            on conflict(role_id, permission) do nothing
+            """,
+            (role_id,),
+        )
+
+
 MIGRATIONS = (
     (1, "initial_schema", migration_v1_initial_schema),
     (2, "handoff_cancel_permission", migration_v2_handoff_cancel_permission),
@@ -1017,6 +1088,7 @@ MIGRATIONS = (
     (10, "opt_in_thread_notifications", migration_v10_opt_in_thread_notifications),
     (11, "workstream_routing", migration_v11_workstream_routing),
     (12, "retry_and_replacement_tracking", migration_v12_retry_and_replacement_tracking),
+    (13, "completion_evidence", migration_v13_completion_evidence),
 )
 
 
@@ -1092,6 +1164,34 @@ def check_schema(con: sqlite3.Connection) -> int:
     applied_migration_versions(con)
     validate_database(con)
     return current
+
+
+def database_schema_compatibility(con: sqlite3.Connection) -> dict[str, object]:
+    schema = current_schema_version(con)
+    compatible = True
+    error = ""
+    try:
+        validate_migration_definitions()
+        if schema > LATEST_SCHEMA_VERSION:
+            raise MigrationError(
+                f"database schema is newer than this Baton version: "
+                f"schema={schema} latest={LATEST_SCHEMA_VERSION}"
+            )
+        if migration_table_exists(con):
+            applied_migration_versions(con)
+        validate_database(con)
+    except MigrationError as exc:
+        compatible = False
+        error = str(exc)
+    return {
+        "schema_version": schema,
+        "supported_schema_version": LATEST_SCHEMA_VERSION,
+        "database_schema_current": compatible and schema == LATEST_SCHEMA_VERSION,
+        "migration_required": compatible and schema < LATEST_SCHEMA_VERSION,
+        "cli_schema_compatible": compatible,
+        "workflow_commands_ready": compatible and schema == LATEST_SCHEMA_VERSION,
+        "compatibility_error": error,
+    }
 
 
 def migrate_schema(
@@ -1443,6 +1543,59 @@ def run_git(root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
         raise MigrationError("Git workspace inspection failed: git command not found") from exc
     except subprocess.TimeoutExpired as exc:
         raise MigrationError("Git workspace inspection timed out") from exc
+
+
+def resolve_completion_commit(
+    value: str,
+    workspace_root_value: str,
+    *,
+    allow_unresolved: bool,
+    unresolved_reason: str,
+) -> tuple[str, str, str]:
+    commit = value.strip()
+    reason = unresolved_reason.strip()
+    if not commit:
+        if allow_unresolved:
+            raise SystemExit("ERROR: --allow-unresolved-commit requires --commit")
+        return "", "not_provided", ""
+    if len(commit) > 255 or commit.startswith("-") or any(char.isspace() for char in commit):
+        raise SystemExit(f"ERROR: invalid commit reference syntax: {commit!r}")
+
+    root = (
+        Path(workspace_root_value).expanduser().resolve()
+        if workspace_root_value
+        else Path.cwd().resolve()
+    )
+    repository_result = run_git(root, "rev-parse", "--show-toplevel")
+    if repository_result.returncode != 0:
+        detail = "workspace is not a Git repository"
+    else:
+        repository_root = Path(repository_result.stdout.strip()).resolve()
+        resolved = run_git(
+            repository_root,
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            f"{commit}^{{commit}}",
+        )
+        if resolved.returncode == 0:
+            canonical = resolved.stdout.strip().splitlines()[0]
+            return canonical, "resolved", ""
+        object_type = run_git(repository_root, "cat-file", "-t", commit)
+        if object_type.returncode == 0:
+            detail = f"object exists but is not commit-resolvable: type={object_type.stdout.strip()}"
+        else:
+            detail = "commit object does not exist in the local repository"
+
+    if not allow_unresolved:
+        raise SystemExit(
+            f"ERROR: cannot resolve --commit {commit!r}: {detail}; "
+            "use --allow-unresolved-commit with --unresolved-reason only for "
+            "cross-repository or remote-only evidence"
+        )
+    if not reason:
+        raise SystemExit("ERROR: --unresolved-reason is required with --allow-unresolved-commit")
+    return commit, "unresolved", reason
 
 
 def git_result_value(result: subprocess.CompletedProcess[str], operation: str) -> str:
@@ -2046,20 +2199,22 @@ def command_project_info(args: argparse.Namespace) -> int:
             read_project_marker(candidate_root)
             marker_root = candidate_root
     with closing(connect_readonly(str(database))) as con:
-        schema = check_schema(con)
-        metadata = {
-            row["key"]: row["value"]
-            for row in con.execute(
-                "select key, value from database_metadata order by key"
-            ).fetchall()
-        }
+        compatibility = database_schema_compatibility(con)
+        metadata = {}
+        if "database_metadata" in database_table_names(con):
+            metadata = {
+                row["key"]: row["value"]
+                for row in con.execute(
+                    "select key, value from database_metadata order by key"
+                ).fetchall()
+            }
     workspace_config = read_workspace_config(str(database))
     payload = {
         "project_root": str(marker_root) if marker_root else "",
         "project_marker": str(project_marker_path(marker_root)) if marker_root else "",
         "database": str(database),
-        "schema_version": schema,
         "baton_cli_version": BATON_VERSION,
+        **compatibility,
         "workspace_config": str(workspace_config.path) if workspace_config.path.is_file() else "",
         "vcs_provider": workspace_config.provider,
         "vcs_policy": workspace_config.policy,
@@ -2070,7 +2225,8 @@ def command_project_info(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return 0
     for key, value in payload.items():
-        print(f"{key}: {value}")
+        rendered = str(value).lower() if isinstance(value, bool) else value
+        print(f"{key}: {rendered}")
     return 0
 
 
@@ -2951,13 +3107,10 @@ def command_upgrade_preflight(args: argparse.Namespace) -> int:
         baton_tables = {"roles", "handoff_jobs", "handoff_controls", "change_requests"}
         if not tables.intersection(baton_tables):
             raise MigrationError(f"database is not a recognized Baton database: {path}")
-        schema = current_schema_version(con)
-        if schema > LATEST_SCHEMA_VERSION:
-            raise MigrationError(
-                f"database schema is newer than this Baton version: "
-                f"schema={schema} latest={LATEST_SCHEMA_VERSION}"
-            )
-        validate_database(con)
+        compatibility = database_schema_compatibility(con)
+        if not compatibility["cli_schema_compatible"]:
+            raise MigrationError(str(compatibility["compatibility_error"]))
+        schema = int(compatibility["schema_version"])
         waiters = active_waiter_rows(con)
         handoffs = in_progress_handoff_rows(con)
         reviews = active_cr_review_rows(con)
@@ -2968,7 +3121,7 @@ def command_upgrade_preflight(args: argparse.Namespace) -> int:
         "status": "ready" if ready else "not_ready",
         "database": str(path),
         "baton_version": BATON_VERSION,
-        "schema_version": schema,
+        **compatibility,
         "global_stop": global_stop,
         "active_waiters": [{key: row[key] for key in row.keys()} for row in waiters],
         "active_handoffs": [{key: row[key] for key in row.keys()} for row in handoffs],
@@ -2982,6 +3135,11 @@ def command_upgrade_preflight(args: argparse.Namespace) -> int:
     print(f"database: {path}")
     print(f"baton_version: {BATON_VERSION}")
     print(f"schema_version: {schema}")
+    print(f"supported_schema_version: {LATEST_SCHEMA_VERSION}")
+    print(f"database_schema_current: {str(compatibility['database_schema_current']).lower()}")
+    print(f"migration_required: {str(compatibility['migration_required']).lower()}")
+    print(f"cli_schema_compatible: {str(compatibility['cli_schema_compatible']).lower()}")
+    print(f"workflow_commands_ready: {str(compatibility['workflow_commands_ready']).lower()}")
     print(f"global_stop: {'yes' if global_stop else 'no'}")
     for row in waiters:
         print(
@@ -5139,16 +5297,50 @@ def command_watch(args: argparse.Namespace) -> int:
         unregister_waiter(args.db, waiter_id)
 
 
+def handoff_evidence_corrections(
+    con: sqlite3.Connection, job_id: str
+) -> list[sqlite3.Row]:
+    return con.execute(
+        """
+        select id, previous_commit, corrected_commit, commit_resolution,
+               reason, actor_role, actor_id, created_at
+        from handoff_evidence_corrections
+        where job_id = ?
+        order by id
+        """,
+        (job_id,),
+    ).fetchall()
+
+
 def command_status(args: argparse.Namespace) -> int:
     with connect(args.db) as con:
         init_schema(con)
         rows = con.execute(
             "select status, count(*) as count from handoff_jobs group by status order by status"
         ).fetchall()
+        outcome_rows = con.execute(
+            """
+            select completion_outcome as outcome, count(*) as count
+            from handoff_jobs
+            where status = 'finished'
+            group by completion_outcome
+            order by completion_outcome
+            """
+        ).fetchall()
+        blocking_count = con.execute(
+            """
+            select count(*)
+            from handoff_jobs
+            where status = 'finished' and completion_blocking = 1
+            """
+        ).fetchone()[0]
     counts = {status: 0 for status in sorted(STATUSES)}
     counts.update({row["status"]: row["count"] for row in rows})
     for status, count in counts.items():
         print(f"{status}: {count}")
+    for row in outcome_rows:
+        print(f"outcome.{row['outcome']}: {row['count']}")
+    print(f"outcome.blocking: {blocking_count}")
     return 0
 
 
@@ -5188,10 +5380,21 @@ def command_handoff_show(args: argparse.Namespace) -> int:
                 (args.job_id,),
             ).fetchall()
         ]
+        corrections = [
+            {key: item[key] for key in item.keys()}
+            for item in handoff_evidence_corrections(con, args.job_id)
+        ]
     payload = {key: row[key] for key in row.keys()}
     payload["depends_on"] = dependencies
     payload["depends_on_gates"] = gates
     payload["failure_reviews"] = failures
+    payload["evidence_corrections"] = corrections
+    if corrections:
+        payload["effective_related_commit"] = corrections[-1]["corrected_commit"]
+        payload["effective_commit_resolution"] = corrections[-1]["commit_resolution"]
+    else:
+        payload["effective_related_commit"] = row["related_commit"] or ""
+        payload["effective_commit_resolution"] = row["related_commit_resolution"]
     if args.format == "json":
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return 0
@@ -5213,6 +5416,14 @@ def command_handoff_show(args: argparse.Namespace) -> int:
         "finished_at",
         "closure_evidence",
         "related_commit",
+        "related_commit_resolution",
+        "related_commit_resolution_reason",
+        "effective_related_commit",
+        "effective_commit_resolution",
+        "completion_outcome",
+        "completion_blocking",
+        "outcome_cr_id",
+        "evidence_corrections",
         "failure_reviews",
     )
     for key in ordered_keys:
@@ -5223,7 +5434,7 @@ def command_handoff_show(args: argparse.Namespace) -> int:
                 if value and isinstance(value[0], dict)
                 else ",".join(value)
             )
-        print(f"{key}: {value or ''}")
+        print(f"{key}: {'' if value is None else value}")
     return 0
 
 
@@ -5240,11 +5451,18 @@ def command_handoff_list(args: argparse.Namespace) -> int:
         if args.status:
             conditions.append("status = ?")
             params.append(args.status)
+        if args.outcome:
+            conditions.append("completion_outcome = ?")
+            params.append(args.outcome)
+        if args.blocking:
+            conditions.append("completion_blocking = ?")
+            params.append(1 if args.blocking == "yes" else 0)
         where = f"where {' and '.join(conditions)}" if conditions else ""
         params.append(args.limit)
         rows = con.execute(
             f"""
-            select job_id, status, target_role, workstream, title, claimed_by, created_at
+            select job_id, status, target_role, workstream, title, claimed_by,
+                   completion_outcome, completion_blocking, outcome_cr_id, created_at
             from handoff_jobs
             {where}
             order by created_at, job_id
@@ -5262,8 +5480,122 @@ def command_handoff_list(args: argparse.Namespace) -> int:
         claimant = row["claimed_by"] or ""
         print(
             f"{row['job_id']}\t{row['status']}\t{row['target_role']}\t"
-            f"{row['workstream'] or ''}\t{claimant}\t{row['title']}"
+            f"{row['workstream'] or ''}\t{claimant}\t"
+            f"outcome={row['completion_outcome']}\t"
+            f"blocking={row['completion_blocking']}\t"
+            f"outcome_cr={row['outcome_cr_id'] or ''}\t{row['title']}"
         )
+    return 0
+
+
+def command_handoff_evidence_correct(args: argparse.Namespace) -> int:
+    reason = args.reason.strip()
+    if not reason:
+        raise SystemExit("ERROR: --reason cannot be blank")
+    corrected_commit, resolution, _ = resolve_completion_commit(
+        args.commit,
+        args.workspace_root,
+        allow_unresolved=args.allow_unresolved_commit,
+        unresolved_reason=reason,
+    )
+    if not corrected_commit:
+        raise SystemExit("ERROR: --commit cannot be blank")
+
+    with connect(args.db) as con:
+        init_schema(con)
+        begin_immediate(con)
+        actor_role = resolve_role(con, args.role)
+        actor_id = claimed_by_value(args, actor_role)
+        row = con.execute(
+            """
+            select status, target_role, claimed_by, related_commit,
+                   related_commit_resolution
+            from handoff_jobs
+            where job_id = ?
+            """,
+            (args.job_id,),
+        ).fetchone()
+        if not row:
+            raise SystemExit(f"ERROR: unknown job: {args.job_id}")
+        if row["status"] != "finished":
+            raise SystemExit(
+                f"ERROR: evidence correction requires a finished handoff: "
+                f"{args.job_id} status={row['status']}"
+            )
+        is_original_claimant = actor_role == row["target_role"] and actor_id == (
+            row["claimed_by"] or row["target_role"]
+        )
+        has_permission = bool(
+            con.execute(
+                """
+                select 1 from role_permissions
+                where role_id = ? and permission = 'handoff.evidence_correct'
+                """,
+                (actor_role,),
+            ).fetchone()
+        )
+        if not is_original_claimant and not has_permission:
+            raise SystemExit(
+                f"ERROR: evidence correction requires original claimant "
+                f"{row['claimed_by'] or row['target_role']} or permission "
+                "handoff.evidence_correct"
+            )
+        previous = con.execute(
+            """
+            select corrected_commit, commit_resolution
+            from handoff_evidence_corrections
+            where job_id = ?
+            order by id desc
+            limit 1
+            """,
+            (args.job_id,),
+        ).fetchone()
+        previous_commit = (
+            str(previous["corrected_commit"])
+            if previous
+            else str(row["related_commit"] or "")
+        )
+        previous_resolution = (
+            str(previous["commit_resolution"])
+            if previous
+            else str(row["related_commit_resolution"])
+        )
+        if corrected_commit == previous_commit and resolution == previous_resolution:
+            raise SystemExit("ERROR: evidence correction does not change the effective commit")
+        cursor = con.execute(
+            """
+            insert into handoff_evidence_corrections(
+              job_id, previous_commit, corrected_commit, commit_resolution,
+              reason, actor_role, actor_id, created_at
+            ) values (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                args.job_id,
+                previous_commit or None,
+                corrected_commit,
+                resolution,
+                reason,
+                actor_role,
+                actor_id,
+                utc_now(),
+            ),
+        )
+        event(
+            con,
+            "evidence_corrected",
+            job_id=args.job_id,
+            actor_role=actor_role,
+            actor_id=actor_id,
+            message=(
+                f"correction={cursor.lastrowid} previous_commit={previous_commit} "
+                f"corrected_commit={corrected_commit} resolution={resolution}; {reason}"
+            ),
+        )
+        con.commit()
+    print(
+        f"Evidence correction {cursor.lastrowid} {args.job_id} "
+        f"commit={corrected_commit} resolution={resolution}"
+    )
     return 0
 
 
@@ -5415,6 +5747,18 @@ def command_finish(args: argparse.Namespace) -> int:
     evidence = args.evidence.strip()
     if not evidence:
         raise SystemExit("ERROR: --evidence cannot be blank")
+    if args.blocking and args.outcome not in {"fail", "conditional", "inconclusive"}:
+        raise SystemExit(
+            "ERROR: --blocking requires --outcome fail, conditional, or inconclusive"
+        )
+    if args.outcome_cr_id and args.outcome == "unspecified":
+        raise SystemExit("ERROR: --outcome-cr requires an explicit --outcome")
+    related_commit, commit_resolution, commit_resolution_reason = resolve_completion_commit(
+        args.commit,
+        args.workspace_root,
+        allow_unresolved=args.allow_unresolved_commit,
+        unresolved_reason=args.unresolved_reason,
+    )
     baseline = latest_workspace_commit(args.db, args.job_id, ("claimed", "registered"))
     assessment = assess_workspace(args.db, baseline, args.workspace_root)
     with connect(args.db) as con:
@@ -5432,6 +5776,13 @@ def command_finish(args: argparse.Namespace) -> int:
             )
         if row["status"] != "in_progress":
             raise SystemExit(f"ERROR: job is not in_progress: {args.job_id} status={row['status']}")
+        if args.outcome_cr_id:
+            outcome_cr = con.execute(
+                "select 1 from change_requests where cr_id = ?",
+                (args.outcome_cr_id,),
+            ).fetchone()
+            if not outcome_cr:
+                raise SystemExit(f"ERROR: unknown outcome CR: {args.outcome_cr_id}")
         require_linked_cr_integrity(con, args.job_id)
         apply_workspace_policy(
             con,
@@ -5445,12 +5796,37 @@ def command_finish(args: argparse.Namespace) -> int:
         con.execute(
             """
             update handoff_jobs
-            set status = 'finished', finished_at = ?, closure_evidence = ?, related_commit = ?
+            set status = 'finished', finished_at = ?, closure_evidence = ?,
+                related_commit = ?, related_commit_resolution = ?,
+                related_commit_resolution_reason = ?, completion_outcome = ?,
+                completion_blocking = ?, outcome_cr_id = ?
             where job_id = ?
             """,
-            (utc_now(), evidence, args.commit, args.job_id),
+            (
+                utc_now(),
+                evidence,
+                related_commit,
+                commit_resolution,
+                commit_resolution_reason or None,
+                args.outcome,
+                int(args.blocking),
+                args.outcome_cr_id or None,
+                args.job_id,
+            ),
         )
-        event(con, "finished", job_id=args.job_id, actor_role=role, from_status="in_progress", to_status="finished", message=evidence)
+        event(
+            con,
+            "finished",
+            job_id=args.job_id,
+            actor_role=role,
+            from_status="in_progress",
+            to_status="finished",
+            message=(
+                f"outcome={args.outcome} blocking={int(args.blocking)} "
+                f"outcome_cr={args.outcome_cr_id or ''} "
+                f"commit_resolution={commit_resolution}; {evidence}"
+            ),
+        )
         promote_ready_direct_dependents(con, args.job_id, role)
         con.commit()
     print(f"Finished {args.job_id}")
@@ -5655,6 +6031,10 @@ def command_retry(args: argparse.Namespace) -> int:
             update handoff_jobs
             set status = 'open', claimed_by = null, started_at = null,
                 finished_at = null, closure_evidence = null, related_commit = null,
+                related_commit_resolution = 'not_provided',
+                related_commit_resolution_reason = null,
+                completion_outcome = 'unspecified', completion_blocking = 0,
+                outcome_cr_id = null,
                 attempt = ?
             where job_id = ? and status = 'failed'
             """,
@@ -6826,9 +7206,24 @@ def build_parser() -> argparse.ArgumentParser:
     handoff_list = handoff_sub.add_parser("list", help="list handoffs with optional role and status filters")
     handoff_list.add_argument("--role", default="")
     handoff_list.add_argument("--status", choices=tuple(sorted(STATUSES)), default="")
+    handoff_list.add_argument(
+        "--outcome", choices=tuple(sorted(COMPLETION_OUTCOMES)), default=""
+    )
+    handoff_list.add_argument("--blocking", choices=("yes", "no"), default="")
     handoff_list.add_argument("--limit", type=int, default=100)
     handoff_list.add_argument("--format", choices=("text", "json"), default="text")
     handoff_list.set_defaults(func=command_handoff_list)
+    evidence_correct = handoff_sub.add_parser(
+        "evidence-correct",
+        help="append a commit correction without changing original completion evidence",
+    )
+    evidence_correct.add_argument("job_id")
+    evidence_correct.add_argument("--role", required=True)
+    evidence_correct.add_argument("--claimed-by", default="")
+    evidence_correct.add_argument("--commit", required=True)
+    evidence_correct.add_argument("--reason", required=True)
+    evidence_correct.add_argument("--allow-unresolved-commit", action="store_true")
+    evidence_correct.set_defaults(func=command_handoff_evidence_correct)
     handoff_successors = handoff_sub.add_parser(
         "successors",
         help="inspect direct successor handoffs without assigning work",
@@ -7186,6 +7581,24 @@ def build_parser() -> argparse.ArgumentParser:
     finish.add_argument("--role", required=True)
     finish.add_argument("--evidence", required=True)
     finish.add_argument("--commit", default="")
+    finish.add_argument(
+        "--outcome",
+        choices=tuple(sorted(COMPLETION_OUTCOMES)),
+        default="unspecified",
+        help="structured completion result; default: unspecified",
+    )
+    finish.add_argument(
+        "--blocking",
+        action="store_true",
+        help="mark a fail, conditional, or inconclusive outcome as blocking",
+    )
+    finish.add_argument("--outcome-cr", dest="outcome_cr_id", default="")
+    finish.add_argument("--allow-unresolved-commit", action="store_true")
+    finish.add_argument(
+        "--unresolved-reason",
+        default="",
+        help="audited reason required for unresolved cross-repository commit evidence",
+    )
     add_workspace_override_arguments(finish)
     finish.set_defaults(func=command_finish)
 

@@ -16,6 +16,7 @@ Tables:
 - `role_aliases`: alternate role names that resolve to canonical roles
 - `role_permissions`: workflow permissions granted to roles
 - `handoff_jobs`: primary handoff records
+- `handoff_evidence_corrections`: append-only corrections to completed commit evidence
 - `handoff_dependencies`: dependency edges between handoff jobs
 - `workflow_gates`: stable named barriers for future or manually resolved workflow stages
 - `gate_owners`: roles authorized to resolve or transfer each Gate
@@ -71,6 +72,7 @@ Known migrations:
 10 opt_in_thread_notifications
 11 workstream_routing
 12 retry_and_replacement_tracking
+13 completion_evidence
 ```
 
 `baton upgrade preflight` is a read-only operational check that can inspect a recognized older schema before the executable is replaced. It requires an explicit global stop and reports blocker object IDs. `baton migrate --check` then verifies that the database is at the latest known schema version after migration.
@@ -199,8 +201,8 @@ Primary key:
 
 Seed permissions:
 
-- `sm` receives all CR permissions, `handoff.cancel`, `handoff.register`, `gate.manage`, and `workspace.override` on `init` or the migration that introduces each permission.
-- `planning` receives the CR review permissions needed for failure decisions plus `handoff.cancel` and `handoff.register` in a new project.
+- `sm` receives all CR permissions, `handoff.cancel`, `handoff.register`, `handoff.evidence_correct`, `gate.manage`, and `workspace.override` on `init` or the migration that introduces each permission.
+- `planning` receives the CR review permissions needed for failure and blocking-outcome decisions plus `handoff.cancel`, `handoff.register`, and `handoff.evidence_correct` in a new project.
 - Migration 7 grants `handoff.register` to every active role already present in an upgraded project, preserving the registration access that was implicit before the permission existed. An SM may revoke those compatibility grants after reviewing project policy.
 
 Known permissions:
@@ -215,6 +217,7 @@ cr.assign_implementation
 cr.mark_implemented
 handoff.cancel
 handoff.register
+handoff.evidence_correct
 gate.manage
 workspace.override
 ```
@@ -248,7 +251,12 @@ Columns:
 | `started_at` | `text` | no | UTC timestamp when claimed. |
 | `finished_at` | `text` | no | UTC timestamp when finished. |
 | `closure_evidence` | `text` | no | Required evidence when the job is finished. |
-| `related_commit` | `text` | no | Commit SHA or reference for completed output. |
+| `related_commit` | `text` | no | Original commit evidence recorded at completion. New explicit references resolve to canonical full commit IDs. |
+| `related_commit_resolution` | `text` | yes | `not_provided`, `resolved`, `unresolved`, or migrated `legacy_unchecked`. |
+| `related_commit_resolution_reason` | `text` | no | Required audited reason for an explicitly unresolved reference. |
+| `completion_outcome` | `text` | yes | `unspecified`, `pass`, `fail`, `conditional`, or `inconclusive`. |
+| `completion_blocking` | `integer` | yes | `1` when a non-pass completed result requires planning or review before success-dependent work. |
+| `outcome_cr_id` | `text` | no | Optional existing CR that records the completion-result decision. |
 
 Allowed `status` values:
 
@@ -276,6 +284,10 @@ An authorized `cancel` operation immediately changes a selected `blocked`, `open
 
 `fail` changes only an `in_progress` job to `failed`, creates and submits a linked failure CR, and leaves dependency descendants `blocked`. An approved failure CR allows its reviewer to use `retry`, which increments `attempt` and returns the original job to `open`. A rejected failure CR allows an authorized cancellation. Dependents become ready only after the retried original job reaches `finished`.
 
+`finish` and `completion_outcome` describe different dimensions. `finished` means the assigned work completed and produced evidence; a completed validation may legitimately record `completion_outcome=fail`. Use lifecycle `failed` when the handoff itself could not meet its exit criteria and requires the failure-CR retry/cancel decision. `completion_blocking=1` is allowed only for `fail`, `conditional`, or `inconclusive`.
+
+An explicit completion commit is resolved as a local Git commit and stored canonically. An audited unresolved reference requires an explicit override and reason. Schema v13 preserves existing completion rows as `completion_outcome=unspecified` and marks existing commit references `legacy_unchecked` rather than claiming they were validated.
+
 Minimal ready job example:
 
 ```text
@@ -288,6 +300,29 @@ objective=Implement the approved upload follow-up.
 exit_criteria=The approved behavior is implemented and verified.
 created_at=2026-06-02 09:00:00 UTC
 ```
+
+## `handoff_evidence_corrections`
+
+Purpose:
+
+- Appends a corrected commit reference without rewriting the original completion row.
+- Preserves the previous effective reference, actor, reason, resolution result, and order of corrections.
+
+Columns:
+
+| Column | Type | Required | Purpose |
+| --- | --- | --- | --- |
+| `id` | `integer primary key` | yes | Monotonic correction ID. |
+| `job_id` | `text` | yes | Finished handoff being corrected. |
+| `previous_commit` | `text` | no | Effective commit before this correction. |
+| `corrected_commit` | `text` | no | New canonical or explicitly unresolved reference. |
+| `commit_resolution` | `text` | yes | `resolved` or `unresolved`. |
+| `reason` | `text` | yes | Audited correction reason. |
+| `actor_role` | `text` | yes | Role making the correction. |
+| `actor_id` | `text` | yes | Concrete agent identity making the correction. |
+| `created_at` | `text` | yes | UTC correction time. |
+
+Only the original claimant acting under the target role, or a role with `handoff.evidence_correct`, may append a correction. `handoff show` derives the effective commit from the newest correction while retaining the original fields and full correction history.
 
 ## `handoff_dependencies`
 
@@ -320,6 +355,8 @@ depends_on_job_id=HO-2026-06-02-001
 Promotion rule:
 
 - A `blocked` job is promoted only when every `depends_on_job_id` is `finished`.
+- This is an after-completion edge, not an after-success edge. A predecessor with `status=finished` and `completion_outcome=fail` satisfies it.
+- Success-dependent work must also depend on a named Gate that a planner or reviewer releases only after accepting the structured outcome.
 - `finish` promotes eligible direct successors in the same transaction as the upstream completion.
 - A `failed` upstream is not successful completion. Its dependents remain `blocked` while its failure CR is reviewed and while a retry is pending.
 - If any required upstream job is `cancelled`, Baton recursively changes its blocked dependents to `cancelled`.
@@ -745,6 +782,7 @@ idx_handoff_jobs_status_role on handoff_jobs(status, target_role)
 idx_handoff_dependencies_job on handoff_dependencies(job_id)
 idx_handoff_dependencies_dep on handoff_dependencies(depends_on_job_id)
 idx_handoff_events_job on handoff_events(job_id)
+idx_handoff_evidence_corrections_job on handoff_evidence_corrections(job_id, id)
 idx_handoff_gate_dependencies_job on handoff_gate_dependencies(job_id)
 idx_handoff_gate_dependencies_gate on handoff_gate_dependencies(gate_name)
 idx_gate_events_gate on gate_events(gate_name)
@@ -764,6 +802,7 @@ Purpose:
 - `dependencies.job_id`: Fast dependency lookup for a job.
 - `dependencies.depends_on_job_id`: Fast reverse dependency analysis.
 - `events.job_id`: Fast event history lookup.
+- `handoff_evidence_corrections`: Fast effective-evidence lookup and ordered audit display.
 - `handoff_gate_dependencies`: Fast Gate checks by job and dependent-job lookup by Gate.
 - `gate_events.gate_name`: Fast Gate audit history lookup.
 - `agent_sessions`: Unique active profile endpoints and fast role candidate lookup.
@@ -814,6 +853,9 @@ Finish:
 handoff_jobs.status=finished
 handoff_jobs.finished_at=<utc>
 handoff_jobs.closure_evidence=<evidence>
+handoff_jobs.completion_outcome=pass
+handoff_jobs.completion_blocking=0
+handoff_jobs.related_commit_resolution=resolved
 handoff_events.event_type=finished
 ```
 

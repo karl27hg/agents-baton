@@ -208,6 +208,10 @@ Only `baton migrate`, its deprecated `update` alias, and the checked project mig
 
 Released schema migrations are append-only and retained so a dormant project can upgrade directly across multiple tagged Baton versions when it is next used. Compatibility covers released Baton schemas and recognized unversioned legacy databases, not arbitrary development snapshots, manually edited schemas, or downgrade operations.
 
+Schema v13 preserves every existing workflow row. It adds structured completion outcomes and append-only evidence corrections. Historical completed jobs are backfilled with `completion_outcome=unspecified`; an existing commit reference is marked `legacy_unchecked` because migration cannot prove what the old executable validated.
+
+`project info` and `upgrade preflight` distinguish package history from compatibility. `last_migrated_with_baton_version` is diagnostic only. Use `cli_schema_compatible`, `database_schema_current`, `migration_required`, and `workflow_commands_ready` to decide whether the installed CLI can operate or whether the project must remain stopped for migration.
+
 If the project used Baton from a nested `tools/baton` checkout and the expected project-root database is missing, do not initialize a new empty database. Discover and rehearse a layout/schema migration first:
 
 ```bash
@@ -337,6 +341,12 @@ Release notes:
 CHANGELOG.md
 ```
 
+Release checklist:
+
+```text
+docs/release-process.md
+```
+
 The default database is:
 
 ```text
@@ -402,7 +412,7 @@ bin/baton role alias-add fe frontend
 bin/baton next --role fe
 ```
 
-Workflow permissions are stored separately from role membership. `sm` is seeded with all CR permissions, `handoff.cancel`, `handoff.register`, emergency `gate.manage`, and `workspace.override` authority. New projects also give `planning` the registration, cancellation, and CR review permissions required to decide failed handoffs. Schema v7 upgrades preserve existing registration behavior by granting `handoff.register` to every active role already present; an SM can revoke compatibility grants afterward.
+Workflow permissions are stored separately from role membership. `sm` is seeded with all CR permissions, `handoff.cancel`, `handoff.register`, `handoff.evidence_correct`, emergency `gate.manage`, and `workspace.override` authority. New projects also give `planning` the registration, cancellation, evidence-correction, and CR review permissions required to decide failed or blocking completion outcomes. Schema v7 upgrades preserve existing registration behavior by granting `handoff.register` to every active role already present; an SM can revoke compatibility grants afterward.
 
 ```bash
 bin/baton role permission-list sm
@@ -411,6 +421,7 @@ bin/baton role permission-add architecture cr.approve
 bin/baton role permission-add architecture cr.admin
 bin/baton role permission-add architecture handoff.cancel
 bin/baton role permission-add architecture handoff.register
+bin/baton role permission-add architecture handoff.evidence_correct
 bin/baton role permission-add architecture gate.manage
 bin/baton role permission-add architecture workspace.override
 bin/baton role permission-remove sm cr.approve
@@ -579,7 +590,7 @@ provider = "git"
 policy = "warn"
 ```
 
-Without this file the effective policy is `off` and Baton does not run Git. With `provider = "git"` and no explicit policy, the default is `warn`. Use `strict` only after validating the project's branch workflow.
+Without this file the effective workspace policy is `off`. With `provider = "git"` and no explicit policy, the default is `warn`. Use `strict` only after validating the project's branch workflow. Explicit completion evidence is a narrow exception: `finish --commit` and `handoff evidence-correct --commit` resolve the supplied reference in the selected local workspace even when workspace policy is `off`.
 
 ```bash
 bin/baton workspace check
@@ -623,7 +634,7 @@ bin/baton register \
   --exit-criteria "QA evidence is recorded."
 ```
 
-Repeated `--depends-on` IDs are rejected before any row is written. A handoff registered after every listed predecessor is already `finished` starts directly as `open`. A failed predecessor keeps it `blocked` and emits a warning; use that scheduling edge only when the same failed job must be retried and finished. A standalone remediation should reference the failure in `--source-ref` rather than depend on the failed job.
+Repeated `--depends-on` IDs are rejected before any row is written. A handoff registered after every listed predecessor is already `finished` starts directly as `open`. Dependency edges mean **after lifecycle completion**, not after a successful validation result. A failed lifecycle predecessor keeps its successor `blocked`; a finished predecessor with `completion_outcome=fail` can release it. Put success-dependent implementation behind a named Gate and let the planner or reviewer release or cancel that Gate after inspecting the structured outcome. A standalone remediation should reference the failure in `--source-ref` rather than depend on the failed job.
 
 Promote ready blocked work:
 
@@ -637,9 +648,17 @@ Claim and finish:
 bin/baton next --role frontend
 bin/baton handoff show HO-YYYY-MM-DD-001
 bin/baton claim HO-YYYY-MM-DD-001 --role frontend
-bin/baton finish HO-YYYY-MM-DD-001 --role frontend --evidence "Manual verification passed."
+bin/baton finish HO-YYYY-MM-DD-001 \
+  --role frontend \
+  --evidence "Manual verification passed." \
+  --outcome pass \
+  --commit HEAD
 bin/baton handoff successors HO-YYYY-MM-DD-001
 ```
+
+`finish` records lifecycle completion. Use `--outcome pass|fail|conditional|inconclusive` for the result of completed validation or analysis, and add `--blocking` when a non-pass result must stop success-dependent work. `--outcome-cr CR-...` may link the decision record. Use `baton fail` instead when the handoff itself could not meet its exit criteria and should enter the retry/cancel failure-review flow.
+
+An explicit `--commit` must resolve to a commit in the local workspace and is stored as its canonical full ID. A deliberately external or not-yet-fetched reference requires both `--allow-unresolved-commit` and `--unresolved-reason`; this audited exception should not be used for ordinary typos or missing local work.
 
 If claimed work cannot meet its exit criteria, report failure instead of calling `finish`:
 
@@ -673,6 +692,25 @@ bin/baton handoff list --role frontend --status open
 bin/baton handoff show HO-YYYY-MM-DD-001 --format json
 bin/baton handoff successors HO-YYYY-MM-DD-001
 ```
+
+Filter completed validation results and inspect blocking outcomes without claiming work:
+
+```bash
+bin/baton handoff list --status finished --outcome fail --blocking yes
+bin/baton status
+bin/baton-report summary
+```
+
+Completion evidence is append-only. If a finished job contains the wrong commit reference, the original claimant or a role with `handoff.evidence_correct` appends a correction instead of rewriting the original row:
+
+```bash
+bin/baton handoff evidence-correct HO-YYYY-MM-DD-001 \
+  --role planning \
+  --commit <correct-commit> \
+  --reason "Correct the commit copied into the completion report."
+```
+
+`handoff show` displays both original and effective commit evidence plus the correction history. The same unresolved-reference override and reason requirements apply to a correction.
 
 Inspect events:
 
@@ -1006,6 +1044,7 @@ tests/cr-flow.sh
 tests/gates.sh
 tests/workstream-routing.sh
 tests/rc4-operations.sh
+tests/rc5-evidence-outcomes.sh
 tests/handoff-cancel.sh
 tests/handoff-dependencies.sh
 tests/migrate.sh
@@ -1057,7 +1096,7 @@ bin/baton-report summary
 bin/baton-report summary --format json
 ```
 
-The summary includes handoff, CR, Gate, and failure-review counts. Unresolved failure reviews appear as `pending`.
+The summary includes handoff lifecycle, structured completion outcome, blocking outcome, CR, Gate, and failure-review counts. Unresolved failure reviews appear as `pending`.
 
 ## Wait
 
@@ -1240,7 +1279,7 @@ Token and auth files are stored under `.baton/gh/config/`, which is ignored by g
 ## Limitations
 
 - It does not import or export Markdown handoff files.
-- Handoff claim/finish/fail authorization remains target-role based; registration and reviewed retry use `handoff.register`, while administrative cancellation uses `handoff.cancel`.
+- Handoff claim/finish/fail authorization remains target-role based; registration and reviewed retry use `handoff.register`, administrative cancellation uses `handoff.cancel`, and reviewed append-only commit correction uses `handoff.evidence_correct`.
 - CR review actions use role permissions, but user-level authentication is outside Baton.
 - A pipx executable is user-global, but workflow state is project-local. Updating the pipx installation changes the executable used by every project, so migrate and verify each project separately before resuming agents.
 - Do not point unrelated projects at one explicit `--db` path. SQLite serializes transactions within that shared file, but project-relative CR paths, IDs, controls, and workflow ownership would also become shared.

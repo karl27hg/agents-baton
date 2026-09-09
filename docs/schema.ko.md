@@ -16,6 +16,7 @@
 - `role_aliases`: 표준 role로 변환되는 별칭
 - `role_permissions`: role에 부여된 workflow 권한
 - `handoff_jobs`: handoff의 기본 작업 record
+- `handoff_evidence_corrections`: 완료 commit 증거의 append-only 정정 이력
 - `handoff_dependencies`: handoff job 사이의 의존성
 - `workflow_gates`: 미래 또는 수동 해제 workflow stage를 위한 named barrier
 - `gate_owners`: 각 Gate를 해제하거나 이관할 수 있는 role
@@ -71,6 +72,7 @@
 10 opt_in_thread_notifications
 11 workstream_routing
 12 retry_and_replacement_tracking
+13 completion_evidence
 ```
 
 `baton upgrade preflight`는 실행 파일 교체 전에 인식 가능한 구버전 schema도 검사할 수 있는 읽기 전용 운영 점검입니다. 명시적인 global stop을 요구하고 blocker object ID를 출력합니다. Migration 후에는 `baton migrate --check`로 DB가 현재 binary가 아는 최신 schema version인지 확인합니다.
@@ -199,8 +201,8 @@ Primary key:
 
 Seed 권한:
 
-- `init` 또는 각 권한을 도입한 migration 시 `sm`은 모든 CR 권한, `handoff.cancel`, `handoff.register`, `gate.manage`, `workspace.override`를 받습니다.
-- 신규 프로젝트의 `planning`은 실패 결정에 필요한 CR 심사 권한과 `handoff.cancel`, `handoff.register`를 받습니다.
+- `init` 또는 각 권한을 도입한 migration 시 `sm`은 모든 CR 권한, `handoff.cancel`, `handoff.register`, `handoff.evidence_correct`, `gate.manage`, `workspace.override`를 받습니다.
+- 신규 프로젝트의 `planning`은 실패 및 blocking 완료 결과 결정에 필요한 CR 심사 권한과 `handoff.cancel`, `handoff.register`, `handoff.evidence_correct`를 받습니다.
 - Migration 7은 기존 프로젝트의 등록 동작을 보존하기 위해 이미 존재하는 모든 active role에 `handoff.register`를 부여합니다. SM은 프로젝트 정책 검토 후 이 호환 권한을 철회할 수 있습니다.
 
 알려진 권한:
@@ -215,6 +217,7 @@ cr.assign_implementation
 cr.mark_implemented
 handoff.cancel
 handoff.register
+handoff.evidence_correct
 gate.manage
 workspace.override
 ```
@@ -248,7 +251,12 @@ workspace.override
 | `started_at` | `text` | 아니오 | claim된 UTC 시각입니다. |
 | `finished_at` | `text` | 아니오 | 완료된 UTC 시각입니다. |
 | `closure_evidence` | `text` | 아니오 | job 완료 시 필요한 증거입니다. |
-| `related_commit` | `text` | 아니오 | 완료 산출물과 연결되는 commit SHA 또는 reference입니다. |
+| `related_commit` | `text` | 아니오 | 완료 시 기록한 원본 commit 증거입니다. 새 명시적 reference는 canonical full commit ID로 해석합니다. |
+| `related_commit_resolution` | `text` | 예 | `not_provided`, `resolved`, `unresolved`, 또는 migration된 `legacy_unchecked`입니다. |
+| `related_commit_resolution_reason` | `text` | 아니오 | 명시적으로 unresolved reference를 허용한 감사 사유입니다. |
+| `completion_outcome` | `text` | 예 | `unspecified`, `pass`, `fail`, `conditional`, `inconclusive` 중 하나입니다. |
+| `completion_blocking` | `integer` | 예 | non-pass 완료 결과가 성공 의존 작업 전에 planner/reviewer 판단을 요구하면 `1`입니다. |
+| `outcome_cr_id` | `text` | 아니오 | 완료 결과 판단을 기록하는 기존 CR ID입니다. |
 
 허용되는 `status` 값:
 
@@ -276,6 +284,10 @@ cancelled
 
 `fail`은 `in_progress` job만 `failed`로 바꾸고 연결된 실패 CR을 생성·제출하며, 하위 dependency는 `blocked`로 유지합니다. 실패 CR이 승인되면 reviewer가 `retry`로 `attempt`를 증가시키고 원래 job을 `open`으로 되돌릴 수 있습니다. 실패 CR이 거절되면 권한 있는 role이 해당 job과 하위 branch를 취소할 수 있습니다. 하위 작업은 재시도된 원래 job이 `finished`가 된 이후에만 ready 상태가 됩니다.
 
+`finish`와 `completion_outcome`은 서로 다른 차원을 표현합니다. `finished`는 배정된 작업이 끝나 증거를 만들었다는 뜻이므로 완료된 검수는 `completion_outcome=fail`일 수 있습니다. handoff 자체가 exit criteria를 충족하지 못해 failure CR의 retry/cancel 판단이 필요하면 lifecycle `failed`를 사용합니다. `completion_blocking=1`은 `fail`, `conditional`, `inconclusive`에서만 허용됩니다.
+
+명시적 완료 commit은 로컬 Git commit으로 해석되어 canonical ID로 저장됩니다. unresolved reference는 명시적인 override와 사유가 필요합니다. Schema v13은 과거 완료 행을 `completion_outcome=unspecified`로 보존하고, 기존 commit reference는 검증 여부를 추측하지 않고 `legacy_unchecked`로 표시합니다.
+
 최소 ready job 예:
 
 ```text
@@ -288,6 +300,27 @@ objective=Implement the approved upload follow-up.
 exit_criteria=The approved behavior is implemented and verified.
 created_at=2026-06-02 09:00:00 UTC
 ```
+
+## `handoff_evidence_corrections`
+
+목적:
+
+- 원래 완료 행을 수정하지 않고 commit reference 정정을 추가합니다.
+- 이전 유효 reference, actor, 사유, resolution 결과와 정정 순서를 보존합니다.
+
+| Column | Type | Required | Purpose |
+| --- | --- | --- | --- |
+| `id` | `integer primary key` | 예 | 증가하는 correction ID입니다. |
+| `job_id` | `text` | 예 | 정정할 finished handoff입니다. |
+| `previous_commit` | `text` | 아니오 | 정정 전 유효 commit입니다. |
+| `corrected_commit` | `text` | 아니오 | 새 canonical 또는 명시적 unresolved reference입니다. |
+| `commit_resolution` | `text` | 예 | `resolved` 또는 `unresolved`입니다. |
+| `reason` | `text` | 예 | 감사 가능한 정정 사유입니다. |
+| `actor_role` | `text` | 예 | 정정을 수행한 role입니다. |
+| `actor_id` | `text` | 예 | 정정을 수행한 구체 agent identity입니다. |
+| `created_at` | `text` | 예 | UTC 정정 시각입니다. |
+
+원 claimant가 target role로 수행하거나 `handoff.evidence_correct` 권한이 있는 role만 정정을 추가할 수 있습니다. `handoff show`는 원본과 전체 정정 이력을 보존하면서 가장 최근 정정으로 유효 commit을 계산합니다.
 
 ## `handoff_dependencies`
 
@@ -320,6 +353,8 @@ depends_on_job_id=HO-2026-06-02-001
 승격 규칙:
 
 - `blocked` job은 모든 `depends_on_job_id`가 `finished` 상태일 때만 `open`으로 승격됩니다.
+- 이는 after-completion edge이며 after-success edge가 아닙니다. 선행 작업이 `status=finished`, `completion_outcome=fail`이어도 dependency는 충족됩니다.
+- 성공 결과가 필요한 작업은 named Gate에도 의존하게 하고 planner 또는 reviewer가 구조화된 결과를 수용한 뒤에만 Gate를 release해야 합니다.
 - `finish`는 upstream 완료와 같은 transaction에서 조건을 충족한 직접 하위 job을 승격합니다.
 - upstream이 `failed`이면 성공 완료가 아니므로 실패 CR 심사와 재시도 동안 하위 job은 `blocked`로 유지됩니다.
 - 필수 upstream job 중 하나라도 `cancelled`가 되면 Baton은 이를 기다리는 blocked job을 재귀적으로 `cancelled`로 변경합니다.
@@ -745,6 +780,7 @@ idx_handoff_jobs_status_role on handoff_jobs(status, target_role)
 idx_handoff_dependencies_job on handoff_dependencies(job_id)
 idx_handoff_dependencies_dep on handoff_dependencies(depends_on_job_id)
 idx_handoff_events_job on handoff_events(job_id)
+idx_handoff_evidence_corrections_job on handoff_evidence_corrections(job_id, id)
 idx_handoff_gate_dependencies_job on handoff_gate_dependencies(job_id)
 idx_handoff_gate_dependencies_gate on handoff_gate_dependencies(gate_name)
 idx_gate_events_gate on gate_events(gate_name)
@@ -764,6 +800,7 @@ idx_cr_handoff_supersessions_replacement on cr_handoff_supersessions(cr_id, repl
 - `dependencies.job_id`: 특정 job의 dependency 조회를 빠르게 처리합니다.
 - `dependencies.depends_on_job_id`: reverse dependency 분석을 빠르게 처리합니다.
 - `events.job_id`: 특정 job의 event history 조회를 빠르게 처리합니다.
+- `handoff_evidence_corrections`: 유효 증거 조회와 순서가 보장된 감사 출력을 빠르게 처리합니다.
 - `handoff_gate_dependencies`: job별 Gate 확인과 Gate별 dependent job 조회를 빠르게 처리합니다.
 - `gate_events.gate_name`: Gate 감사 이력 조회를 빠르게 처리합니다.
 - `agent_sessions`: profile별 active endpoint uniqueness와 role별 후보 조회를 처리합니다.
@@ -814,6 +851,9 @@ Finish:
 handoff_jobs.status=finished
 handoff_jobs.finished_at=<utc>
 handoff_jobs.closure_evidence=<evidence>
+handoff_jobs.completion_outcome=pass
+handoff_jobs.completion_blocking=0
+handoff_jobs.related_commit_resolution=resolved
 handoff_events.event_type=finished
 ```
 
