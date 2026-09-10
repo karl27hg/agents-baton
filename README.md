@@ -215,6 +215,8 @@ Schema v13 preserves every existing workflow row. It adds structured completion 
 
 Schema v14 preserves existing notification rows and numbers them by `delivery_attempt` within each handoff attempt. It adds an explicit recovery link and reason so one stale, same-recipient recovery delivery can be audited without changing the handoff attempt or overwriting the original host result.
 
+Schema v15 preserves all completion and notification history. It backfills each existing non-null `outcome_cr_id` as the first ordered outcome link, adds support for multiple linked outcome CRs, and adds bounded receiver-side notification observations. It does not infer additional blockers or execution results.
+
 `project info` and `upgrade preflight` distinguish package history from compatibility. `last_migrated_with_baton_version` is diagnostic only. Use `cli_schema_compatible`, `database_schema_current`, `migration_required`, and `workflow_commands_ready` to decide whether the installed CLI can operate or whether the project must remain stopped for migration.
 
 If the project used Baton from a nested `tools/baton` checkout and the expected project-root database is missing, do not initialize a new empty database. Discover and rehearse a layout/schema migration first:
@@ -421,7 +423,7 @@ bin/baton role alias-add fe frontend
 bin/baton next --role fe
 ```
 
-Workflow permissions are stored separately from role membership. `sm` is seeded with all CR permissions, `handoff.cancel`, `handoff.register`, `handoff.evidence_correct`, emergency `gate.manage`, and `workspace.override` authority. New projects also give `planning` the registration, cancellation, evidence-correction, and CR review permissions required to decide failed or blocking completion outcomes. Schema v7 upgrades preserve existing registration behavior by granting `handoff.register` to every active role already present; an SM can revoke compatibility grants afterward.
+Workflow permissions are stored separately from role membership. `sm` is seeded with all CR permissions, `handoff.cancel`, `handoff.register`, `handoff.evidence_correct`, `notification.observe`, emergency `gate.manage`, and `workspace.override` authority. New projects also give `planning` the registration, cancellation, evidence-correction, notification-observation, and CR review permissions required to decide failed or blocking completion outcomes. Schema v7 upgrades preserve existing registration behavior by granting `handoff.register` to every active role already present; an SM can revoke compatibility grants afterward. Schema v15 grants the newly introduced `notification.observe` only to `sm` and `planning`.
 
 ```bash
 bin/baton role permission-list sm
@@ -431,6 +433,7 @@ bin/baton role permission-add architecture cr.admin
 bin/baton role permission-add architecture handoff.cancel
 bin/baton role permission-add architecture handoff.register
 bin/baton role permission-add architecture handoff.evidence_correct
+bin/baton role permission-add architecture notification.observe
 bin/baton role permission-add architecture gate.manage
 bin/baton role permission-add architecture workspace.override
 bin/baton role permission-remove sm cr.approve
@@ -590,6 +593,19 @@ bin/baton notify status HO-READY --stale-after 15m
 
 `notify status` preserves `notification_state` for compatibility and adds factual context for unrecorded deliveries, the latest delivery attempt, and recovery count. It derives whether the current handoff attempt is unnotified, host-accepted but unclaimed, stale, claimed by the recipient, or claimed by another agent. It does not resend messages automatically. Host acceptance means the sender does not need to wait solely to wake that successor when the push-first conditions are met. Polling remains required for CR monitoring, unassigned role work, unavailable endpoints, delivery failures, and non-Codex hosts.
 
+When a planning or SM agent verifies that a host-accepted message later ended in a receiver-side terminal failure, it may append one bounded observation:
+
+```bash
+bin/baton notify observe HO-READY \
+  --notification 42 \
+  --role planning \
+  --claimed-by planner-main \
+  --result execution_failed \
+  --reason-class policy_blocked
+```
+
+`notify observe` requires `notification.observe`. Results are limited to `execution_failed`, `execution_cancelled`, and `recipient_unreachable`; reason classes are limited to `policy_blocked`, `host_error`, `timeout`, `cancelled`, and `unknown`. It intentionally accepts no raw error detail and does not alter delivery, recovery, claim, or handoff state. Inspect it through `notify list` or the `latest_observation_*` fields from `notify status`.
+
 When the latest host-accepted delivery is stale, the handoff is still open and unclaimed, the original recipient session remains active and idle, and the target shift remains active, a project may send exactly one recovery follow-up to that same task. Record its real host result afterward:
 
 ```bash
@@ -692,7 +708,18 @@ bin/baton finish HO-YYYY-MM-DD-001 \
 bin/baton handoff successors HO-YYYY-MM-DD-001
 ```
 
-`finish` records lifecycle completion. Use `--outcome pass|fail|conditional|inconclusive` for the result of completed validation or analysis, and add `--blocking` when a non-pass result must stop success-dependent work. `--outcome-cr CR-...` may link the decision record. Use `baton fail` instead when the handoff itself could not meet its exit criteria and should enter the retry/cancel failure-review flow.
+`finish` records lifecycle completion. Use `--outcome pass|fail|conditional|inconclusive` for the result of completed validation or analysis, and add `--blocking` when a non-pass result must stop success-dependent work. Repeat `--outcome-cr CR-...` to link every related decision record; the first remains available through the legacy `outcome_cr_id` field. Blocking status remains unresolved while any linked CR is open or terminal-unimplemented.
+
+If an authorized reviewer discovers another CR after a blocking handoff has finished, append it without rewriting completion evidence or earlier links:
+
+```bash
+bin/baton handoff outcome-cr-link HO-YYYY-MM-DD-001 \
+  --cr CR-YYYY-MM-DD-003 \
+  --role planning \
+  --reason "Independent blocker found during result review."
+```
+
+This command requires `handoff.evidence_correct`, a finished blocking handoff, and an existing unlinked CR. Use `baton fail` instead when the handoff itself could not meet its exit criteria and should enter the retry/cancel failure-review flow.
 
 An explicit `--commit` must resolve to a commit in the local workspace and is stored as its canonical full ID. A deliberately external or not-yet-fetched reference requires both `--allow-unresolved-commit` and `--unresolved-reason`; this audited exception should not be used for ordinary typos or missing local work.
 

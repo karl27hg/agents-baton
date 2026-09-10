@@ -16,6 +16,7 @@ Tables:
 - `role_aliases`: alternate role names that resolve to canonical roles
 - `role_permissions`: workflow permissions granted to roles
 - `handoff_jobs`: primary handoff records
+- `handoff_outcome_crs`: ordered CR relationships for completed outcomes
 - `handoff_evidence_corrections`: append-only corrections to completed commit evidence
 - `handoff_dependencies`: dependency edges between handoff jobs
 - `workflow_gates`: stable named barriers for future or manually resolved workflow stages
@@ -29,6 +30,7 @@ Tables:
 - `agent_sessions`: opt-in runtime host thread and model metadata for stable agent profiles
 - `agent_workstreams`: specialized routing eligibility within a role
 - `handoff_notifications`: audited peer-thread message delivery results
+- `notification_observations`: bounded receiver-side outcomes observed after host acceptance
 - `workspace_events`: optional Git commit provenance and policy outcomes for handoff transitions
 - `change_requests`: CR workflow state and Markdown file pointer
 - `cr_events`: audit log of CR state changes
@@ -74,6 +76,7 @@ Known migrations:
 12 retry_and_replacement_tracking
 13 completion_evidence
 14 notification_recovery
+15 outcome_links_and_notification_observations
 ```
 
 `baton upgrade preflight` is a read-only operational check that can inspect a recognized older schema before the executable is replaced. It requires an explicit global stop and reports blocker object IDs. `baton migrate --check` then verifies that the database is at the latest known schema version after migration.
@@ -202,8 +205,8 @@ Primary key:
 
 Seed permissions:
 
-- `sm` receives all CR permissions, `handoff.cancel`, `handoff.register`, `handoff.evidence_correct`, `gate.manage`, and `workspace.override` on `init` or the migration that introduces each permission.
-- `planning` receives the CR review permissions needed for failure and blocking-outcome decisions plus `handoff.cancel`, `handoff.register`, and `handoff.evidence_correct` in a new project.
+- `sm` receives all CR permissions, `handoff.cancel`, `handoff.register`, `handoff.evidence_correct`, `notification.observe`, `gate.manage`, and `workspace.override` on `init` or the migration that introduces each permission.
+- `planning` receives the CR review permissions needed for failure and blocking-outcome decisions plus `handoff.cancel`, `handoff.register`, `handoff.evidence_correct`, and `notification.observe` in a new project.
 - Migration 7 grants `handoff.register` to every active role already present in an upgraded project, preserving the registration access that was implicit before the permission existed. An SM may revoke those compatibility grants after reviewing project policy.
 
 Known permissions:
@@ -219,6 +222,7 @@ cr.mark_implemented
 handoff.cancel
 handoff.register
 handoff.evidence_correct
+notification.observe
 gate.manage
 workspace.override
 ```
@@ -257,7 +261,7 @@ Columns:
 | `related_commit_resolution_reason` | `text` | no | Required audited reason for an explicitly unresolved reference. |
 | `completion_outcome` | `text` | yes | `unspecified`, `pass`, `fail`, `conditional`, or `inconclusive`. |
 | `completion_blocking` | `integer` | yes | `1` when a non-pass completed result requires planning or review before success-dependent work. |
-| `outcome_cr_id` | `text` | no | Optional existing CR that records the completion-result decision. |
+| `outcome_cr_id` | `text` | no | First linked outcome CR retained as a compatibility projection. Use `handoff_outcome_crs` for the complete set. |
 
 Allowed `status` values:
 
@@ -287,7 +291,7 @@ An authorized `cancel` operation immediately changes a selected `blocked`, `open
 
 `finish` and `completion_outcome` describe different dimensions. `finished` means the assigned work completed and produced evidence; a completed validation may legitimately record `completion_outcome=fail`. Use lifecycle `failed` when the handoff itself could not meet its exit criteria and requires the failure-CR retry/cancel decision. `completion_blocking=1` is allowed only for `fail`, `conditional`, or `inconclusive`.
 
-RC7 keeps `completion_blocking` immutable and derives `open_cr`, `implemented_cr`, `terminal_unimplemented_cr`, or `no_outcome_cr` from the current `outcome_cr_id` relationship. The legacy `outcome.blocking` and report `blocking_outcomes` values remain historical totals. A rejected, cancelled, or superseded CR is terminal-unimplemented, not an inferred resolution. No schema migration or backfill records a decision that was not explicitly audited.
+Schema v15 keeps `completion_blocking` immutable and derives `open_cr`, `implemented_cr`, `terminal_unimplemented_cr`, or `no_outcome_cr` from every ordered relationship in `handoff_outcome_crs`. Any open CR keeps the blocking context open; the context becomes implemented only when every linked CR is implemented. The legacy `outcome.blocking`, report `blocking_outcomes`, and first-link `outcome_cr_id` values remain compatibility projections. A rejected, cancelled, or superseded CR is terminal-unimplemented, not an inferred resolution.
 
 An explicit completion commit is resolved as a local Git commit and stored canonically. An audited unresolved reference requires an explicit override and reason. Schema v13 preserves existing completion rows as `completion_outcome=unspecified` and marks existing commit references `legacy_unchecked` rather than claiming they were validated.
 
@@ -303,6 +307,27 @@ objective=Implement the approved upload follow-up.
 exit_criteria=The approved behavior is implemented and verified.
 created_at=2026-06-02 09:00:00 UTC
 ```
+
+## `handoff_outcome_crs`
+
+Purpose:
+
+- Records every CR associated with one completed result in explicit order.
+- Preserves the original finish-time links and permits audited append-only links discovered later.
+- Prevents one implemented CR from hiding another unresolved blocker.
+
+| Column | Type | Required | Purpose |
+| --- | --- | --- | --- |
+| `job_id` | `text` | yes | Finished handoff that produced the result. |
+| `cr_id` | `text` | yes | Existing related CR; unique within the handoff. |
+| `position` | `integer` | yes | Stable one-based order within the handoff. |
+| `link_source` | `text` | yes | `finish`, `post_completion`, or `migration`. |
+| `actor_role` | `text` | no | Role that created the relationship. |
+| `actor_id` | `text` | no | Concrete actor identity. |
+| `reason` | `text` | no | Audited link reason. |
+| `created_at` | `text` | yes | UTC link time. |
+
+Repeat `finish --outcome-cr` to insert the initial set. `handoff outcome-cr-link` requires `handoff.evidence_correct`, a finished blocking handoff, an existing CR, and a reason. It only appends; duplicate links are rejected. Migration 15 backfills each existing non-null `handoff_jobs.outcome_cr_id` as position 1 with `link_source=migration` and does not infer any additional relationship.
 
 ## `handoff_evidence_corrections`
 
@@ -636,6 +661,25 @@ Schema v14 retains one ordinary host-accepted row per `(job_id, attempt)` and pe
 
 `notify targets` handles ready direct successors; `notify candidates` handles one already-open handoff without requiring or inventing a predecessor edge. Both honor workstream, recipient capacity, and applicable project-local stop/shift controls. A successful `notify record` rechecks those controls. `notify retry` requires the latest host-accepted record to be stale, the handoff to remain open and unclaimed, the original recipient session to remain active and eligible, and the target shift to remain active. It records one same-recipient recovery result but does not send the host message. A failed recovery consumes the recovery allowance and returns delivery to the persistent polling fallback. A reviewed handoff `retry` still increments the workflow attempt and creates a fresh ordinary-notification boundary for the corrected baseline. None of these notification operations claims the handoff. Authentication tokens and message bodies are not stored.
 
+## `notification_observations`
+
+Purpose:
+
+- Appends one bounded terminal receiver-side observation to a host-accepted notification.
+- Makes externally verified execution failures auditable without inventing another workflow lifecycle.
+
+| Column | Type | Required | Purpose |
+| --- | --- | --- | --- |
+| `id` | `integer primary key autoincrement` | yes | Monotonic observation ID. |
+| `notification_id` | `integer` | yes | Unique host-accepted notification being observed. |
+| `result` | `text` | yes | `execution_failed`, `execution_cancelled`, or `recipient_unreachable`. |
+| `reason_class` | `text` | yes | `policy_blocked`, `host_error`, `timeout`, `cancelled`, or `unknown`. |
+| `actor_role` | `text` | yes | Authorized observing role. |
+| `actor_id` | `text` | yes | Concrete observer identity. |
+| `created_at` | `text` | yes | UTC observation time. |
+
+`notify observe` requires `notification.observe`, which migration 15 grants only to `sm` and `planning` by default. A notification accepts at most one observation. The command rejects failed delivery records and intentionally accepts no free-form detail, raw host error, prompt, or secret. An observation appears in `notify list`, `notify status`, and the handoff event audit but never changes notification delivery, recovery allowance, claim ownership, or handoff state.
+
 ## `change_requests`
 
 Purpose:
@@ -799,6 +843,7 @@ idx_handoff_dependencies_job on handoff_dependencies(job_id)
 idx_handoff_dependencies_dep on handoff_dependencies(depends_on_job_id)
 idx_handoff_events_job on handoff_events(job_id)
 idx_handoff_evidence_corrections_job on handoff_evidence_corrections(job_id, id)
+idx_handoff_outcome_crs_cr on handoff_outcome_crs(cr_id, job_id)
 idx_handoff_gate_dependencies_job on handoff_gate_dependencies(job_id)
 idx_handoff_gate_dependencies_gate on handoff_gate_dependencies(gate_name)
 idx_gate_events_gate on gate_events(gate_name)
@@ -821,6 +866,7 @@ Purpose:
 - `dependencies.depends_on_job_id`: Fast reverse dependency analysis.
 - `events.job_id`: Fast event history lookup.
 - `handoff_evidence_corrections`: Fast effective-evidence lookup and ordered audit display.
+- `handoff_outcome_crs`: Fast reverse lookup from CR to completed outcomes.
 - `handoff_gate_dependencies`: Fast Gate checks by job and dependent-job lookup by Gate.
 - `gate_events.gate_name`: Fast Gate audit history lookup.
 - `agent_sessions`: Unique active profile endpoints and fast role candidate lookup.

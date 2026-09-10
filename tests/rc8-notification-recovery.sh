@@ -258,13 +258,13 @@ with sqlite3.connect(sys.argv[1]) as con:
           on handoff_notifications(job_id, attempt) where delivery_status = 'sent';
         create index idx_handoff_notifications_recipient
           on handoff_notifications(recipient_agent_id, created_at);
-        delete from schema_migrations where version = 14;
+        delete from schema_migrations where version in (14, 15);
         """
     )
 PY
 
 MIGRATION_OUTPUT="$("$CLI" --db "$LEGACY_DB" migrate)"
-grep 'schema=13->14 applied=14:notification_recovery' <<<"$MIGRATION_OUTPUT" >/dev/null
+grep 'schema=13->15 applied=14:notification_recovery,15:outcome_links_and_notification_observations' <<<"$MIGRATION_OUTPUT" >/dev/null
 grep "Agent action: read 'baton guide show upgrade' and 'baton guide show changelog', then review project AGENTS.md" \
   <<<"$MIGRATION_OUTPUT" >/dev/null
 python3 - "$LEGACY_DB" "$LEGACY_JOB" <<'PY'
@@ -283,6 +283,6 @@ if rows != [(1, None, None), (2, None, None)]:
 if quick_check != "ok":
     raise SystemExit("migrated database failed quick_check")
 PY
-"$CLI" --db "$LEGACY_DB" migrate --check | grep 'schema=14' >/dev/null
+"$CLI" --db "$LEGACY_DB" migrate --check | grep 'schema=15' >/dev/null
 
 echo "OK RC8 notification recovery db=$DB legacy=$LEGACY_DB"

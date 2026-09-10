@@ -129,9 +129,9 @@ baton-report summary
 
 Normal workflow commands do not migrate schemas automatically. A `database migration required` error is an operator action: keep workers stopped, run `baton migrate`, verify with `baton migrate --check`, and then resume the intended scopes.
 
-### Schema v14 Upgrade Notice
+### Schema v15 Upgrade Notice
 
-Installing a shared pipx executable does not modify any project database. Baton `v0.6.0rc9` uses schema v14. Each existing project owns its own database and must be checked separately from that project's root. RC8 schema v14 projects require only `baton migrate --check`; RC7 schema v13 projects require migration 14 before workflow commands resume. The additive migration preserves notification and workflow rows, numbers existing delivery records in ID order, and adds explicit recovery linkage and reason fields.
+Installing a shared pipx executable does not modify any project database. Baton `v0.6.0` uses schema v15. Each existing project owns its own database and must be checked separately from that project's root. RC8 or RC9 schema v14 projects require migration 15 before workflow commands resume. The additive migration preserves notification and workflow rows, converts each existing non-null `outcome_cr_id` into the first ordered outcome link, and adds bounded notification observations. It does not infer additional CR links or receiver-side execution results.
 
 Before replacing the executable, run the read-only preflight with the currently compatible Baton. It returns exit `0` only when the project has a global maintenance stop and no active waiter, handoff, cancellation acknowledgement, or claimed CR review:
 
@@ -150,9 +150,11 @@ baton migrate --check
 baton resume --all
 ```
 
-`baton migrate` writes a validated backup under `.baton/backups/` before applying schema v14 transactionally. Schema v14 retains schema v13 completion evidence and every existing workflow row. It adds notification delivery sequence and recovery metadata without inferring a recovery for historical records.
+`baton migrate` writes a validated backup under `.baton/backups/` before applying schema v15 transactionally. Schema v15 retains schema v14 notification recovery metadata, schema v13 completion evidence, and every existing workflow row. It adds ordered outcome-CR relationships and append-only notification observations.
 
-If the executable was replaced too early, the new Baton can still run `upgrade preflight` and `project info` against a known older schema and print compatibility and blocker details, but workflow transitions must be drained with the previous compatible Baton. Do not resume with an older Baton executable after schema v14 is applied. When multiple projects use the same pipx installation, repeat preflight, `guide show upgrade`, and the project-local database migration for each project; there is no global database migration command.
+If the executable was replaced too early, the new Baton can still run `upgrade preflight` and `project info` against a known older schema and print compatibility and blocker details, but workflow transitions must be drained with the previous compatible Baton. Do not resume with an older Baton executable after schema v15 is applied. When multiple projects use the same pipx installation, repeat preflight, `guide show upgrade`, and the project-local database migration for each project; there is no global database migration command.
+
+Schema v15 grants `notification.observe` only to `planning` and `sm`. It also keeps `handoff_jobs.outcome_cr_id` as the first-link compatibility projection while `handoff_outcome_crs` becomes the complete ordered relationship set. Review project role grants after migration; do not grant observation authority to workers by default.
 
 Schema v13 grants `handoff.evidence_correct` to `planning` and `sm`. This permission appends an audited correction to a finished job; it never rewrites the original completion evidence.
 

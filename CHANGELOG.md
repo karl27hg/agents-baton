@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## v0.6.0
+
+- Added schema migration v15 with ordered many-to-one completion outcome CR links while preserving `handoff_jobs.outcome_cr_id` as the first-link compatibility projection.
+- Made `finish --outcome-cr` repeatable and added reviewer-authorized `handoff outcome-cr-link` for append-only blocker links discovered after completion.
+- Derived blocking resolution from every linked outcome CR, so one implemented CR cannot hide another open or terminal-unimplemented blocker.
+- Added permission-gated `notify observe` audit records with fixed result and reason-class allowlists, without changing notification delivery, recovery, claim, or handoff lifecycle state.
+
 ## v0.6.0rc9
 
 - Made unlimited newest-first output the `notify list` default for recent operational audits, with explicit `--order oldest` available for chronological history.

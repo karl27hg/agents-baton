@@ -236,9 +236,10 @@ bin/baton role alias-add fe frontend
 bin/baton role permission-add architecture cr.review
 bin/baton role permission-add architecture cr.approve
 bin/baton role permission-add architecture handoff.register
+bin/baton role permission-add architecture notification.observe
 ```
 
-`sm`은 기본적으로 CR 권한, `handoff.cancel`, `handoff.register`, `handoff.evidence_correct`, 긴급 `gate.manage`, `workspace.override` 권한을 갖습니다. 신규 프로젝트의 `planning`도 실패 handoff 또는 blocking 완료 결과를 결정하는 데 필요한 등록·취소·증거 정정·CR 심사 권한을 받습니다. Schema v7로 올리는 기존 프로젝트는 이전 등록 동작을 깨지 않도록 기존 active role 모두에게 `handoff.register`를 승계하며, SM이 정책 검토 후 불필요한 권한을 철회할 수 있습니다. 사용자 수준 인증은 Baton의 범위가 아니므로 OS 계정, 저장소 권한 및 agent 운영 정책으로 별도 통제해야 합니다.
+`sm`은 기본적으로 CR 권한, `handoff.cancel`, `handoff.register`, `handoff.evidence_correct`, `notification.observe`, 긴급 `gate.manage`, `workspace.override` 권한을 갖습니다. 신규 프로젝트의 `planning`도 실패 handoff 또는 blocking 완료 결과를 결정하는 데 필요한 등록·취소·증거 정정·알림 관찰·CR 심사 권한을 받습니다. Schema v15 migration은 새 `notification.observe` 권한을 `sm`과 `planning`에만 부여합니다. Schema v7로 올리는 기존 프로젝트는 이전 등록 동작을 깨지 않도록 기존 active role 모두에게 `handoff.register`를 승계하며, SM이 정책 검토 후 불필요한 권한을 철회할 수 있습니다. 사용자 수준 인증은 Baton의 범위가 아니므로 OS 계정, 저장소 권한 및 agent 운영 정책으로 별도 통제해야 합니다.
 
 ## 기본 Handoff 흐름
 
@@ -269,7 +270,7 @@ bin/baton finish HO-YYYY-MM-DD-001 \
   --commit HEAD
 ```
 
-`finish`는 lifecycle 완료를 기록합니다. 완료된 검수나 분석 결과는 `--outcome pass|fail|conditional|inconclusive`로 구분하고, 성공을 전제로 한 후행 작업을 막아야 하는 non-pass 결과에는 `--blocking`을 사용합니다. 필요하면 `--outcome-cr CR-...`로 판단 CR을 연결합니다. 반면 handoff 자체가 exit criteria를 충족하지 못해 재시도 또는 취소 심사가 필요하면 `finish --outcome fail`이 아니라 `baton fail`을 사용합니다.
+`finish`는 lifecycle 완료를 기록합니다. 완료된 검수나 분석 결과는 `--outcome pass|fail|conditional|inconclusive`로 구분하고, 성공을 전제로 한 후행 작업을 막아야 하는 non-pass 결과에는 `--blocking`을 사용합니다. 판단 CR이 여러 개면 `--outcome-cr CR-...`를 반복합니다. 첫 CR은 호환용 `outcome_cr_id`로 유지되지만 blocking 해소 여부는 연결된 모든 CR을 기준으로 판단합니다. 완료 후 독립 blocker가 더 발견되면 `handoff.evidence_correct` 권한 role이 `handoff outcome-cr-link HO-... --cr CR-... --role planning --reason "..."`로 append-only 연결을 추가합니다. 반면 handoff 자체가 exit criteria를 충족하지 못해 재시도 또는 취소 심사가 필요하면 `finish --outcome fail`이 아니라 `baton fail`을 사용합니다.
 
 명시한 `--commit`은 로컬 Git commit으로 해석되어 canonical full ID로 저장됩니다. 외부 또는 아직 fetch하지 않은 reference를 의도적으로 기록하려면 `--allow-unresolved-commit`과 `--unresolved-reason`을 함께 사용해야 합니다. 잘못 기록한 완료 commit은 원 행을 수정하지 말고 원 claimant 또는 `handoff.evidence_correct` 권한 role이 다음처럼 정정 이력을 추가합니다.
 
@@ -323,6 +324,8 @@ baton notify record HO-READY \
 ```
 
 실패하면 `--status failed --detail <사유>`를 기록하고 다음 후보를 시도하거나 기존 `wait`/`watch`로 복구합니다. 성공 기록은 target role이 stop 또는 shift 밖이면 거부됩니다. 호환성을 위해 DB에는 `sent`로 저장하지만 사람용 출력은 `host_accepted`로 표시하며, 이는 수신 task가 메시지를 읽거나 claim했다는 뜻이 아닙니다. `notify status HO-... --stale-after 15m`은 기존 `notification_state`와 함께 사실 기반 context, 최신 delivery attempt, recovery 횟수를 표시합니다. 최신 성공 전달이 stale이고 작업이 open/unclaimed이며 같은 recipient session과 shift가 유효할 때만 같은 task에 recovery follow-up을 한 번 보내고 `notify retry ... --notification <id> --reason stale_unclaimed --status sent|failed`로 결과를 기록할 수 있습니다. 이 명령도 메시지를 직접 보내지 않으며 실패 recovery도 1회 한도를 소비합니다. 이후에는 반복 broadcast하지 않고 `wait`/`watch`로 복구합니다. 메시지는 claim이 아니며 새 task나 subagent를 만들거나 Baton에 없는 작업을 지시해서는 안 됩니다.
+
+host-accepted 이후 수신 측 terminal 실패가 외부에서 확인되면 `notification.observe` 권한이 있는 planning/SM role이 `notify observe HO-... --notification <id> --result execution_failed --reason-class policy_blocked`로 1회 기록할 수 있습니다. Result와 reason class는 CLI의 고정 목록만 허용되고 원문 host 오류나 prompt는 저장하지 않습니다. 이 관찰은 `notify list`와 `notify status`에 표시되는 감사 정보일 뿐 delivery, recovery, claim, handoff 상태를 변경하지 않습니다.
 
 `notify list`는 최신 운영 기록이 host 출력 제한보다 먼저 보이도록 무제한 newest-first를 기본으로 사용합니다. 출력량은 `--limit 20`처럼 제한하고, 시간순 전체 감사에는 `--order oldest`를 명시합니다. `--after-id`와 `--before-id`는 배타적 ID 경계이며 `--recovery-only`, `--job`, `--status`, `--format json`과 조합할 수 있습니다. 이전 페이지는 `--before-id <직전 페이지의 가장 작은 ID> --limit <개수>`로 조회합니다.
 
@@ -509,7 +512,7 @@ bin/baton migrate
 bin/baton migrate --check
 ```
 
-Migration은 version이 지정되어 있고 transaction 단위로 실행되며 반복 실행할 수 있습니다. 기존 handoff, CR, event, control, role, permission 데이터는 보존되고 실패한 migration은 rollback됩니다. Schema v8은 CR hash 필드를 추가하지만 과거 승인 본문의 hash를 추측하지 않습니다. Schema v12는 기존 job과 notification을 attempt 1로 보존하고 retry 세대 및 명시적인 implementation 대체 관계를 추가합니다. Schema v13은 완료 결과와 append-only 증거 정정을 추가하며 기존 완료 job은 `completion_outcome=unspecified`, 기존 commit은 `legacy_unchecked`로 보존합니다. Schema v14는 기존 notification을 보존하고 delivery attempt 순서 및 명시적인 recovery 관계를 추가합니다. DB보다 오래된 Baton binary는 더 새로운 schema를 수정할 수 없습니다.
+Migration은 version이 지정되어 있고 transaction 단위로 실행되며 반복 실행할 수 있습니다. 기존 handoff, CR, event, control, role, permission 데이터는 보존되고 실패한 migration은 rollback됩니다. Schema v8은 CR hash 필드를 추가하지만 과거 승인 본문의 hash를 추측하지 않습니다. Schema v12는 기존 job과 notification을 attempt 1로 보존하고 retry 세대 및 명시적인 implementation 대체 관계를 추가합니다. Schema v13은 완료 결과와 append-only 증거 정정을 추가하며 기존 완료 job은 `completion_outcome=unspecified`, 기존 commit은 `legacy_unchecked`로 보존합니다. Schema v14는 기존 notification을 보존하고 delivery attempt 순서 및 명시적인 recovery 관계를 추가합니다. Schema v15는 기존 `outcome_cr_id`를 첫 ordered link로 백필하고 다중 outcome CR과 제한된 notification observation을 추가하며 추가 관계나 결과를 추측하지 않습니다. DB보다 오래된 Baton binary는 더 새로운 schema를 수정할 수 없습니다.
 
 일반 workflow 명령은 pending migration을 자동 적용하지 않습니다. `baton migrate`가 변경 전에 검증된 backup을 만들며, migration이 필요한 DB에 일반 명령을 실행하면 명시적으로 실패합니다. Schema migration 5는 생성 및 최근 migration에 사용된 Baton 버전을 진단 정보로 기록하지만 호환성은 계속 `schema_migrations`로 판단합니다. `project info`와 `upgrade preflight`의 `cli_schema_compatible`, `database_schema_current`, `migration_required`, `workflow_commands_ready`로 현재 실행 가능 여부를 판단합니다.
 

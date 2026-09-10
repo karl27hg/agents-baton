@@ -16,6 +16,7 @@
 - `role_aliases`: 표준 role로 변환되는 별칭
 - `role_permissions`: role에 부여된 workflow 권한
 - `handoff_jobs`: handoff의 기본 작업 record
+- `handoff_outcome_crs`: 완료 결과에 연결된 ordered CR 관계
 - `handoff_evidence_corrections`: 완료 commit 증거의 append-only 정정 이력
 - `handoff_dependencies`: handoff job 사이의 의존성
 - `workflow_gates`: 미래 또는 수동 해제 workflow stage를 위한 named barrier
@@ -29,6 +30,7 @@
 - `agent_sessions`: stable agent profile의 opt-in runtime host thread 및 model metadata
 - `agent_workstreams`: role 내부의 세부 작업 라우팅 자격
 - `handoff_notifications`: peer thread message 전달 결과 감사 기록
+- `notification_observations`: host acceptance 이후 확인된 제한된 수신 측 결과
 - `workspace_events`: handoff 전환의 선택적 Git commit provenance와 정책 결과
 - `change_requests`: CR workflow 상태와 Markdown 파일 참조
 - `cr_events`: CR 상태 변경 감사 로그
@@ -73,6 +75,8 @@
 11 workstream_routing
 12 retry_and_replacement_tracking
 13 completion_evidence
+14 notification_recovery
+15 outcome_links_and_notification_observations
 14 notification_recovery
 ```
 
@@ -202,8 +206,8 @@ Primary key:
 
 Seed 권한:
 
-- `init` 또는 각 권한을 도입한 migration 시 `sm`은 모든 CR 권한, `handoff.cancel`, `handoff.register`, `handoff.evidence_correct`, `gate.manage`, `workspace.override`를 받습니다.
-- 신규 프로젝트의 `planning`은 실패 및 blocking 완료 결과 결정에 필요한 CR 심사 권한과 `handoff.cancel`, `handoff.register`, `handoff.evidence_correct`를 받습니다.
+- `init` 또는 각 권한을 도입한 migration 시 `sm`은 모든 CR 권한, `handoff.cancel`, `handoff.register`, `handoff.evidence_correct`, `notification.observe`, `gate.manage`, `workspace.override`를 받습니다.
+- 신규 프로젝트의 `planning`은 실패 및 blocking 완료 결과 결정에 필요한 CR 심사 권한과 `handoff.cancel`, `handoff.register`, `handoff.evidence_correct`, `notification.observe`를 받습니다.
 - Migration 7은 기존 프로젝트의 등록 동작을 보존하기 위해 이미 존재하는 모든 active role에 `handoff.register`를 부여합니다. SM은 프로젝트 정책 검토 후 이 호환 권한을 철회할 수 있습니다.
 
 알려진 권한:
@@ -219,6 +223,7 @@ cr.mark_implemented
 handoff.cancel
 handoff.register
 handoff.evidence_correct
+notification.observe
 gate.manage
 workspace.override
 ```
@@ -257,7 +262,7 @@ workspace.override
 | `related_commit_resolution_reason` | `text` | 아니오 | 명시적으로 unresolved reference를 허용한 감사 사유입니다. |
 | `completion_outcome` | `text` | 예 | `unspecified`, `pass`, `fail`, `conditional`, `inconclusive` 중 하나입니다. |
 | `completion_blocking` | `integer` | 예 | non-pass 완료 결과가 성공 의존 작업 전에 planner/reviewer 판단을 요구하면 `1`입니다. |
-| `outcome_cr_id` | `text` | 아니오 | 완료 결과 판단을 기록하는 기존 CR ID입니다. |
+| `outcome_cr_id` | `text` | 아니오 | 첫 outcome CR을 보존하는 호환성 projection입니다. 전체 관계는 `handoff_outcome_crs`를 사용합니다. |
 
 허용되는 `status` 값:
 
@@ -287,7 +292,7 @@ cancelled
 
 `finish`와 `completion_outcome`은 서로 다른 차원을 표현합니다. `finished`는 배정된 작업이 끝나 증거를 만들었다는 뜻이므로 완료된 검수는 `completion_outcome=fail`일 수 있습니다. handoff 자체가 exit criteria를 충족하지 못해 failure CR의 retry/cancel 판단이 필요하면 lifecycle `failed`를 사용합니다. `completion_blocking=1`은 `fail`, `conditional`, `inconclusive`에서만 허용됩니다.
 
-RC7은 `completion_blocking`을 불변으로 유지하고 현재 `outcome_cr_id` 관계에서 `open_cr`, `implemented_cr`, `terminal_unimplemented_cr`, `no_outcome_cr` context를 파생합니다. 기존 `outcome.blocking`과 report `blocking_outcomes`는 역사적 누적 총계로 유지됩니다. rejected/cancelled/superseded CR은 해결로 추론하지 않고 terminal-unimplemented로 분류합니다. Schema migration이나 backfill은 감사되지 않은 결정을 만들지 않습니다.
+Schema v15는 `completion_blocking`을 불변으로 유지하고 `handoff_outcome_crs`의 모든 ordered 관계에서 `open_cr`, `implemented_cr`, `terminal_unimplemented_cr`, `no_outcome_cr` context를 파생합니다. 하나라도 open CR이면 blocking context는 open으로 유지되며 모든 연결 CR이 implemented일 때만 implemented로 바뀝니다. 기존 `outcome.blocking`, report `blocking_outcomes`, 첫 link `outcome_cr_id`는 호환성 projection입니다. rejected/cancelled/superseded CR은 해결로 추론하지 않고 terminal-unimplemented로 분류합니다.
 
 명시적 완료 commit은 로컬 Git commit으로 해석되어 canonical ID로 저장됩니다. unresolved reference는 명시적인 override와 사유가 필요합니다. Schema v13은 과거 완료 행을 `completion_outcome=unspecified`로 보존하고, 기존 commit reference는 검증 여부를 추측하지 않고 `legacy_unchecked`로 표시합니다.
 
@@ -303,6 +308,12 @@ objective=Implement the approved upload follow-up.
 exit_criteria=The approved behavior is implemented and verified.
 created_at=2026-06-02 09:00:00 UTC
 ```
+
+## `handoff_outcome_crs`
+
+하나의 완료 결과에 연결된 모든 CR을 순서대로 저장합니다. `(job_id, cr_id)`는 중복될 수 없고 `position`은 handoff 안에서 유일한 1-based 순서입니다. `link_source`는 `finish`, `post_completion`, `migration` 중 하나이며 actor, reason, 생성 시각을 함께 보존합니다.
+
+초기 관계는 `finish --outcome-cr`를 반복해 기록합니다. 완료 후 추가 blocker가 발견되면 `handoff.evidence_correct` 권한 role만 finished blocking handoff에 `handoff outcome-cr-link`를 사용할 수 있습니다. 기존 link는 수정하지 않으며 중복을 거부합니다. Migration 15는 기존 non-null `handoff_jobs.outcome_cr_id`만 position 1, `link_source=migration`으로 백필하고 다른 관계를 추측하지 않습니다.
 
 ## `handoff_evidence_corrections`
 
@@ -634,6 +645,12 @@ Schema v14는 `(job_id, attempt)`마다 일반 host-accepted row를 하나만 �
 
 `notify targets`는 ready 직접 후속 작업을 처리하고 `notify candidates`는 선행 edge를 요구하거나 만들어내지 않고 이미 open인 handoff 하나를 처리합니다. 두 명령은 workstream, recipient capacity와 프로젝트 로컬 stop/shift control을 따릅니다. 성공 `notify record`도 이 control을 다시 확인합니다. `notify retry`는 최신 host-accepted record가 stale이고 handoff가 open/unclaimed이며 원 recipient session이 계속 active/eligible이고 target shift도 active일 때만 허용됩니다. 같은 recipient에 대한 recovery 결과를 한 번 기록하지만 host message를 직접 보내지는 않습니다. 실패 recovery도 recovery 한도를 소비하며 이후에는 영속 polling fallback을 사용합니다. 심사된 handoff `retry`는 계속 workflow attempt를 증가시키므로 수정 baseline에는 새로운 일반 알림 경계가 생깁니다. 어떤 notification 명령도 handoff를 claim하지 않습니다. 인증 token과 message 본문은 저장하지 않습니다.
 
+## `notification_observations`
+
+Host-accepted notification 이후 외부에서 확인된 terminal 수신 결과를 notification마다 최대 한 번 append-only로 기록합니다. `result`는 `execution_failed`, `execution_cancelled`, `recipient_unreachable` 중 하나이고 `reason_class`는 `policy_blocked`, `host_error`, `timeout`, `cancelled`, `unknown` 중 하나입니다. Actor role/id와 시각을 보존합니다.
+
+`notify observe`는 `notification.observe` 권한이 필요하며 migration 15는 이 권한을 `sm`과 `planning`에만 부여합니다. 실패 delivery에는 관찰을 추가할 수 없고 free-form detail, 원문 host error, prompt, secret을 받지 않습니다. 관찰은 `notify list`, `notify status`, handoff event 감사에 표시되지만 delivery, recovery allowance, claim ownership, handoff state를 바꾸지 않습니다.
+
 ## `change_requests`
 
 용도:
@@ -797,6 +814,7 @@ idx_handoff_dependencies_job on handoff_dependencies(job_id)
 idx_handoff_dependencies_dep on handoff_dependencies(depends_on_job_id)
 idx_handoff_events_job on handoff_events(job_id)
 idx_handoff_evidence_corrections_job on handoff_evidence_corrections(job_id, id)
+idx_handoff_outcome_crs_cr on handoff_outcome_crs(cr_id, job_id)
 idx_handoff_gate_dependencies_job on handoff_gate_dependencies(job_id)
 idx_handoff_gate_dependencies_gate on handoff_gate_dependencies(gate_name)
 idx_gate_events_gate on gate_events(gate_name)
@@ -819,6 +837,7 @@ idx_cr_handoff_supersessions_replacement on cr_handoff_supersessions(cr_id, repl
 - `dependencies.depends_on_job_id`: reverse dependency 분석을 빠르게 처리합니다.
 - `events.job_id`: 특정 job의 event history 조회를 빠르게 처리합니다.
 - `handoff_evidence_corrections`: 유효 증거 조회와 순서가 보장된 감사 출력을 빠르게 처리합니다.
+- `handoff_outcome_crs`: CR에서 완료 결과로의 역방향 조회를 빠르게 처리합니다.
 - `handoff_gate_dependencies`: job별 Gate 확인과 Gate별 dependent job 조회를 빠르게 처리합니다.
 - `gate_events.gate_name`: Gate 감사 이력 조회를 빠르게 처리합니다.
 - `agent_sessions`: profile별 active endpoint uniqueness와 role별 후보 조회를 처리합니다.

@@ -15,9 +15,9 @@ This checklist is mandatory before approving or publishing any Baton version.
 
 A release is blocked when documented behavior differs from the implementation, a bundled guide differs from its canonical document, a migration path is untested, or a required test fails. Fix the gap before version approval; do not defer the correction to the next release.
 
-## RC9 Stable Qualification
+## v0.6.0 Stable Monitoring
 
-Do not promote `v0.6.0rc9` to the stable `v0.6.0` release until RC9 has completed at least two hours of representative operation in another project. Record the observation as project feedback and verify that recent notification audit filters work against accumulated real history.
+The user explicitly approved stable `v0.6.0` after the full automated release gate. Continue representative-project monitoring of multi-CR blocking projections and bounded notification observations. Publish any correction as a new patch version; never move the stable tag.
 
 Stable promotion is blocked by data loss, migration or compatibility failure, dependency-order inversion, duplicate claim, CR integrity failure, duplicate recovery delivery, incorrect notification filtering, or any other defect that makes normal Baton state unsafe or materially misleading. Minor presentation issues may be deferred only when their behavior and workaround are documented. Repeat the full release gate and documentation-gap review immediately before stable approval.
 

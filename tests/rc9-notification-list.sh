@@ -128,6 +128,6 @@ for invalid in \
   fi
 done
 
-"$CLI" --db "$DB" migrate --check | grep 'schema=14' >/dev/null
+"$CLI" --db "$DB" migrate --check | grep 'schema=15' >/dev/null
 
 echo "OK RC9 notification list filters db=$DB"

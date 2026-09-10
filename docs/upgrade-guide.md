@@ -24,30 +24,33 @@ baton project info
 
 Review this guide, the bundled changelog entries newer than the project's previous version, and the version-matched bootstrap, worker, or planner guide before updating project instructions and explicitly resuming the applicable shifts. A shared pipx update never migrates every project automatically.
 
-## Current Release: 0.6.0rc9
+## Current Release: 0.6.0
 
-RC9 keeps schema v14 unchanged. Projects already migrated by RC8 need only `baton migrate --check`; projects upgrading from RC7 or earlier must still follow the normal migration sequence, which preserves existing notification, handoff, CR, role, control, and audit rows.
+Baton 0.6.0 upgrades project databases from schema v14 to v15. Keep the project stopped, run the normal preflight before replacing the executable, and run `baton migrate` separately in every project before resuming agents. The additive migration preserves all workflow rows, backfills each existing non-null `handoff_jobs.outcome_cr_id` as the first ordered outcome link, and grants the newly introduced `notification.observe` permission only to `sm` and `planning`.
 
-Changes from RC8:
+Changes from RC9:
 
-- `notify list` now defaults to unlimited newest-first output so recent operational records appear first; use `--order oldest` for chronological history.
-- `notify list --limit N` provides an explicit bounded recent audit view without silently omitting rows by default.
-- `notify list --after-id ID` and `--before-id ID` provide exclusive, stable ID cursors that can be combined with ordering and limits.
-- `notify list --recovery-only` selects controlled recovery deliveries without post-processing JSON.
-- All new filters compose with `--job`, `--status`, and `--format json`; they do not modify notification records.
+- Repeat `finish --outcome-cr <CR-ID>` to record every CR associated with one completed result. The first value remains available through the legacy `outcome_cr_id` field.
+- Use `handoff outcome-cr-link <JOB> --cr <CR-ID> --role <ROLE> --reason <TEXT>` only when an authorized reviewer discovers another blocker after completion. It requires `handoff.evidence_correct`, appends a relationship and audit event, and never rewrites earlier links.
+- `status`, `handoff show`, `handoff list`, and `baton-report summary` now evaluate every linked outcome CR. A blocking result is resolved only when all linked CRs are `implemented`.
+- Use `notify observe` only for a verified terminal receiver-side result after a host-accepted notification. The command requires `notification.observe`, stores only fixed result and reason-class values, and does not modify delivery, recovery, claim, or handoff state.
 
-Recent recovery audit example:
+Examples:
 
 ```bash
-baton notify list --limit 20
-baton notify list --after-id 90 --recovery-only
+baton finish HO-... --role qa --evidence "..." --outcome fail --blocking \
+  --outcome-cr CR-...-001 --outcome-cr CR-...-002
+baton handoff outcome-cr-link HO-... --cr CR-...-003 \
+  --role planning --reason "Independent blocker found during review."
+baton notify observe HO-... --notification 42 --role planning \
+  --result execution_failed --reason-class policy_blocked
 ```
 
-Cursor boundaries are exclusive. `--after-id 90` starts at ID 91, while `--before-id 120` ends at ID 119. Use `--before-id <oldest-id-from-previous-page> --limit N` to page backward through older records. The new options affect only presentation and require no data migration.
+Allowed observation results are `execution_failed`, `execution_cancelled`, and `recipient_unreachable`. Allowed reason classes are `policy_blocked`, `host_error`, `timeout`, `cancelled`, and `unknown`. Do not put raw host errors, prompts, or secrets in Baton; this command intentionally has no free-form detail option. One notification accepts at most one observation.
 
-## Stable Qualification
+## Stable Monitoring
 
-RC9 must run in a representative project for at least two hours before promotion to stable `v0.6.0`. Review the resulting feedback and accumulated notification history. Do not promote when operation reveals data loss, migration or compatibility failure, dependency-order inversion, duplicate claim, CR integrity failure, duplicate recovery delivery, incorrect notification filtering, or another state-safety defect. Run the complete release and documentation-gap checks again immediately before stable approval.
+The stable release passed the complete automated suite, including isolated pipx lifecycle, schema v14-to-v15 migration, multi-project isolation, multi-CR blocker projections, and bounded notification observations. Continue monitoring representative projects for data loss, migration or compatibility failure, dependency-order inversion, duplicate claim, CR integrity failure, incorrect blocker resolution, conflicting observation records, or another state-safety defect. Apply future fixes through a patch release rather than moving the `v0.6.0` tag.
 
 ## Project AGENTS.md Review
 
@@ -61,6 +64,8 @@ Baton does not edit a consuming project's `AGENTS.md`. The SM or project owner m
 - Do not create subagents, child tasks, parallel agent sessions, or delegated background agents while operating under Baton. Delegate only through registered Baton handoffs.
 - Treat host messages as hints. Inspect and claim the referenced Baton work before editing.
 - Record every attempted host message immediately. Use only one controlled stale recovery and fall back to `wait` or `watch` afterward.
+- Repeat `finish --outcome-cr` for every known blocker; only planning/SM may append a later blocker link under `handoff.evidence_correct`.
+- Only planning/SM records verified receiver-side failures with `notify observe`; use fixed classifications and never store raw host errors.
 ```
 
 Project-specific role names, workstreams, approval authority, Git policy, shift authority, and notification opt-in rules still belong in the project's own instructions. Do not replace stricter project policy with this generic block.

@@ -155,7 +155,7 @@ PY
 "$CLI" --db "$OLD_DB" upgrade preflight \
   | grep 'schema_version: 11' >/dev/null
 "$CLI" --db "$OLD_DB" migrate \
-  | grep 'schema=11->14 applied=12:retry_and_replacement_tracking,13:completion_evidence,14:notification_recovery' >/dev/null
-"$CLI" --db "$OLD_DB" migrate --check | grep 'schema=14' >/dev/null
+  | grep 'schema=11->15 applied=12:retry_and_replacement_tracking,13:completion_evidence,14:notification_recovery,15:outcome_links_and_notification_observations' >/dev/null
+"$CLI" --db "$OLD_DB" migrate --check | grep 'schema=15' >/dev/null
 
 echo "OK RC4 operations routed=$ROUTED_JOB notification=$TARGET_JOB cr=$CR_ID db=$DB"
