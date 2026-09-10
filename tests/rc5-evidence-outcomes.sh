@@ -177,13 +177,14 @@ with cli.connect(str(path), create=True) as con:
 PY
 
 "$CLI" --db "$OLD_DB" project info | grep '^schema_version: 12$' >/dev/null
-"$CLI" --db "$OLD_DB" project info | grep '^supported_schema_version: 13$' >/dev/null
+"$CLI" --db "$OLD_DB" project info | grep '^supported_schema_version: 15$' >/dev/null
 "$CLI" --db "$OLD_DB" project info | grep '^database_schema_current: false$' >/dev/null
 "$CLI" --db "$OLD_DB" project info | grep '^migration_required: true$' >/dev/null
 "$CLI" --db "$OLD_DB" project info | grep '^cli_schema_compatible: true$' >/dev/null
 "$CLI" --db "$OLD_DB" project info | grep '^workflow_commands_ready: false$' >/dev/null
 "$CLI" --db "$OLD_DB" upgrade preflight | grep '^migration_required: true$' >/dev/null
-"$CLI" --db "$OLD_DB" migrate | grep 'schema=12->13 applied=13:completion_evidence' >/dev/null
+"$CLI" --db "$OLD_DB" migrate \
+  | grep 'schema=12->15 applied=13:completion_evidence,14:notification_recovery,15:outcome_links_and_notification_observations' >/dev/null
 "$CLI" --db "$OLD_DB" handoff show HO-2026-01-01-001 \
   | grep '^related_commit_resolution: legacy_unchecked$' >/dev/null
 "$CLI" --db "$OLD_DB" handoff show HO-2026-01-01-001 \

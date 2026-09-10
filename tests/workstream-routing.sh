@@ -187,7 +187,7 @@ import sqlite3
 import sys
 
 with sqlite3.connect(sys.argv[1]) as con:
-    con.execute("delete from schema_migrations where version in (11, 12, 13)")
+    con.execute("delete from schema_migrations where version in (11, 12, 13, 14, 15)")
 PY
 if "$CLI" --db "$DB" migrate >/dev/null 2>&1; then
   echo "ERROR: migration accepted an active claimed CR review" >&2

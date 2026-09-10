@@ -26,7 +26,7 @@ grep -- '--source-db SOURCE_DB' "$TMP/migrate-command.txt" >/dev/null
 grep -- '--plan-token PLAN_TOKEN' "$TMP/migrate-command.txt" >/dev/null
 "$CLI" help upgrade preflight | grep 'global maintenance stop' >/dev/null
 
-"$CLI" help guide show | grep '{bootstrap,worker,planner,git}' >/dev/null
+"$CLI" help guide show | grep '{bootstrap,worker,planner,git,upgrade,changelog}' >/dev/null
 "$CLI" help workspace check | grep -- '--job JOB_ID' >/dev/null
 "$CLI" help workspace events | grep -- '--limit LIMIT' >/dev/null
 "$CLI" help handoff successors | grep 'without assigning work' >/dev/null
@@ -41,8 +41,18 @@ grep -- '--plan-token PLAN_TOKEN' "$TMP/migrate-command.txt" >/dev/null
 "$CLI" help cancel-withdraw | grep -- '--reason REASON' >/dev/null
 "$CLI" help notify targets | grep -- '--from-agent FROM_AGENT' >/dev/null
 "$CLI" help notify targets | grep 'outside_shift' >/dev/null
+"$CLI" help notify candidates | grep 'without requiring a' >/dev/null
+"$CLI" help notify candidates | grep 'predecessor edge' >/dev/null
 "$CLI" help notify record | grep -- '--status {sent,failed}' >/dev/null
+"$CLI" help notify retry | grep -- '--notification NOTIFICATION' >/dev/null
+"$CLI" help notify retry | grep -- '--stale-after STALE_AFTER' >/dev/null
 "$CLI" help notify list | grep -- '--job JOB_ID' >/dev/null
+"$CLI" help notify list | grep -- '--order {oldest,newest}' >/dev/null
+"$CLI" help notify list | grep 'default: newest' >/dev/null
+"$CLI" help notify list | grep -- '--limit LIMIT' >/dev/null
+"$CLI" help notify list | grep -- '--after-id AFTER_ID' >/dev/null
+"$CLI" help notify list | grep -- '--before-id BEFORE_ID' >/dev/null
+"$CLI" help notify list | grep -- '--recovery-only' >/dev/null
 "$CLI" help notify status | grep -- '--stale-after STALE_AFTER' >/dev/null
 "$CLI" help watch | grep 'CR review first' >/dev/null
 "$CLI" help watch | grep -- '--explain' >/dev/null

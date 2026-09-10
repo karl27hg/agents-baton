@@ -116,7 +116,7 @@ with sqlite3.connect(sys.argv[1]) as con:
 PY
 
 BEFORE="$(snapshot_workflow_data "$DB")"
-"$CLI" --db "$DB" migrate | grep 'schema=0->13 applied=1:initial_schema,2:handoff_cancel_permission,3:named_gates,4:waiter_leases,5:database_metadata,6:workspace_provenance,7:handoff_failures,8:cr_body_integrity,9:plan_revision_controls,10:opt_in_thread_notifications,11:workstream_routing,12:retry_and_replacement_tracking,13:completion_evidence' >/dev/null
+"$CLI" --db "$DB" migrate | grep 'schema=0->15 applied=1:initial_schema,2:handoff_cancel_permission,3:named_gates,4:waiter_leases,5:database_metadata,6:workspace_provenance,7:handoff_failures,8:cr_body_integrity,9:plan_revision_controls,10:opt_in_thread_notifications,11:workstream_routing,12:retry_and_replacement_tracking,13:completion_evidence,14:notification_recovery,15:outcome_links_and_notification_observations' >/dev/null
 AFTER="$(snapshot_workflow_data "$DB")"
 if [[ "$BEFORE" != "$AFTER" ]]; then
   echo "ERROR: workflow data changed during migration" >&2
@@ -149,14 +149,16 @@ if row != [
     (11, "workstream_routing"),
     (12, "retry_and_replacement_tracking"),
     (13, "completion_evidence"),
+    (14, "notification_recovery"),
+    (15, "outcome_links_and_notification_observations"),
 ]:
     raise SystemExit(f"unexpected migration records: {row}")
 PY
 
-"$CLI" --db "$DB" migrate | grep 'schema=13->13 applied=none' >/dev/null
-"$CLI" --db "$DB" migrate --check | grep 'schema=13' >/dev/null
+"$CLI" --db "$DB" migrate | grep 'schema=15->15 applied=none' >/dev/null
+"$CLI" --db "$DB" migrate --check | grep 'schema=15' >/dev/null
 chmod 444 "$DB"
-"$CLI" --db "$DB" migrate --check | grep 'schema=13' >/dev/null
+"$CLI" --db "$DB" migrate --check | grep 'schema=15' >/dev/null
 chmod 644 "$DB"
 if [[ "$(snapshot_workflow_data "$DB")" != "$AFTER" ]]; then
   echo "ERROR: repeated migration changed workflow data" >&2
@@ -176,7 +178,7 @@ import sqlite3
 import sys
 
 with sqlite3.connect(sys.argv[1]) as con:
-    con.execute("delete from schema_migrations where version in (10, 11, 12, 13)")
+    con.execute("delete from schema_migrations where version in (10, 11, 12, 13, 14, 15)")
     con.execute("drop table handoff_notifications")
     con.execute("drop table agent_sessions")
 PY
@@ -219,7 +221,7 @@ import sys
 with sqlite3.connect(sys.argv[1]) as con:
     con.execute("delete from waiter_leases")
 PY
-"$CLI" --db "$SAFETY_DB" migrate | grep 'schema=9->13 applied=10:opt_in_thread_notifications,11:workstream_routing,12:retry_and_replacement_tracking,13:completion_evidence' >/dev/null
+"$CLI" --db "$SAFETY_DB" migrate | grep 'schema=9->15 applied=10:opt_in_thread_notifications,11:workstream_routing,12:retry_and_replacement_tracking,13:completion_evidence,14:notification_recovery,15:outcome_links_and_notification_observations' >/dev/null
 
 python3 - "$DB" <<'PY'
 import sqlite3
@@ -259,13 +261,13 @@ with sqlite3.connect(sys.argv[1]) as con:
     con.execute("alter table change_requests drop column review_started_at")
     con.execute("alter table change_requests drop column review_claimed_by")
     con.execute("alter table change_requests drop column reviewer_workstream")
-    con.execute("delete from schema_migrations where version in (11, 12, 13)")
+    con.execute("delete from schema_migrations where version in (11, 12, 13, 14, 15)")
 PY
 if "$CLI" --db "$V10_DB" migrate --check >/dev/null 2>&1; then
   echo "ERROR: migrate --check accepted a v10 database" >&2
   exit 1
 fi
-"$CLI" --db "$V10_DB" migrate | grep 'schema=10->13 applied=11:workstream_routing,12:retry_and_replacement_tracking,13:completion_evidence' >/dev/null
+"$CLI" --db "$V10_DB" migrate | grep 'schema=10->15 applied=11:workstream_routing,12:retry_and_replacement_tracking,13:completion_evidence,14:notification_recovery,15:outcome_links_and_notification_observations' >/dev/null
 python3 - "$V10_DB" "$V10_JOB" <<'PY'
 import sqlite3
 import sys
@@ -308,22 +310,27 @@ import sqlite3
 import sys
 
 with sqlite3.connect(sys.argv[1]) as con:
-    con.execute("drop index idx_handoff_notifications_sent_attempt")
+    con.execute("drop index idx_handoff_notifications_delivery_attempt")
+    con.execute("drop index idx_handoff_notifications_initial_sent")
+    con.execute("drop index idx_handoff_notifications_recovery")
     con.execute("drop table cr_handoff_supersessions")
+    con.execute("alter table handoff_notifications drop column recovery_reason")
+    con.execute("alter table handoff_notifications drop column retry_of_notification_id")
+    con.execute("alter table handoff_notifications drop column delivery_attempt")
     con.execute("alter table handoff_notifications drop column attempt")
     con.execute("alter table handoff_jobs drop column attempt")
     con.execute(
         "create unique index idx_handoff_notifications_sent_job "
         "on handoff_notifications(job_id) where delivery_status = 'sent'"
     )
-    con.execute("delete from schema_migrations where version in (12, 13)")
+    con.execute("delete from schema_migrations where version in (12, 13, 14, 15)")
 PY
 if "$CLI" --db "$V11_DB" migrate --check >/dev/null 2>&1; then
   echo "ERROR: migrate --check accepted a v11 database" >&2
   exit 1
 fi
 "$CLI" --db "$V11_DB" migrate \
-  | grep 'schema=11->13 applied=12:retry_and_replacement_tracking,13:completion_evidence' >/dev/null
+  | grep 'schema=11->15 applied=12:retry_and_replacement_tracking,13:completion_evidence,14:notification_recovery,15:outcome_links_and_notification_observations' >/dev/null
 python3 - "$V11_DB" "$V11_JOB" <<'PY'
 import sqlite3
 import sys
@@ -369,7 +376,7 @@ with sqlite3.connect(sys.argv[1]) as con:
 if exists:
     raise SystemExit("normal command recreated the migration table")
 PY
-"$CLI" --db "$AUTO_DB" migrate | grep 'schema=0->13 applied=1:initial_schema,2:handoff_cancel_permission,3:named_gates,4:waiter_leases,5:database_metadata,6:workspace_provenance,7:handoff_failures,8:cr_body_integrity,9:plan_revision_controls,10:opt_in_thread_notifications,11:workstream_routing,12:retry_and_replacement_tracking,13:completion_evidence' >/dev/null
+"$CLI" --db "$AUTO_DB" migrate | grep 'schema=0->15 applied=1:initial_schema,2:handoff_cancel_permission,3:named_gates,4:waiter_leases,5:database_metadata,6:workspace_provenance,7:handoff_failures,8:cr_body_integrity,9:plan_revision_controls,10:opt_in_thread_notifications,11:workstream_routing,12:retry_and_replacement_tracking,13:completion_evidence,14:notification_recovery,15:outcome_links_and_notification_observations' >/dev/null
 test "$(find "$TMP/backups" -type f -name '*.sqlite3' | wc -l | tr -d ' ')" -ge 1
 
 UPGRADE_DB="$TMP/upgrade-v030.sqlite3"
@@ -379,7 +386,7 @@ import sqlite3
 import sys
 
 with sqlite3.connect(sys.argv[1]) as con:
-    con.execute("delete from schema_migrations where version in (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13)")
+    con.execute("delete from schema_migrations where version in (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)")
     con.execute("drop table handoff_notifications")
     con.execute("drop table agent_sessions")
     con.execute("drop table handoff_failure_reviews")
@@ -401,7 +408,7 @@ if "$CLI" --db "$UPGRADE_DB" migrate --check >/dev/null 2>&1; then
   echo "ERROR: migrate --check accepted a pending v0.3.0 database" >&2
   exit 1
 fi
-"$CLI" --db "$UPGRADE_DB" migrate | grep 'schema=2->13 applied=3:named_gates,4:waiter_leases,5:database_metadata,6:workspace_provenance,7:handoff_failures,8:cr_body_integrity,9:plan_revision_controls,10:opt_in_thread_notifications,11:workstream_routing,12:retry_and_replacement_tracking,13:completion_evidence' >/dev/null
+"$CLI" --db "$UPGRADE_DB" migrate | grep 'schema=2->15 applied=3:named_gates,4:waiter_leases,5:database_metadata,6:workspace_provenance,7:handoff_failures,8:cr_body_integrity,9:plan_revision_controls,10:opt_in_thread_notifications,11:workstream_routing,12:retry_and_replacement_tracking,13:completion_evidence,14:notification_recovery,15:outcome_links_and_notification_observations' >/dev/null
 "$CLI" --db "$UPGRADE_DB" role permission-list sm | grep 'handoff.cancel' >/dev/null
 "$CLI" --db "$UPGRADE_DB" role permission-list sm | grep 'gate.manage' >/dev/null
 "$CLI" --db "$UPGRADE_DB" role permission-list sm | grep 'workspace.override' >/dev/null
@@ -409,7 +416,7 @@ if "$CLI" --db "$UPGRADE_DB" role permission-list sm | grep 'cr.approve' >/dev/n
   echo "ERROR: migration restored a project-revoked permission" >&2
   exit 1
 fi
-"$CLI" --db "$UPGRADE_DB" migrate --check | grep 'schema=13' >/dev/null
+"$CLI" --db "$UPGRADE_DB" migrate --check | grep 'schema=15' >/dev/null
 python3 - "$UPGRADE_DB" "$BATON_VERSION" <<'PY'
 import sqlite3
 import sys
@@ -434,7 +441,7 @@ import sqlite3
 import sys
 
 with sqlite3.connect(sys.argv[1]) as con:
-    con.execute("delete from schema_migrations where version in (6, 7, 8, 9, 10, 11, 12, 13)")
+    con.execute("delete from schema_migrations where version in (6, 7, 8, 9, 10, 11, 12, 13, 14, 15)")
     con.execute("drop table handoff_notifications")
     con.execute("drop table agent_sessions")
     con.execute("drop table handoff_failure_reviews")
@@ -447,7 +454,7 @@ if "$CLI" --db "$V5_DB" migrate --check >/dev/null 2>&1; then
   echo "ERROR: migrate --check accepted a pending schema v5 database" >&2
   exit 1
 fi
-"$CLI" --db "$V5_DB" migrate | grep 'schema=5->13 applied=6:workspace_provenance,7:handoff_failures,8:cr_body_integrity,9:plan_revision_controls,10:opt_in_thread_notifications,11:workstream_routing,12:retry_and_replacement_tracking,13:completion_evidence' >/dev/null
+"$CLI" --db "$V5_DB" migrate | grep 'schema=5->15 applied=6:workspace_provenance,7:handoff_failures,8:cr_body_integrity,9:plan_revision_controls,10:opt_in_thread_notifications,11:workstream_routing,12:retry_and_replacement_tracking,13:completion_evidence,14:notification_recovery,15:outcome_links_and_notification_observations' >/dev/null
 "$CLI" --db "$V5_DB" handoff show "$V5_JOB" | grep 'Preserve v5 handoff' >/dev/null
 "$CLI" --db "$V5_DB" role permission-list sm | grep 'workspace.override' >/dev/null
 
@@ -464,14 +471,14 @@ import sqlite3
 import sys
 
 with sqlite3.connect(sys.argv[1]) as con:
-    con.execute("delete from schema_migrations where version in (7, 8, 9, 10, 11, 12, 13)")
+    con.execute("delete from schema_migrations where version in (7, 8, 9, 10, 11, 12, 13, 14, 15)")
     con.execute("drop table handoff_notifications")
     con.execute("drop table agent_sessions")
     con.execute("drop table handoff_failure_reviews")
     con.execute("delete from role_permissions where permission = 'handoff.register'")
     con.execute("delete from role_permissions where role_id = 'planning' and permission = 'cr.approve'")
 PY
-"$CLI" --db "$V6_DB" migrate | grep 'schema=6->13 applied=7:handoff_failures,8:cr_body_integrity,9:plan_revision_controls,10:opt_in_thread_notifications,11:workstream_routing,12:retry_and_replacement_tracking,13:completion_evidence' >/dev/null
+"$CLI" --db "$V6_DB" migrate | grep 'schema=6->15 applied=7:handoff_failures,8:cr_body_integrity,9:plan_revision_controls,10:opt_in_thread_notifications,11:workstream_routing,12:retry_and_replacement_tracking,13:completion_evidence,14:notification_recovery,15:outcome_links_and_notification_observations' >/dev/null
 "$CLI" --db "$V6_DB" handoff show "$V6_JOB" | grep 'Preserve v6 handoff' >/dev/null
 "$CLI" --db "$V6_DB" role permission-list legacy-registrar | grep 'handoff.register' >/dev/null
 if "$CLI" --db "$V6_DB" role permission-list planning | grep 'cr.approve' >/dev/null; then
@@ -498,7 +505,7 @@ import sqlite3
 import sys
 
 with sqlite3.connect(sys.argv[1]) as con:
-    con.execute("delete from schema_migrations where version in (8, 9, 10, 11, 12, 13)")
+    con.execute("delete from schema_migrations where version in (8, 9, 10, 11, 12, 13, 14, 15)")
     con.execute("drop table handoff_notifications")
     con.execute("drop table agent_sessions")
     con.execute("alter table change_requests drop column approved_body_hash")
@@ -508,7 +515,7 @@ if "$CLI" --db "$V7_DB" migrate --check >/dev/null 2>&1; then
   echo "ERROR: migrate --check accepted a pending schema v7 database" >&2
   exit 1
 fi
-"$CLI" --db "$V7_DB" migrate | grep 'schema=7->13 applied=8:cr_body_integrity,9:plan_revision_controls,10:opt_in_thread_notifications,11:workstream_routing,12:retry_and_replacement_tracking,13:completion_evidence' >/dev/null
+"$CLI" --db "$V7_DB" migrate | grep 'schema=7->15 applied=8:cr_body_integrity,9:plan_revision_controls,10:opt_in_thread_notifications,11:workstream_routing,12:retry_and_replacement_tracking,13:completion_evidence,14:notification_recovery,15:outcome_links_and_notification_observations' >/dev/null
 python3 - "$V7_DB" <<'PY'
 import sqlite3
 import sys
@@ -538,7 +545,7 @@ import agents_baton.cli as cli
 
 db = sys.argv[2]
 with sqlite3.connect(db) as con:
-    con.execute("delete from schema_migrations where version in (5, 6, 7, 8, 9, 10, 11, 12, 13)")
+    con.execute("delete from schema_migrations where version in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)")
     con.execute("drop table handoff_notifications")
     con.execute("drop table agent_sessions")
     con.execute("drop table handoff_failure_reviews")

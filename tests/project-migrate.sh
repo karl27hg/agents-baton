@@ -53,7 +53,7 @@ test -L "$LEGACY_DB"
 test "$LEGACY_DB" -ef "$TARGET_DB"
 test -f "$LEGACY_PROJECT/.baton/project.json"
 test "$(find "$LEGACY_PROJECT/.baton/backups" -type f -name '*.sqlite3' | wc -l | tr -d ' ')" = "1"
-"$CLI" --db "$TARGET_DB" migrate --check | grep 'schema=13' >/dev/null
+"$CLI" --db "$TARGET_DB" migrate --check | grep 'schema=15' >/dev/null
 "$CLI" --db "$TARGET_DB" role list | grep '^migration-custom' >/dev/null
 POST_CHECK="$("$CLI" project migrate --check --project-root "$LEGACY_PROJECT")"
 printf '%s\n' "$POST_CHECK" | grep 'layout_move: no' >/dev/null
@@ -80,7 +80,9 @@ import sqlite3
 import sys
 
 with sqlite3.connect(sys.argv[1]) as con:
-    con.execute("delete from schema_migrations where version in (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13)")
+    con.execute("delete from schema_migrations where version in (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)")
+    con.execute("drop table notification_observations")
+    con.execute("drop table handoff_outcome_crs")
     con.execute("drop table handoff_notifications")
     con.execute("drop table agent_sessions")
     con.execute("drop table handoff_failure_reviews")
@@ -124,7 +126,7 @@ EXPLICIT_TOKEN="$("$CLI" project migrate --check \
   --project-root "$EXPLICIT_PROJECT" \
   --source-db "$EXPLICIT_DB" \
   --plan-token "$EXPLICIT_TOKEN" >/dev/null
-"$CLI" --db "$EXPLICIT_PROJECT/.baton/baton.sqlite3" migrate --check | grep 'schema=13' >/dev/null
+"$CLI" --db "$EXPLICIT_PROJECT/.baton/baton.sqlite3" migrate --check | grep 'schema=15' >/dev/null
 
 IN_PLACE_PROJECT="$TMP/in-place-project"
 IN_PLACE_DB="$IN_PLACE_PROJECT/.baton/baton.sqlite3"
@@ -134,7 +136,9 @@ import sqlite3
 import sys
 
 with sqlite3.connect(sys.argv[1]) as con:
-    con.execute("delete from schema_migrations where version in (5, 6, 7, 8, 9, 10, 11, 12, 13)")
+    con.execute("delete from schema_migrations where version in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)")
+    con.execute("drop table notification_observations")
+    con.execute("drop table handoff_outcome_crs")
     con.execute("drop table handoff_notifications")
     con.execute("drop table agent_sessions")
     con.execute("drop table handoff_failure_reviews")
@@ -148,7 +152,7 @@ printf '%s\n' "$IN_PLACE_CHECK" | grep 'pending_migrations: 5:database_metadata,
 "$CLI" project migrate --apply \
   --project-root "$IN_PLACE_PROJECT" \
   --plan-token "$IN_PLACE_TOKEN" >/dev/null
-"$CLI" --db "$IN_PLACE_DB" migrate --check | grep 'schema=13' >/dev/null
+"$CLI" --db "$IN_PLACE_DB" migrate --check | grep 'schema=15' >/dev/null
 test "$(find "$IN_PLACE_PROJECT/.baton/backups" -type f -name '*.sqlite3' | wc -l | tr -d ' ')" = "1"
 
 MISSING_PROJECT="$TMP/missing-project"

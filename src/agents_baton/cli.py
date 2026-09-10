@@ -78,6 +78,9 @@ GATE_PERMISSIONS = {
 WORKSPACE_PERMISSIONS = {
     "workspace.override",
 }
+NOTIFICATION_PERMISSIONS = {
+    "notification.observe",
+}
 FAILURE_REVIEW_PERMISSIONS = {
     "handoff.register",
     "cr.review",
@@ -87,7 +90,11 @@ FAILURE_REVIEW_PERMISSIONS = {
     "cr.mark_implemented",
 }
 KNOWN_PERMISSIONS = (
-    REVIEW_PERMISSIONS | HANDOFF_PERMISSIONS | GATE_PERMISSIONS | WORKSPACE_PERMISSIONS
+    REVIEW_PERMISSIONS
+    | HANDOFF_PERMISSIONS
+    | GATE_PERMISSIONS
+    | WORKSPACE_PERMISSIONS
+    | NOTIFICATION_PERMISSIONS
 )
 COMPLETION_OUTCOMES = {
     "unspecified",
@@ -96,7 +103,19 @@ COMPLETION_OUTCOMES = {
     "conditional",
     "inconclusive",
 }
-LATEST_SCHEMA_VERSION = 13
+NOTIFICATION_OBSERVATION_RESULTS = {
+    "execution_cancelled",
+    "execution_failed",
+    "recipient_unreachable",
+}
+NOTIFICATION_OBSERVATION_REASON_CLASSES = {
+    "cancelled",
+    "host_error",
+    "policy_blocked",
+    "timeout",
+    "unknown",
+}
+LATEST_SCHEMA_VERSION = 15
 PROJECT_FORMAT_VERSION = 1
 PROJECT_MARKER_NAME = "project.json"
 PROJECT_CONFIG_NAME = "baton.toml"
@@ -106,6 +125,8 @@ GUIDE_FILES = {
     "worker": "agent-prompt.md",
     "planner": "planner-prompt.md",
     "git": "git-integration.md",
+    "upgrade": "upgrade-guide.md",
+    "changelog": "changelog.md",
 }
 
 
@@ -1075,6 +1096,110 @@ def migration_v13_completion_evidence(con: sqlite3.Connection) -> None:
         )
 
 
+def migration_v14_notification_recovery(con: sqlite3.Connection) -> None:
+    notification_columns = {
+        row["name"] for row in con.execute("PRAGMA table_info(handoff_notifications)").fetchall()
+    }
+    if "delivery_attempt" not in notification_columns:
+        con.execute(
+            "alter table handoff_notifications "
+            "add column delivery_attempt integer not null default 1"
+        )
+    if "retry_of_notification_id" not in notification_columns:
+        con.execute(
+            "alter table handoff_notifications add column retry_of_notification_id integer"
+        )
+    if "recovery_reason" not in notification_columns:
+        con.execute("alter table handoff_notifications add column recovery_reason text")
+
+    rows = con.execute(
+        "select id, job_id, attempt from handoff_notifications "
+        "order by job_id, attempt, id"
+    ).fetchall()
+    counters: dict[tuple[str, int], int] = {}
+    for row in rows:
+        key = (str(row["job_id"]), int(row["attempt"]))
+        counters[key] = counters.get(key, 0) + 1
+        con.execute(
+            "update handoff_notifications set delivery_attempt = ? where id = ?",
+            (counters[key], row["id"]),
+        )
+
+    execute_sql_script(
+        con,
+        """
+        drop index if exists idx_handoff_notifications_sent_attempt;
+        create unique index if not exists idx_handoff_notifications_delivery_attempt
+          on handoff_notifications(job_id, attempt, delivery_attempt);
+        create unique index if not exists idx_handoff_notifications_initial_sent
+          on handoff_notifications(job_id, attempt)
+          where delivery_status = 'sent' and retry_of_notification_id is null;
+        create unique index if not exists idx_handoff_notifications_recovery
+          on handoff_notifications(job_id, attempt)
+          where retry_of_notification_id is not null;
+        """,
+    )
+
+
+def migration_v15_outcome_links_and_notification_observations(
+    con: sqlite3.Connection,
+) -> None:
+    execute_sql_script(
+        con,
+        """
+        create table if not exists handoff_outcome_crs (
+          job_id text not null references handoff_jobs(job_id) on delete cascade,
+          cr_id text not null references change_requests(cr_id),
+          position integer not null check (position > 0),
+          link_source text not null
+            check (link_source in ('finish', 'post_completion', 'migration')),
+          actor_role text references roles(role_id),
+          actor_id text,
+          reason text,
+          created_at text not null,
+          primary key (job_id, cr_id),
+          unique (job_id, position)
+        );
+
+        create index if not exists idx_handoff_outcome_crs_cr
+          on handoff_outcome_crs(cr_id, job_id);
+
+        insert into handoff_outcome_crs(
+          job_id, cr_id, position, link_source, actor_role, actor_id, reason, created_at
+        )
+        select job_id, outcome_cr_id, 1, 'migration', target_role,
+               coalesce(claimed_by, target_role),
+               'Backfilled from the schema v13 outcome_cr_id projection.',
+               coalesce(finished_at, created_at)
+        from handoff_jobs
+        where outcome_cr_id is not null
+        on conflict(job_id, cr_id) do nothing;
+
+        create table if not exists notification_observations (
+          id integer primary key autoincrement,
+          notification_id integer not null unique
+            references handoff_notifications(id) on delete cascade,
+          result text not null
+            check (result in ('execution_failed', 'execution_cancelled', 'recipient_unreachable')),
+          reason_class text not null
+            check (reason_class in ('policy_blocked', 'host_error', 'timeout', 'cancelled', 'unknown')),
+          actor_role text not null references roles(role_id),
+          actor_id text not null,
+          created_at text not null
+        );
+        """,
+    )
+    for role_id in ("sm", "planning"):
+        con.execute(
+            """
+            insert into role_permissions(role_id, permission)
+            values (?, 'notification.observe')
+            on conflict(role_id, permission) do nothing
+            """,
+            (role_id,),
+        )
+
+
 MIGRATIONS = (
     (1, "initial_schema", migration_v1_initial_schema),
     (2, "handoff_cancel_permission", migration_v2_handoff_cancel_permission),
@@ -1089,6 +1214,12 @@ MIGRATIONS = (
     (11, "workstream_routing", migration_v11_workstream_routing),
     (12, "retry_and_replacement_tracking", migration_v12_retry_and_replacement_tracking),
     (13, "completion_evidence", migration_v13_completion_evidence),
+    (14, "notification_recovery", migration_v14_notification_recovery),
+    (
+        15,
+        "outcome_links_and_notification_observations",
+        migration_v15_outcome_links_and_notification_observations,
+    ),
 )
 
 
@@ -2364,7 +2495,9 @@ def seed_role_permissions(con: sqlite3.Connection) -> None:
         "cr.reject",
         "cr.mark_implemented",
         "handoff.cancel",
+        "handoff.evidence_correct",
         "handoff.register",
+        "notification.observe",
     ):
         con.execute(
             """
@@ -3097,6 +3230,9 @@ def command_init(args: argparse.Namespace) -> int:
                 print(f"Already initialized {args.db}")
                 if marker:
                     print(f"Project marker {marker}")
+                print(
+                    "Agent action: run 'baton guide show bootstrap' and review project AGENTS.md"
+                )
                 return 0
     with connect(args.db, create=True) as con:
         migrate_schema(con)
@@ -3104,6 +3240,7 @@ def command_init(args: argparse.Namespace) -> int:
     print(f"Initialized {args.db}")
     if marker:
         print(f"Project marker {marker}")
+    print("Agent action: run 'baton guide show bootstrap' and configure project AGENTS.md")
     return 0
 
 
@@ -3175,7 +3312,11 @@ def command_upgrade_preflight(args: argparse.Namespace) -> int:
     if reviews:
         print("action: decide or release the listed CR reviews")
     if ready:
-        print("action: upgrade Baton, run 'baton migrate', verify, then explicitly resume")
+        print(
+            "action: upgrade Baton, read 'baton guide show upgrade' and "
+            "'baton guide show changelog', migrate, verify, "
+            "review project AGENTS.md, then explicitly resume"
+        )
     else:
         print("action: rerun 'baton upgrade preflight' after every blocker is drained")
     return 0 if ready else 2
@@ -3205,6 +3346,10 @@ def command_migrate(args: argparse.Namespace) -> int:
             print(f"{output_verb} {args.db} schema={previous}->{current} applied=none")
             if marker:
                 print(f"Project marker {marker}")
+            print(
+                "Agent action: read 'baton guide show upgrade' and "
+                "'baton guide show changelog', then review project AGENTS.md"
+            )
             return 0
         waiters = active_waiter_rows(con)
         active_handoffs = in_progress_handoff_rows(con)
@@ -3248,6 +3393,10 @@ def command_migrate(args: argparse.Namespace) -> int:
     )
     if marker:
         print(f"Project marker {marker}")
+    print(
+        "Agent action: read 'baton guide show upgrade' and "
+        "'baton guide show changelog', then review project AGENTS.md"
+    )
     return 0
 
 
@@ -5583,6 +5732,23 @@ def handoff_evidence_corrections(
     ).fetchall()
 
 
+def handoff_outcome_cr_rows(
+    con: sqlite3.Connection,
+    job_id: str,
+) -> list[sqlite3.Row]:
+    return con.execute(
+        """
+        select link.cr_id, cr.status, link.position, link.link_source,
+               link.actor_role, link.actor_id, link.reason, link.created_at
+        from handoff_outcome_crs link
+        join change_requests cr on cr.cr_id = link.cr_id
+        where link.job_id = ?
+        order by link.position
+        """,
+        (job_id,),
+    ).fetchall()
+
+
 BLOCKING_CONTEXT_KEYS = (
     "with_open_cr",
     "with_implemented_cr",
@@ -5593,17 +5759,17 @@ BLOCKING_CONTEXT_KEYS = (
 
 def blocking_context_for_status(
     completion_blocking: object,
-    outcome_cr_id: object,
-    outcome_cr_status: object,
+    outcome_crs: list[dict[str, object]],
 ) -> str:
     if not completion_blocking:
         return "not_blocking"
-    if not outcome_cr_id or not outcome_cr_status:
+    if not outcome_crs:
         return "no_outcome_cr"
-    if outcome_cr_status == "implemented":
-        return "implemented_cr"
-    if outcome_cr_status in {"draft", "submitted", "revision_requested", "approved"}:
+    statuses = {str(item["status"]) for item in outcome_crs}
+    if statuses & {"draft", "submitted", "revision_requested", "approved"}:
         return "open_cr"
+    if statuses == {"implemented"}:
+        return "implemented_cr"
     return "terminal_unimplemented_cr"
 
 
@@ -5615,15 +5781,26 @@ def blocking_outcome_context_counts(
         """
         select
           case
-            when h.outcome_cr_id is null or cr.status is null then 'without_cr'
-            when cr.status = 'implemented' then 'with_implemented_cr'
-            when cr.status in ('draft', 'submitted', 'revision_requested', 'approved')
-              then 'with_open_cr'
+            when not exists (
+              select 1 from handoff_outcome_crs link where link.job_id = h.job_id
+            ) then 'without_cr'
+            when exists (
+              select 1
+              from handoff_outcome_crs link
+              join change_requests cr on cr.cr_id = link.cr_id
+              where link.job_id = h.job_id
+                and cr.status in ('draft', 'submitted', 'revision_requested', 'approved')
+            ) then 'with_open_cr'
+            when not exists (
+              select 1
+              from handoff_outcome_crs link
+              join change_requests cr on cr.cr_id = link.cr_id
+              where link.job_id = h.job_id and cr.status != 'implemented'
+            ) then 'with_implemented_cr'
             else 'with_terminal_unimplemented_cr'
           end as context,
           count(*) as count
         from handoff_jobs h
-        left join change_requests cr on cr.cr_id = h.outcome_cr_id
         where h.status = 'finished' and h.completion_blocking = 1
         group by context
         """
@@ -5702,21 +5879,20 @@ def command_handoff_show(args: argparse.Namespace) -> int:
             {key: item[key] for key in item.keys()}
             for item in handoff_evidence_corrections(con, args.job_id)
         ]
-        outcome_cr_status = ""
-        if row["outcome_cr_id"]:
-            outcome_cr = con.execute(
-                "select status from change_requests where cr_id = ?",
-                (row["outcome_cr_id"],),
-            ).fetchone()
-            outcome_cr_status = str(outcome_cr["status"] if outcome_cr else "")
+        outcome_crs = [
+            {key: item[key] for key in item.keys()}
+            for item in handoff_outcome_cr_rows(con, args.job_id)
+        ]
+        outcome_cr_status = str(outcome_crs[0]["status"] if outcome_crs else "")
     payload = {key: row[key] for key in row.keys()}
     payload["depends_on"] = dependencies
     payload["depends_on_gates"] = gates
     payload["failure_reviews"] = failures
     payload["evidence_corrections"] = corrections
+    payload["outcome_crs"] = outcome_crs
     payload["outcome_cr_status"] = outcome_cr_status
     payload["blocking_context"] = blocking_context_for_status(
-        row["completion_blocking"], row["outcome_cr_id"], outcome_cr_status
+        row["completion_blocking"], outcome_crs
     )
     if corrections:
         payload["effective_related_commit"] = corrections[-1]["corrected_commit"]
@@ -5753,6 +5929,7 @@ def command_handoff_show(args: argparse.Namespace) -> int:
         "completion_blocking",
         "outcome_cr_id",
         "outcome_cr_status",
+        "outcome_crs",
         "blocking_context",
         "evidence_corrections",
         "failure_reviews",
@@ -5801,21 +5978,105 @@ def command_handoff_list(args: argparse.Namespace) -> int:
             """,
             params,
         ).fetchall()
+        outcome_crs_by_job = {
+            str(row["job_id"]): [
+                {key: item[key] for key in item.keys()}
+                for item in handoff_outcome_cr_rows(con, str(row["job_id"]))
+            ]
+            for row in rows
+        }
     if args.format == "json":
-        print(json.dumps([{key: row[key] for key in row.keys()} for row in rows], indent=2, ensure_ascii=False))
+        payload = []
+        for row in rows:
+            item = {key: row[key] for key in row.keys()}
+            item["outcome_crs"] = outcome_crs_by_job[str(row["job_id"])]
+            payload.append(item)
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
         return 0
     if not rows:
         print("No handoffs.")
         return 0
     for row in rows:
         claimant = row["claimed_by"] or ""
+        outcome_cr_ids = ",".join(
+            str(item["cr_id"]) for item in outcome_crs_by_job[str(row["job_id"])]
+        )
         print(
             f"{row['job_id']}\t{row['status']}\t{row['target_role']}\t"
             f"{row['workstream'] or ''}\t{claimant}\t"
             f"outcome={row['completion_outcome']}\t"
             f"blocking={row['completion_blocking']}\t"
-            f"outcome_cr={row['outcome_cr_id'] or ''}\t{row['title']}"
+            f"outcome_cr={row['outcome_cr_id'] or ''}\t"
+            f"outcome_crs={outcome_cr_ids}\t{row['title']}"
         )
+    return 0
+
+
+def command_handoff_outcome_cr_link(args: argparse.Namespace) -> int:
+    reason = args.reason.strip()
+    cr_id = args.cr_id.strip()
+    if not reason:
+        raise SystemExit("ERROR: --reason cannot be blank")
+    if not cr_id:
+        raise SystemExit("ERROR: --cr cannot be blank")
+    with connect(args.db) as con:
+        init_schema(con)
+        begin_immediate(con)
+        actor_role = require_permission(con, args.role, "handoff.evidence_correct")
+        actor_id = claimed_by_value(args, actor_role)
+        row = con.execute(
+            "select status, completion_blocking, outcome_cr_id from handoff_jobs where job_id = ?",
+            (args.job_id,),
+        ).fetchone()
+        if not row:
+            raise SystemExit(f"ERROR: unknown job: {args.job_id}")
+        if row["status"] != "finished" or not row["completion_blocking"]:
+            raise SystemExit(
+                "ERROR: outcome CR links can only be appended to a finished blocking handoff"
+            )
+        if not con.execute(
+            "select 1 from change_requests where cr_id = ?", (cr_id,)
+        ).fetchone():
+            raise SystemExit(f"ERROR: unknown outcome CR: {cr_id}")
+        if con.execute(
+            "select 1 from handoff_outcome_crs where job_id = ? and cr_id = ?",
+            (args.job_id, cr_id),
+        ).fetchone():
+            raise SystemExit(
+                f"ERROR: outcome CR is already linked to {args.job_id}: {cr_id}"
+            )
+        position = int(
+            con.execute(
+                "select coalesce(max(position), 0) + 1 from handoff_outcome_crs where job_id = ?",
+                (args.job_id,),
+            ).fetchone()[0]
+        )
+        now = utc_now()
+        con.execute(
+            """
+            insert into handoff_outcome_crs(
+              job_id, cr_id, position, link_source, actor_role, actor_id, reason, created_at
+            ) values (?, ?, ?, 'post_completion', ?, ?, ?, ?)
+            """,
+            (args.job_id, cr_id, position, actor_role, actor_id, reason, now),
+        )
+        if not row["outcome_cr_id"]:
+            con.execute(
+                "update handoff_jobs set outcome_cr_id = ? where job_id = ?",
+                (cr_id, args.job_id),
+            )
+        event(
+            con,
+            "outcome_cr_linked",
+            job_id=args.job_id,
+            actor_role=actor_role,
+            actor_id=actor_id,
+            from_status="finished",
+            to_status="finished",
+            message=f"cr={cr_id} position={position} reason={reason}",
+        )
+        con.commit()
+    print(f"Linked outcome CR {cr_id} to {args.job_id} at position {position}")
     return 0
 
 
@@ -6076,13 +6337,18 @@ def command_claim(args: argparse.Namespace) -> int:
 
 def command_finish(args: argparse.Namespace) -> int:
     evidence = args.evidence.strip()
+    outcome_cr_ids = [cr_id.strip() for cr_id in args.outcome_cr_ids]
     if not evidence:
         raise SystemExit("ERROR: --evidence cannot be blank")
+    if any(not cr_id for cr_id in outcome_cr_ids):
+        raise SystemExit("ERROR: --outcome-cr cannot be blank")
+    if len(outcome_cr_ids) != len(set(outcome_cr_ids)):
+        raise SystemExit("ERROR: duplicate --outcome-cr values are not allowed")
     if args.blocking and args.outcome not in {"fail", "conditional", "inconclusive"}:
         raise SystemExit(
             "ERROR: --blocking requires --outcome fail, conditional, or inconclusive"
         )
-    if args.outcome_cr_id and args.outcome == "unspecified":
+    if outcome_cr_ids and args.outcome == "unspecified":
         raise SystemExit("ERROR: --outcome-cr requires an explicit --outcome")
     related_commit, commit_resolution, commit_resolution_reason = resolve_completion_commit(
         args.commit,
@@ -6096,7 +6362,10 @@ def command_finish(args: argparse.Namespace) -> int:
         init_schema(con)
         begin_immediate(con)
         role = resolve_role(con, args.role)
-        row = con.execute("select status, target_role from handoff_jobs where job_id = ?", (args.job_id,)).fetchone()
+        row = con.execute(
+            "select status, target_role, claimed_by from handoff_jobs where job_id = ?",
+            (args.job_id,),
+        ).fetchone()
         if not row:
             raise SystemExit(f"ERROR: unknown job: {args.job_id}")
         if row["target_role"] != role:
@@ -6107,13 +6376,13 @@ def command_finish(args: argparse.Namespace) -> int:
             )
         if row["status"] != "in_progress":
             raise SystemExit(f"ERROR: job is not in_progress: {args.job_id} status={row['status']}")
-        if args.outcome_cr_id:
+        for cr_id in outcome_cr_ids:
             outcome_cr = con.execute(
                 "select 1 from change_requests where cr_id = ?",
-                (args.outcome_cr_id,),
+                (cr_id,),
             ).fetchone()
             if not outcome_cr:
-                raise SystemExit(f"ERROR: unknown outcome CR: {args.outcome_cr_id}")
+                raise SystemExit(f"ERROR: unknown outcome CR: {cr_id}")
         require_linked_cr_integrity(con, args.job_id)
         apply_workspace_policy(
             con,
@@ -6124,6 +6393,7 @@ def command_finish(args: argparse.Namespace) -> int:
             operation="finished",
             actor_role=role,
         )
+        finished_at = utc_now()
         con.execute(
             """
             update handoff_jobs
@@ -6134,17 +6404,35 @@ def command_finish(args: argparse.Namespace) -> int:
             where job_id = ?
             """,
             (
-                utc_now(),
+                finished_at,
                 evidence,
                 related_commit,
                 commit_resolution,
                 commit_resolution_reason or None,
                 args.outcome,
                 int(args.blocking),
-                args.outcome_cr_id or None,
+                outcome_cr_ids[0] if outcome_cr_ids else None,
                 args.job_id,
             ),
         )
+        for position, cr_id in enumerate(outcome_cr_ids, start=1):
+            con.execute(
+                """
+                insert into handoff_outcome_crs(
+                  job_id, cr_id, position, link_source, actor_role, actor_id,
+                  reason, created_at
+                ) values (?, ?, ?, 'finish', ?, ?, ?, ?)
+                """,
+                (
+                    args.job_id,
+                    cr_id,
+                    position,
+                    role,
+                    row["claimed_by"] or row["target_role"],
+                    "Linked by finish --outcome-cr.",
+                    finished_at,
+                ),
+            )
         event(
             con,
             "finished",
@@ -6154,7 +6442,8 @@ def command_finish(args: argparse.Namespace) -> int:
             to_status="finished",
             message=(
                 f"outcome={args.outcome} blocking={int(args.blocking)} "
-                f"outcome_cr={args.outcome_cr_id or ''} "
+                f"outcome_cr={outcome_cr_ids[0] if outcome_cr_ids else ''} "
+                f"outcome_crs={','.join(outcome_cr_ids)} "
                 f"commit_resolution={commit_resolution}; {evidence}"
             ),
         )
@@ -6633,22 +6922,149 @@ def promote_ready_direct_dependents(
     return promoted
 
 
+def require_notification_sender(
+    con: sqlite3.Connection,
+    sender_agent_id: str,
+    actor_role: str,
+) -> sqlite3.Row:
+    sender = active_agent_session(con, sender_agent_id)
+    if not sender:
+        raise SystemExit(
+            f"ERROR: no active session for sender {sender_agent_id}; "
+            "run 'baton agent session-set' first"
+        )
+    if sender["role_id"] != actor_role:
+        raise SystemExit(
+            f"ERROR: sender {sender_agent_id} session role is {sender['role_id']}, "
+            f"not {actor_role}"
+        )
+    return sender
+
+
+def notification_candidate_rows(
+    con: sqlite3.Connection,
+    job: sqlite3.Row,
+    sender_agent_id: str,
+) -> list[dict[str, object]]:
+    notified = con.execute(
+        """
+        select recipient_agent_id, recipient_thread_id, recipient_model, transport, created_at
+        from handoff_notifications
+        where job_id = ? and attempt = ? and delivery_status = 'sent'
+        order by id desc
+        limit 1
+        """,
+        (job["job_id"], job["attempt"]),
+    ).fetchone()
+    base = {
+        "job_id": job["job_id"],
+        "target_role": job["target_role"],
+        "workstream": job["workstream"] or "",
+        "title": job["title"],
+        "attempt": job["attempt"],
+    }
+    if notified:
+        return [
+            {
+                **base,
+                "state": "already_notified",
+                "agent_id": notified["recipient_agent_id"],
+                "host": notified["transport"],
+                "thread_id": notified["recipient_thread_id"],
+                "model": notified["recipient_model"],
+            }
+        ]
+    stopped = get_stop_control(con, job["target_role"])
+    if stopped:
+        return [
+            {
+                **base,
+                "state": "outside_shift",
+                "agent_id": "",
+                "host": "",
+                "thread_id": "",
+                "model": "",
+            }
+        ]
+    sessions = con.execute(
+        """
+        select agent_id, host, thread_id, model
+        from agent_sessions session
+        where role_id = ? and status = 'active' and agent_id != ?
+          and (
+            ? is null
+            or exists (
+              select 1 from agent_workstreams route
+              where route.agent_id = session.agent_id
+                and route.role_id = session.role_id
+                and route.workstream = ?
+            )
+          )
+          and not exists (
+            select 1
+            from handoff_jobs busy
+            where busy.claimed_by = session.agent_id
+              and busy.status in ('in_progress', 'cancel_requested')
+          )
+          and not exists (
+            select 1
+            from change_requests review
+            where review.review_claimed_by = session.agent_id
+              and review.status = 'submitted'
+          )
+        order by updated_at desc, agent_id
+        """,
+        (
+            job["target_role"],
+            sender_agent_id,
+            job["workstream"],
+            job["workstream"],
+        ),
+    ).fetchall()
+    if not sessions:
+        return [
+            {
+                **base,
+                "state": "no_active_peer_session",
+                "agent_id": "",
+                "host": "",
+                "thread_id": "",
+                "model": "",
+            }
+        ]
+    return [
+        {
+            **base,
+            "state": "candidate",
+            "agent_id": session["agent_id"],
+            "host": session["host"],
+            "thread_id": session["thread_id"],
+            "model": session["model"],
+        }
+        for session in sessions
+    ]
+
+
+def print_notification_candidates(payload: list[dict[str, object]], output_format: str) -> None:
+    if output_format == "json":
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+    for item in payload:
+        print(
+            f"{item['job_id']}\t{item['target_role']}\t{item['workstream']}\t"
+            f"attempt={item['attempt']}\t{item['state']}\t"
+            f"{item['agent_id']}\t{item['host']}\t{item['thread_id']}\t"
+            f"{item['model']}\t{item['title']}"
+        )
+
+
 def command_notify_targets(args: argparse.Namespace) -> int:
     sender_agent_id = agent_id_value(args, "from_agent")
     with connect(args.db) as con:
         init_schema(con)
         begin_immediate(con)
         actor_role = resolve_role(con, args.role)
-        sender = active_agent_session(con, sender_agent_id)
-        if not sender:
-            raise SystemExit(
-                f"ERROR: no active session for sender {sender_agent_id}; "
-                "run 'baton agent session-set' first"
-            )
-        if sender["role_id"] != actor_role:
-            raise SystemExit(
-                f"ERROR: sender {sender_agent_id} session role is {sender['role_id']}, not {actor_role}"
-            )
+        require_notification_sender(con, sender_agent_id, actor_role)
         source = con.execute(
             "select status, target_role from handoff_jobs where job_id = ?",
             (args.job_id,),
@@ -6681,129 +7097,75 @@ def command_notify_targets(args: argparse.Namespace) -> int:
         ).fetchall()
         payload: list[dict[str, object]] = []
         for job in jobs:
-            notified = con.execute(
-                """
-                select recipient_agent_id, recipient_thread_id, recipient_model, transport, created_at
-                from handoff_notifications
-                where job_id = ? and attempt = ? and delivery_status = 'sent'
-                order by id desc
-                limit 1
-                """,
-                (job["job_id"], job["attempt"]),
-            ).fetchone()
-            if notified:
-                payload.append(
-                    {
-                        "job_id": job["job_id"],
-                        "target_role": job["target_role"],
-                        "workstream": job["workstream"] or "",
-                        "title": job["title"],
-                        "attempt": job["attempt"],
-                        "state": "already_notified",
-                        "agent_id": notified["recipient_agent_id"],
-                        "host": notified["transport"],
-                        "thread_id": notified["recipient_thread_id"],
-                        "model": notified["recipient_model"],
-                    }
-                )
-                continue
-            stopped = get_stop_control(con, job["target_role"])
-            if stopped:
-                payload.append(
-                    {
-                        "job_id": job["job_id"],
-                        "target_role": job["target_role"],
-                        "workstream": job["workstream"] or "",
-                        "title": job["title"],
-                        "attempt": job["attempt"],
-                        "state": "outside_shift",
-                        "agent_id": "",
-                        "host": "",
-                        "thread_id": "",
-                        "model": "",
-                    }
-                )
-                continue
-            sessions = con.execute(
-                """
-                select agent_id, host, thread_id, model
-                from agent_sessions session
-                where role_id = ? and status = 'active' and agent_id != ?
-                  and (
-                    ? is null
-                    or exists (
-                      select 1 from agent_workstreams route
-                      where route.agent_id = session.agent_id
-                        and route.role_id = session.role_id
-                        and route.workstream = ?
-                    )
-                  )
-                  and not exists (
-                    select 1
-                    from handoff_jobs busy
-                    where busy.claimed_by = session.agent_id
-                      and busy.status in ('in_progress', 'cancel_requested')
-                  )
-                  and not exists (
-                    select 1
-                    from change_requests review
-                    where review.review_claimed_by = session.agent_id
-                      and review.status = 'submitted'
-                  )
-                order by updated_at desc, agent_id
-                """,
-                (
-                    job["target_role"],
-                    sender_agent_id,
-                    job["workstream"],
-                    job["workstream"],
-                ),
-            ).fetchall()
-            if not sessions:
-                payload.append(
-                    {
-                        "job_id": job["job_id"],
-                        "target_role": job["target_role"],
-                        "workstream": job["workstream"] or "",
-                        "title": job["title"],
-                        "attempt": job["attempt"],
-                        "state": "no_active_peer_session",
-                        "agent_id": "",
-                        "host": "",
-                        "thread_id": "",
-                        "model": "",
-                    }
-                )
-                continue
-            for session in sessions:
-                payload.append(
-                    {
-                        "job_id": job["job_id"],
-                        "target_role": job["target_role"],
-                        "workstream": job["workstream"] or "",
-                        "title": job["title"],
-                        "attempt": job["attempt"],
-                        "state": "candidate",
-                        "agent_id": session["agent_id"],
-                        "host": session["host"],
-                        "thread_id": session["thread_id"],
-                        "model": session["model"],
-                    }
-                )
+            payload.extend(notification_candidate_rows(con, job, sender_agent_id))
         con.commit()
     if args.format == "json":
-        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        print_notification_candidates(payload, args.format)
     elif not payload:
         print("No ready direct dependent handoffs.")
     else:
-        for item in payload:
-            print(
-                f"{item['job_id']}\t{item['target_role']}\t{item['workstream']}\t"
-                f"attempt={item['attempt']}\t{item['state']}\t"
-                f"{item['agent_id']}\t{item['host']}\t{item['thread_id']}\t"
-                f"{item['model']}\t{item['title']}"
-            )
+        print_notification_candidates(payload, args.format)
     return 0 if payload else 1
+
+
+def command_notify_candidates(args: argparse.Namespace) -> int:
+    sender_agent_id = agent_id_value(args, "from_agent")
+    with connect(args.db) as con:
+        init_schema(con)
+        begin_immediate(con)
+        actor_role = resolve_role(con, args.role)
+        require_notification_sender(con, sender_agent_id, actor_role)
+        job = con.execute(
+            """
+            select job_id, status, target_role, workstream, title, attempt
+            from handoff_jobs where job_id = ?
+            """,
+            (args.job_id,),
+        ).fetchone()
+        if not job:
+            raise SystemExit(f"ERROR: unknown job: {args.job_id}")
+        if job["status"] != "open":
+            raise SystemExit(
+                f"ERROR: notification candidate handoff must be open: "
+                f"{args.job_id} status={job['status']}"
+            )
+        if actor_role != job["target_role"]:
+            can_register = con.execute(
+                "select 1 from role_permissions "
+                "where role_id = ? and permission = 'handoff.register'",
+                (actor_role,),
+            ).fetchone()
+            if not can_register:
+                raise SystemExit(
+                    f"ERROR: target role is {job['target_role']}; "
+                    f"{actor_role} lacks handoff.register"
+                )
+        payload = notification_candidate_rows(con, job, sender_agent_id)
+        con.commit()
+    print_notification_candidates(payload, args.format)
+    return 0
+
+
+def next_notification_delivery_attempt(
+    con: sqlite3.Connection,
+    job_id: str,
+    handoff_attempt: int,
+) -> int:
+    row = con.execute(
+        "select coalesce(max(delivery_attempt), 0) + 1 as next_attempt "
+        "from handoff_notifications where job_id = ? and attempt = ?",
+        (job_id, handoff_attempt),
+    ).fetchone()
+    return int(row["next_attempt"])
+
+
+def require_notification_shift(con: sqlite3.Connection, role: str) -> None:
+    stopped = get_stop_control(con, role)
+    if stopped:
+        raise SystemExit(
+            f"ERROR: notification target role is outside shift: role={role} "
+            f"scope={stopped['scope']} reason={stopped['reason'] or ''}"
+        )
 
 
 def command_notify_record(args: argparse.Namespace) -> int:
@@ -6826,13 +7188,7 @@ def command_notify_record(args: argparse.Namespace) -> int:
         ).fetchone()
         if not job:
             raise SystemExit(f"ERROR: unknown job: {args.job_id}")
-        sender = active_agent_session(con, sender_agent_id)
-        if not sender:
-            raise SystemExit(f"ERROR: no active session for sender {sender_agent_id}")
-        if sender["role_id"] != actor_role:
-            raise SystemExit(
-                f"ERROR: sender {sender_agent_id} session role is {sender['role_id']}, not {actor_role}"
-            )
+        sender = require_notification_sender(con, sender_agent_id, actor_role)
         recipient = active_agent_session(con, recipient_agent_id)
         if not recipient:
             raise SystemExit(f"ERROR: no active session for recipient {recipient_agent_id}")
@@ -6849,7 +7205,19 @@ def command_notify_record(args: argparse.Namespace) -> int:
         )
         if sender["session_id"] == recipient["session_id"]:
             raise SystemExit("ERROR: opt-in notification requires a different recipient session")
+        existing = con.execute(
+            "select recipient_agent_id from handoff_notifications "
+            "where job_id = ? and attempt = ? and delivery_status = 'sent'",
+            (args.job_id, job["attempt"]),
+        ).fetchone()
+        if existing:
+            raise SystemExit(
+                f"ERROR: handoff was already notified successfully to "
+                f"{existing['recipient_agent_id']}; use 'baton notify status' and the controlled "
+                "'baton notify retry' recovery path"
+            )
         if args.status == "sent":
+            require_notification_shift(con, job["target_role"])
             require_agent_capacity(con, recipient_agent_id, handoff_id=args.job_id)
             if job["status"] not in {"open", "in_progress"}:
                 raise SystemExit(
@@ -6859,23 +7227,18 @@ def command_notify_record(args: argparse.Namespace) -> int:
                 raise SystemExit(
                     f"ERROR: handoff is already claimed by {job['claimed_by']}, not {recipient_agent_id}"
                 )
-            existing = con.execute(
-                "select recipient_agent_id from handoff_notifications "
-                "where job_id = ? and attempt = ? and delivery_status = 'sent'",
-                (args.job_id, job["attempt"]),
-            ).fetchone()
-            if existing:
-                raise SystemExit(
-                    f"ERROR: handoff was already notified successfully to {existing['recipient_agent_id']}"
-                )
+        delivery_attempt = next_notification_delivery_attempt(
+            con, args.job_id, int(job["attempt"])
+        )
         cursor = con.execute(
             """
             insert into handoff_notifications(
               job_id, sender_session_id, recipient_session_id,
               sender_agent_id, sender_model, recipient_agent_id,
               recipient_thread_id, recipient_model, transport,
-              delivery_status, message_ref, detail, created_at, attempt
-            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              delivery_status, message_ref, detail, created_at, attempt,
+              delivery_attempt, retry_of_notification_id, recovery_reason
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null, null)
             """,
             (
                 args.job_id,
@@ -6892,10 +7255,12 @@ def command_notify_record(args: argparse.Namespace) -> int:
                 detail,
                 utc_now(),
                 job["attempt"],
+                delivery_attempt,
             ),
         )
         event_message = (
-            f"attempt={job['attempt']} recipient={recipient_agent_id} host={recipient['host']} "
+            f"attempt={job['attempt']} delivery_attempt={delivery_attempt} "
+            f"recipient={recipient_agent_id} host={recipient['host']} "
             f"thread={recipient['thread_id']} model={recipient['model']}"
         )
         if message_ref:
@@ -6917,7 +7282,253 @@ def command_notify_record(args: argparse.Namespace) -> int:
     print(
         f"notification={notification_id}\t"
         f"{'host_accepted' if args.status == 'sent' else args.status}\t{args.job_id}\t"
-        f"attempt={job['attempt']}\t{recipient_agent_id}"
+        f"attempt={job['attempt']}\t{recipient_agent_id}\t"
+        f"delivery_attempt={delivery_attempt}"
+    )
+    return 0
+
+
+def command_notify_retry(args: argparse.Namespace) -> int:
+    sender_agent_id = agent_id_value(args, "from_agent")
+    reason = args.reason.strip()
+    detail = args.detail.strip()
+    message_ref = args.message_ref.strip()
+    if not reason:
+        raise SystemExit("ERROR: --reason cannot be blank")
+    stale_after = parse_duration(args.stale_after)
+    with connect(args.db) as con:
+        init_schema(con)
+        begin_immediate(con)
+        actor_role = resolve_role(con, args.role)
+        sender = require_notification_sender(con, sender_agent_id, actor_role)
+        job = con.execute(
+            "select status, target_role, workstream, claimed_by, attempt "
+            "from handoff_jobs where job_id = ?",
+            (args.job_id,),
+        ).fetchone()
+        if not job:
+            raise SystemExit(f"ERROR: unknown job: {args.job_id}")
+        if job["status"] != "open" or job["claimed_by"]:
+            raise SystemExit(
+                f"ERROR: recovery notification requires an open, unclaimed handoff: "
+                f"{args.job_id} status={job['status']} claimed_by={job['claimed_by'] or ''}"
+            )
+        original = con.execute(
+            """
+            select id, attempt, delivery_attempt, delivery_status,
+                   sender_agent_id, recipient_session_id, recipient_agent_id, created_at
+            from handoff_notifications
+            where id = ? and job_id = ?
+            """,
+            (args.notification, args.job_id),
+        ).fetchone()
+        if not original:
+            raise SystemExit(
+                f"ERROR: unknown notification {args.notification} for handoff {args.job_id}"
+            )
+        if int(original["attempt"]) != int(job["attempt"]):
+            raise SystemExit(
+                f"ERROR: notification {args.notification} belongs to handoff attempt "
+                f"{original['attempt']}, current attempt is {job['attempt']}"
+            )
+        if original["delivery_status"] != "sent":
+            raise SystemExit("ERROR: recovery must reference a host_accepted notification")
+        if sender_agent_id != original["sender_agent_id"]:
+            can_register = con.execute(
+                "select 1 from role_permissions "
+                "where role_id = ? and permission = 'handoff.register'",
+                (actor_role,),
+            ).fetchone()
+            if not can_register:
+                raise SystemExit(
+                    f"ERROR: recovery sender differs from {original['sender_agent_id']}; "
+                    f"{actor_role} lacks handoff.register"
+                )
+        latest = con.execute(
+            """
+            select id from handoff_notifications
+            where job_id = ? and attempt = ? and delivery_status = 'sent'
+            order by delivery_attempt desc, id desc limit 1
+            """,
+            (args.job_id, job["attempt"]),
+        ).fetchone()
+        if not latest or int(latest["id"]) != int(original["id"]):
+            raise SystemExit("ERROR: recovery must reference the latest host_accepted notification")
+        recovery = con.execute(
+            "select id from handoff_notifications "
+            "where job_id = ? and attempt = ? and retry_of_notification_id is not null",
+            (args.job_id, job["attempt"]),
+        ).fetchone()
+        if recovery:
+            raise SystemExit(
+                f"ERROR: recovery notification already recorded for handoff attempt: "
+                f"notification={recovery['id']}"
+            )
+        age_seconds = max(
+            0,
+            int(
+                (
+                    datetime.now(timezone.utc) - parse_utc(str(original["created_at"]))
+                ).total_seconds()
+            ),
+        )
+        stale_seconds = int(stale_after.total_seconds())
+        if age_seconds < stale_seconds:
+            raise SystemExit(
+                f"ERROR: notification is not stale: age_seconds={age_seconds} "
+                f"stale_after_seconds={stale_seconds}"
+            )
+        require_notification_shift(con, job["target_role"])
+        recipient_agent_id = str(original["recipient_agent_id"])
+        recipient = active_agent_session(con, recipient_agent_id)
+        if not recipient or recipient["session_id"] != original["recipient_session_id"]:
+            raise SystemExit(
+                f"ERROR: original recipient session is no longer active: {recipient_agent_id}; "
+                "do not redirect a recovery notification"
+            )
+        if recipient["role_id"] != job["target_role"]:
+            raise SystemExit(
+                f"ERROR: recipient role is {recipient['role_id']}, "
+                f"but handoff target role is {job['target_role']}"
+            )
+        require_workstream_assignment(
+            con,
+            recipient_agent_id,
+            recipient["role_id"],
+            job["workstream"],
+        )
+        if sender["session_id"] == recipient["session_id"]:
+            raise SystemExit("ERROR: opt-in notification requires a different recipient session")
+        require_agent_capacity(con, recipient_agent_id, handoff_id=args.job_id)
+        delivery_attempt = next_notification_delivery_attempt(
+            con, args.job_id, int(job["attempt"])
+        )
+        cursor = con.execute(
+            """
+            insert into handoff_notifications(
+              job_id, sender_session_id, recipient_session_id,
+              sender_agent_id, sender_model, recipient_agent_id,
+              recipient_thread_id, recipient_model, transport,
+              delivery_status, message_ref, detail, created_at, attempt,
+              delivery_attempt, retry_of_notification_id, recovery_reason
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                args.job_id,
+                sender["session_id"],
+                recipient["session_id"],
+                sender_agent_id,
+                sender["model"],
+                recipient_agent_id,
+                recipient["thread_id"],
+                recipient["model"],
+                recipient["host"],
+                args.status,
+                message_ref,
+                detail,
+                utc_now(),
+                job["attempt"],
+                delivery_attempt,
+                original["id"],
+                reason,
+            ),
+        )
+        event_message = (
+            f"attempt={job['attempt']} delivery_attempt={delivery_attempt} "
+            f"retry_of={original['id']} recipient={recipient_agent_id} "
+            f"host={recipient['host']} thread={recipient['thread_id']} "
+            f"model={recipient['model']} reason={reason}"
+        )
+        if message_ref:
+            event_message += f" message_ref={message_ref}"
+        if detail:
+            event_message += f" detail={detail}"
+        event(
+            con,
+            f"notification_recovery_{args.status}",
+            job_id=args.job_id,
+            actor_role=actor_role,
+            actor_id=sender_agent_id,
+            from_status=job["status"],
+            to_status=job["status"],
+            message=event_message,
+        )
+        notification_id = cursor.lastrowid
+        con.commit()
+    print(
+        f"notification={notification_id}\t"
+        f"{'host_accepted' if args.status == 'sent' else args.status}\t{args.job_id}\t"
+        f"attempt={job['attempt']}\tdelivery_attempt={delivery_attempt}\t"
+        f"retry_of={original['id']}\t{recipient_agent_id}"
+    )
+    return 0
+
+
+def command_notify_observe(args: argparse.Namespace) -> int:
+    with connect(args.db) as con:
+        init_schema(con)
+        begin_immediate(con)
+        actor_role = require_permission(con, args.role, "notification.observe")
+        actor_id = claimed_by_value(args, actor_role)
+        notification = con.execute(
+            """
+            select notification.id, notification.job_id, notification.delivery_status,
+                   job.status as handoff_status
+            from handoff_notifications notification
+            join handoff_jobs job on job.job_id = notification.job_id
+            where notification.id = ? and notification.job_id = ?
+            """,
+            (args.notification, args.job_id),
+        ).fetchone()
+        if not notification:
+            raise SystemExit(
+                f"ERROR: unknown notification {args.notification} for handoff {args.job_id}"
+            )
+        if notification["delivery_status"] != "sent":
+            raise SystemExit(
+                "ERROR: execution observations require a host_accepted notification"
+            )
+        if con.execute(
+            "select 1 from notification_observations where notification_id = ?",
+            (args.notification,),
+        ).fetchone():
+            raise SystemExit(
+                f"ERROR: notification {args.notification} already has an execution observation"
+            )
+        cursor = con.execute(
+            """
+            insert into notification_observations(
+              notification_id, result, reason_class,
+              actor_role, actor_id, created_at
+            ) values (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                args.notification,
+                args.result,
+                args.reason_class,
+                actor_role,
+                actor_id,
+                utc_now(),
+            ),
+        )
+        event(
+            con,
+            "notification_observed",
+            job_id=args.job_id,
+            actor_role=actor_role,
+            actor_id=actor_id,
+            from_status=notification["handoff_status"],
+            to_status=notification["handoff_status"],
+            message=(
+                f"notification={args.notification} result={args.result} "
+                f"reason_class={args.reason_class}"
+            ),
+        )
+        observation_id = cursor.lastrowid
+        con.commit()
+    print(
+        f"observation={observation_id}\tnotification={args.notification}\t"
+        f"{args.result}\treason_class={args.reason_class}\t{args.job_id}"
     )
     return 0
 
@@ -6939,10 +7550,42 @@ def command_notify_status(args: argparse.Namespace) -> int:
         notification = con.execute(
             """
             select id, recipient_agent_id, recipient_thread_id, transport,
-                   message_ref, created_at
+                   message_ref, created_at, delivery_attempt,
+                   retry_of_notification_id, recovery_reason
             from handoff_notifications
             where job_id = ? and attempt = ? and delivery_status = 'sent'
-            order by id desc
+            order by delivery_attempt desc, id desc
+            limit 1
+            """,
+            (args.job_id, job["attempt"]),
+        ).fetchone()
+        latest_delivery = con.execute(
+            """
+            select id, delivery_attempt, delivery_status
+            from handoff_notifications
+            where job_id = ? and attempt = ?
+            order by delivery_attempt desc, id desc
+            limit 1
+            """,
+            (args.job_id, job["attempt"]),
+        ).fetchone()
+        recovery_delivery_attempts = int(
+            con.execute(
+                "select count(*) from handoff_notifications "
+                "where job_id = ? and attempt = ? and retry_of_notification_id is not null",
+                (args.job_id, job["attempt"]),
+            ).fetchone()[0]
+        )
+        observation = con.execute(
+            """
+            select observation.id, observation.notification_id, observation.result,
+                   observation.reason_class, observation.actor_role,
+                   observation.actor_id, observation.created_at
+            from notification_observations observation
+            join handoff_notifications notification
+              on notification.id = observation.notification_id
+            where notification.job_id = ? and notification.attempt = ?
+            order by observation.id desc
             limit 1
             """,
             (args.job_id, job["attempt"]),
@@ -6953,6 +7596,10 @@ def command_notify_status(args: argparse.Namespace) -> int:
     last_notification_at = ""
     if not notification:
         state = "not_notified"
+        if job["status"] in {"in_progress", "cancel_requested"} and job["claimed_by"]:
+            context = "claimed_without_recorded_notification"
+        else:
+            context = f"{job['status']}_without_recorded_notification"
     else:
         recipient = str(notification["recipient_agent_id"])
         last_notification_at = str(notification["created_at"])
@@ -6971,17 +7618,39 @@ def command_notify_status(args: argparse.Namespace) -> int:
             state = "host_accepted_unclaimed"
         else:
             state = f"host_accepted_{job['status']}"
+        context = state
 
     payload = {
         "job_id": job["job_id"],
         "attempt": job["attempt"],
         "handoff_status": job["status"],
         "notification_state": state,
+        "notification_context": context,
+        "latest_delivery_id": latest_delivery["id"] if latest_delivery else None,
+        "latest_delivery_attempt": latest_delivery["delivery_attempt"] if latest_delivery else None,
+        "latest_delivery_state": (
+            "host_accepted"
+            if latest_delivery and latest_delivery["delivery_status"] == "sent"
+            else (latest_delivery["delivery_status"] if latest_delivery else "")
+        ),
+        "latest_host_accepted_notification_id": notification["id"] if notification else None,
+        "recovery_delivery_attempts": recovery_delivery_attempts,
         "recipient_agent_id": recipient,
         "claimed_by": job["claimed_by"] or "",
         "last_notification_at": last_notification_at,
         "unclaimed_for_seconds": age_seconds if notification and not job["claimed_by"] else None,
         "stale_after_seconds": int(stale_after.total_seconds()),
+        "latest_observation_id": observation["id"] if observation else None,
+        "latest_observation_notification_id": (
+            observation["notification_id"] if observation else None
+        ),
+        "latest_observation_result": observation["result"] if observation else "",
+        "latest_observation_reason_class": (
+            observation["reason_class"] if observation else ""
+        ),
+        "latest_observation_actor_role": observation["actor_role"] if observation else "",
+        "latest_observation_actor_id": observation["actor_id"] if observation else "",
+        "latest_observation_at": observation["created_at"] if observation else "",
     }
     if args.format == "json":
         print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -6992,25 +7661,62 @@ def command_notify_status(args: argparse.Namespace) -> int:
 
 
 def command_notify_list(args: argparse.Namespace) -> int:
+    if args.limit is not None and args.limit <= 0:
+        raise SystemExit("ERROR: --limit must be greater than zero")
+    if args.after_id is not None and args.after_id < 0:
+        raise SystemExit("ERROR: --after-id must be zero or greater")
+    if args.before_id is not None and args.before_id <= 0:
+        raise SystemExit("ERROR: --before-id must be greater than zero")
+    if (
+        args.after_id is not None
+        and args.before_id is not None
+        and args.after_id >= args.before_id
+    ):
+        raise SystemExit("ERROR: --after-id must be less than --before-id")
     conditions: list[str] = []
     params: list[object] = []
     if args.job_id:
-        conditions.append("job_id = ?")
+        conditions.append("notification.job_id = ?")
         params.append(args.job_id)
     if args.status:
-        conditions.append("delivery_status = ?")
+        conditions.append("notification.delivery_status = ?")
         params.append(args.status)
+    if args.after_id is not None:
+        conditions.append("notification.id > ?")
+        params.append(args.after_id)
+    if args.before_id is not None:
+        conditions.append("notification.id < ?")
+        params.append(args.before_id)
+    if args.recovery_only:
+        conditions.append("notification.retry_of_notification_id is not null")
+    order = "desc" if args.order == "newest" else "asc"
     where = f"where {' and '.join(conditions)}" if conditions else ""
+    limit = "limit ?" if args.limit is not None else ""
+    if args.limit is not None:
+        params.append(args.limit)
     with connect(args.db) as con:
         init_schema(con)
         rows = con.execute(
             f"""
-            select id, job_id, attempt, delivery_status, sender_agent_id, sender_model,
-                   recipient_agent_id, recipient_thread_id, recipient_model,
-                   transport, message_ref, detail, created_at
-            from handoff_notifications
+            select notification.id, notification.job_id, notification.attempt,
+                   notification.delivery_attempt, notification.retry_of_notification_id,
+                   notification.recovery_reason, notification.delivery_status,
+                   notification.sender_agent_id, notification.sender_model,
+                   notification.recipient_agent_id, notification.recipient_thread_id,
+                   notification.recipient_model, notification.transport,
+                   notification.message_ref, notification.detail, notification.created_at,
+                   observation.id as observation_id,
+                   observation.result as observation_result,
+                   observation.reason_class as observation_reason_class,
+                   observation.actor_role as observation_actor_role,
+                   observation.actor_id as observation_actor_id,
+                   observation.created_at as observation_created_at
+            from handoff_notifications notification
+            left join notification_observations observation
+              on observation.notification_id = notification.id
             {where}
-            order by id
+            order by notification.id {order}
+            {limit}
             """,
             params,
         ).fetchall()
@@ -7033,7 +7739,12 @@ def command_notify_list(args: argparse.Namespace) -> int:
             f"{'host_accepted' if row['delivery_status'] == 'sent' else row['delivery_status']}\t"
             f"{row['sender_agent_id']}\t{row['recipient_agent_id']}\t"
             f"{row['transport']}\t{row['recipient_thread_id']}\t"
-            f"{row['recipient_model']}\t{row['created_at']}\t{row['detail'] or ''}"
+            f"{row['recipient_model']}\t{row['created_at']}\t{row['detail'] or ''}\t"
+            f"delivery_attempt={row['delivery_attempt']}\t"
+            f"retry_of={row['retry_of_notification_id'] or ''}\t"
+            f"reason={row['recovery_reason'] or ''}\t"
+            f"observation={row['observation_result'] or ''}\t"
+            f"reason_class={row['observation_reason_class'] or ''}"
         )
     return 0
 
@@ -7417,7 +8128,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="SQLite-backed Baton CLI",
         epilog=(
             "Agent operating guides: run 'baton guide list', then "
-            "'baton guide show bootstrap|worker|planner|git'. Read-only project audit is "
+            "'baton guide show bootstrap|worker|planner|git|upgrade|changelog'. Read the upgrade guide "
+            "after every executable change. Read-only project audit is "
             "available through the separate 'baton-report audit|summary' executable."
         ),
     )
@@ -7555,6 +8267,16 @@ def build_parser() -> argparse.ArgumentParser:
     evidence_correct.add_argument("--reason", required=True)
     evidence_correct.add_argument("--allow-unresolved-commit", action="store_true")
     evidence_correct.set_defaults(func=command_handoff_evidence_correct)
+    outcome_cr_link = handoff_sub.add_parser(
+        "outcome-cr-link",
+        help="append a CR link to a finished blocking handoff",
+    )
+    outcome_cr_link.add_argument("job_id")
+    outcome_cr_link.add_argument("--cr", dest="cr_id", required=True)
+    outcome_cr_link.add_argument("--role", required=True)
+    outcome_cr_link.add_argument("--claimed-by", default="")
+    outcome_cr_link.add_argument("--reason", required=True)
+    outcome_cr_link.set_defaults(func=command_handoff_outcome_cr_link)
     handoff_successors = handoff_sub.add_parser(
         "successors",
         help="inspect direct successor handoffs without assigning work",
@@ -7943,7 +8665,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="mark a fail, conditional, or inconclusive outcome as blocking",
     )
-    finish.add_argument("--outcome-cr", dest="outcome_cr_id", default="")
+    finish.add_argument(
+        "--outcome-cr",
+        dest="outcome_cr_ids",
+        action="append",
+        default=[],
+        help="related outcome CR; repeat to link more than one CR",
+    )
     finish.add_argument("--allow-unresolved-commit", action="store_true")
     finish.add_argument(
         "--unresolved-reason",
@@ -8031,6 +8759,19 @@ def build_parser() -> argparse.ArgumentParser:
     notify_targets.add_argument("--from-agent", default="")
     notify_targets.add_argument("--format", choices=("text", "json"), default="text")
     notify_targets.set_defaults(func=command_notify_targets)
+    notify_candidates = notify_sub.add_parser(
+        "candidates",
+        help="show ranked active peer sessions for one ready handoff",
+        description=(
+            "Show ranked active peer sessions for one open handoff without requiring a "
+            "predecessor edge. A stopped or expired target role returns outside_shift."
+        ),
+    )
+    notify_candidates.add_argument("job_id", help="open handoff to deliver")
+    notify_candidates.add_argument("--role", required=True, help="role planning the notification")
+    notify_candidates.add_argument("--from-agent", default="")
+    notify_candidates.add_argument("--format", choices=("text", "json"), default="text")
+    notify_candidates.set_defaults(func=command_notify_candidates)
     notify_record = notify_sub.add_parser(
         "record",
         help="record the result after the agent attempts a host message",
@@ -8043,6 +8784,48 @@ def build_parser() -> argparse.ArgumentParser:
     notify_record.add_argument("--message-ref", default="")
     notify_record.add_argument("--detail", default="")
     notify_record.set_defaults(func=command_notify_record)
+    notify_retry = notify_sub.add_parser(
+        "retry",
+        help="record one controlled recovery delivery for a stale unclaimed handoff",
+        description=(
+            "Record one same-recipient recovery delivery after a host-accepted notification "
+            "becomes stale and remains unclaimed. This command records a host attempt; it does "
+            "not send the message."
+        ),
+    )
+    notify_retry.add_argument("job_id", help="open unclaimed handoff named in the recovery message")
+    notify_retry.add_argument("--notification", type=int, required=True, help="latest host-accepted notification ID")
+    notify_retry.add_argument("--role", required=True, help="sender role")
+    notify_retry.add_argument("--from-agent", default="")
+    notify_retry.add_argument("--status", choices=("sent", "failed"), required=True)
+    notify_retry.add_argument("--reason", required=True)
+    notify_retry.add_argument("--stale-after", default="15m")
+    notify_retry.add_argument("--message-ref", default="")
+    notify_retry.add_argument("--detail", default="")
+    notify_retry.set_defaults(func=command_notify_retry)
+    notify_observe = notify_sub.add_parser(
+        "observe",
+        help="append a bounded execution outcome observed after host acceptance",
+        description=(
+            "Record a permitted terminal execution observation without changing notification, "
+            "handoff, retry, or recovery state. Raw host errors are intentionally unsupported."
+        ),
+    )
+    notify_observe.add_argument("job_id")
+    notify_observe.add_argument("--notification", type=int, required=True)
+    notify_observe.add_argument("--role", required=True)
+    notify_observe.add_argument("--claimed-by", default="")
+    notify_observe.add_argument(
+        "--result",
+        choices=tuple(sorted(NOTIFICATION_OBSERVATION_RESULTS)),
+        required=True,
+    )
+    notify_observe.add_argument(
+        "--reason-class",
+        choices=tuple(sorted(NOTIFICATION_OBSERVATION_REASON_CLASSES)),
+        required=True,
+    )
+    notify_observe.set_defaults(func=command_notify_observe)
     notify_status = notify_sub.add_parser(
         "status",
         help="derive host acceptance, claim, and stale-unclaimed state for one handoff",
@@ -8058,6 +8841,30 @@ def build_parser() -> argparse.ArgumentParser:
     notify_list = notify_sub.add_parser("list", help="list notification delivery audit records")
     notify_list.add_argument("--job", dest="job_id", default="")
     notify_list.add_argument("--status", choices=("sent", "failed"), default="")
+    notify_list.add_argument(
+        "--order",
+        choices=("oldest", "newest"),
+        default="newest",
+        help="sort by notification ID; default: newest",
+    )
+    notify_list.add_argument("--limit", type=int, default=None)
+    notify_list.add_argument(
+        "--after-id",
+        type=int,
+        default=None,
+        help="show notification IDs greater than this exclusive cursor",
+    )
+    notify_list.add_argument(
+        "--before-id",
+        type=int,
+        default=None,
+        help="show notification IDs less than this exclusive cursor",
+    )
+    notify_list.add_argument(
+        "--recovery-only",
+        action="store_true",
+        help="show only controlled recovery delivery records",
+    )
     notify_list.add_argument("--format", choices=("text", "json"), default="text")
     notify_list.set_defaults(func=command_notify_list)
 

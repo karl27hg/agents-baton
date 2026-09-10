@@ -6,14 +6,20 @@ This checklist is mandatory before approving or publishing any Baton version.
 
 1. Freeze the intended code and schema scope. Do not include project-local `.baton/` data or feedback unless the release explicitly changes those files.
 2. Run focused tests for each changed behavior, then the complete test suite and isolated pipx lifecycle test.
-3. Compare the implementation and CLI help with `README.md`, `README.ko.md`, `CHANGELOG.md`, `docs/schema.md`, `docs/schema.ko.md`, and every affected operating guide.
+3. Compare the implementation and CLI help with `README.md`, `README.ko.md`, `CHANGELOG.md`, `docs/schema.md`, `docs/schema.ko.md`, `docs/upgrade-guide.md`, and every affected operating guide.
 4. Verify command names, options, defaults, exit behavior, lifecycle semantics, permissions, migration numbers, compatibility boundaries, and recovery instructions.
-5. Update the canonical guides and their packaged copies. `tests/guides.sh` must confirm that each `baton guide show` result is byte-for-byte identical to its source document.
+5. Update the current-release changes, migration actions, and `AGENTS.md` review requirements in `docs/upgrade-guide.md`, then update every canonical guide, the bundled changelog, and packaged copies. `tests/guides.sh` must confirm that each `baton guide show` result is byte-for-byte identical to its source document.
 6. Search for stale current-version and current-schema claims. Historical release notes may retain older values when they are clearly scoped to that release.
 7. Run `git diff --check`, syntax or compile checks, and the complete test suite again after documentation changes.
 8. Inspect the final diff and package version. Only then commit, open or update the pull request, merge, tag, push, and replace the local pipx installation when requested.
 
 A release is blocked when documented behavior differs from the implementation, a bundled guide differs from its canonical document, a migration path is untested, or a required test fails. Fix the gap before version approval; do not defer the correction to the next release.
+
+## v0.6.0 Stable Monitoring
+
+The user explicitly approved stable `v0.6.0` after the full automated release gate. Continue representative-project monitoring of multi-CR blocking projections and bounded notification observations. Publish any correction as a new patch version; never move the stable tag.
+
+Stable promotion is blocked by data loss, migration or compatibility failure, dependency-order inversion, duplicate claim, CR integrity failure, duplicate recovery delivery, incorrect notification filtering, or any other defect that makes normal Baton state unsafe or materially misleading. Minor presentation issues may be deferred only when their behavior and workaround are documented. Repeat the full release gate and documentation-gap review immediately before stable approval.
 
 ## Database Release Rules
 

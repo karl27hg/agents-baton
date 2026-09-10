@@ -159,6 +159,14 @@ baton notify targets <finished-job-id> \
 
 `finish` opens eligible direct dependents atomically. `notify targets` lists only open direct dependents and excludes peer profiles that already own active work; it retains promotion as a compatibility reconciliation path. A project-local global or target-role stop, including shift expiry, produces `outside_shift` with no delivery candidate. Do not send a host message for that state. It never bypasses unfinished dependencies or pending Gates. Send one existing peer task a concise message only for a `candidate` result:
 
+When an open handoff has no scheduling predecessor, inspect that handoff directly instead of adding a false dependency solely for messaging:
+
+```bash
+baton notify candidates <ready-job-id> \
+  --role <role> \
+  --from-agent <profile-name>
+```
+
 ```text
 Baton handoff HO-... is ready. Run `baton handoff show HO-...`, verify the source and dependencies, then claim it before editing.
 ```
@@ -175,7 +183,24 @@ baton notify record HO-... \
   --detail "Codex accepted the follow-up."
 ```
 
-For an error, use `--status failed --detail <reason>`, then try the next listed candidate or fall back to the receiver's normal `wait`/`watch` loop. Codex peer messaging is an optional transport optimization, not a protocol assumed to exist in other model hosts. Baton stores a successful host delivery as `sent` for compatibility but displays it as `host_accepted`; it does not prove that the receiver observed the message. Use `notify status <job> --stale-after <duration>` to distinguish unclaimed, stale, and claimed delivery states. Baton permits only one successful notification record per handoff attempt to suppress duplicate wake-ups. An approved retry increments the attempt and permits one new notification carrying the corrected baseline. A delivered message never changes the handoff to `in_progress`; only `claim` does that.
+For an error, use `--status failed --detail <reason>`, then try the next listed candidate or fall back to the receiver's normal `wait`/`watch` loop. A successful result is rejected when the receiving role is stopped or outside shift. Codex peer messaging is an optional transport optimization, not a protocol assumed to exist in other model hosts. Baton stores a successful host delivery as `sent` for compatibility but displays it as `host_accepted`; it does not prove that the receiver observed the message. Use `notify status <job> --stale-after <duration>` to distinguish unclaimed, stale, and claimed delivery states and inspect the latest notification ID and delivery attempt. Baton permits only one ordinary successful notification record per handoff attempt to suppress duplicate wake-ups. An approved handoff retry increments the workflow attempt and permits a new notification carrying the corrected baseline. A delivered message never changes the handoff to `in_progress`; only `claim` does that.
+
+Only a role with `notification.observe` may record a verified terminal receiver-side result with `notify observe`. Use only the fixed result and reason-class choices shown by `baton notify observe -h`; never put raw host errors, prompts, or secrets in Baton. This observation is audit metadata only and does not replace `claim`, `retry`, CR review, recovery delivery, or a normal Baton lifecycle transition.
+
+If the latest host-accepted delivery becomes stale while the handoff remains open and unclaimed, send one recovery follow-up only when the same registered recipient session remains active and idle and the target shift is active. Then record the actual result:
+
+```bash
+baton notify retry <ready-job-id> \
+  --notification <latest-notification-id> \
+  --role <sender-role> \
+  --from-agent <sender-profile> \
+  --status sent \
+  --reason stale_unclaimed \
+  --stale-after 15m \
+  --message-ref <host-message-id>
+```
+
+`notify retry` records but does not send the host message. Do not redirect it to another recipient. A failed recovery consumes the one recovery allowance; afterward retain the normal `wait`/`watch` fallback instead of sending more wake-ups.
 
 Notification does not reserve recipient capacity. Parallel senders may select the same idle profile before its first claim. Profiles that own an active handoff or claimed submitted CR review are excluded, but an incoming message never preempts the receiver's active work. Finish or safely transition the current unit first, then re-read Baton state and claim only still-eligible work. Do not abandon current work merely because a newer message arrived.
 
@@ -300,7 +325,7 @@ baton --db <db> finish <job-id> --role <role> --evidence "Evidence summary" --co
 
 The supplied commit must resolve to a local commit and Baton stores its canonical full ID, even when optional workspace policy is `off`. Do not use `--allow-unresolved-commit` for a typo or missing local commit. Use it only for an intentional external or not-yet-fetched reference and always provide `--unresolved-reason`.
 
-For completed validation or analysis, choose `--outcome pass|fail|conditional|inconclusive`. Add `--blocking` only to a non-pass result that requires planner or reviewer action before success-dependent work, and use `--outcome-cr <cr-id>` when an existing CR records that decision. Lifecycle `failed` remains the state for work that did not meet its own exit criteria.
+For completed validation or analysis, choose `--outcome pass|fail|conditional|inconclusive`. Add `--blocking` only to a non-pass result that requires planner or reviewer action before success-dependent work, and repeat `--outcome-cr <cr-id>` for every existing CR that records the decision. Do not omit a known blocker merely because another linked CR already exists. Lifecycle `failed` remains the state for work that did not meet its own exit criteria.
 
 Treat `outcome.blocking` and report `blocking` as cumulative audit totals, not active-blocker counts. Inspect `blocking_context` and `outcome_cr_status`; an implemented outcome CR is structurally complete, while rejected, cancelled, or superseded outcome CRs remain terminal-unimplemented and require human interpretation.
 

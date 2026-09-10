@@ -198,9 +198,12 @@ After changing the installed Baton version, return to every preflighted project 
 
 ```bash
 cd /path/to/your-project
+baton guide show upgrade
+baton guide show changelog
 baton migrate
 baton migrate --check
 baton project info
+# Review project AGENTS.md against the bundled upgrade guide.
 baton resume --all
 ```
 
@@ -209,6 +212,10 @@ Only `baton migrate`, its deprecated `update` alias, and the checked project mig
 Released schema migrations are append-only and retained so a dormant project can upgrade directly across multiple tagged Baton versions when it is next used. Compatibility covers released Baton schemas and recognized unversioned legacy databases, not arbitrary development snapshots, manually edited schemas, or downgrade operations.
 
 Schema v13 preserves every existing workflow row. It adds structured completion outcomes and append-only evidence corrections. Historical completed jobs are backfilled with `completion_outcome=unspecified`; an existing commit reference is marked `legacy_unchecked` because migration cannot prove what the old executable validated.
+
+Schema v14 preserves existing notification rows and numbers them by `delivery_attempt` within each handoff attempt. It adds an explicit recovery link and reason so one stale, same-recipient recovery delivery can be audited without changing the handoff attempt or overwriting the original host result.
+
+Schema v15 preserves all completion and notification history. It backfills each existing non-null `outcome_cr_id` as the first ordered outcome link, adds support for multiple linked outcome CRs, and adds bounded receiver-side notification observations. It does not infer additional blockers or execution results.
 
 `project info` and `upgrade preflight` distinguish package history from compatibility. `last_migrated_with_baton_version` is diagnostic only. Use `cli_schema_compatible`, `database_schema_current`, `migration_required`, and `workflow_commands_ready` to decide whether the installed CLI can operate or whether the project must remain stopped for migration.
 
@@ -259,9 +266,11 @@ baton guide show bootstrap
 baton guide show worker
 baton guide show planner
 baton guide show git
+baton guide show upgrade
+baton guide show changelog
 ```
 
-Complete the project setup in `docs/using-baton-in-projects.md`, including `.gitignore`, role configuration, and `AGENTS.md` rules that require the appropriate installed guide. Files under `docs/` are the canonical sources for the bundled guides; packaging tests require their installed copies to remain identical.
+After every executable update, read `baton guide show upgrade` and every bundled changelog entry newer than the project's previous version before resuming agents. The upgrade guide identifies the current release's migration, behavior, command, and `AGENTS.md` review requirements; the changelog covers skipped releases. Complete the project setup in `docs/using-baton-in-projects.md`, including `.gitignore`, role configuration, and `AGENTS.md` rules that require the appropriate installed guide. Files under `docs/` and the root changelog are canonical sources for the bundled copies; packaging tests require them to remain identical.
 
 While an agent is operating under Baton, it must not create subagents, child tasks, parallel agent sessions, or delegated background agents. All delegation goes through Baton handoffs assigned to configured roles. The bundled guides state this policy, but Baton cannot disable host-provided agent tools; repeat the rule in the consuming project's `AGENTS.md` or equivalent host policy.
 
@@ -270,14 +279,16 @@ While an agent is operating under Baton, it must not create subagents, child tas
 An SM/system-manager agent should read these documents in order before configuring Baton for a project:
 
 1. `docs/agent-bootstrap.md`: installed-command, project discovery, and database migration safety checks.
-2. `README.md`: project overview, default roles, CR permissions, wait/shift controls, reports, and GitHub issue wrapper.
-3. `docs/using-baton-in-projects.md`: install Baton into another repository, set project `.gitignore`, and add `AGENTS.md` rules.
-4. `docs/gates.md`: named Gate ownership, release, cancellation, emergency transfer, audit, upgrade, and safety rules.
-5. `docs/planner-prompt.md`: parallel-safety and dependency policy for agents that decompose or register work.
-6. `docs/agent-prompt.md`: prompt content to attach to Codex role agents that wait for handoff or CR review work.
-7. `docs/agent-usage.md`: command examples for role setup, CR review, waits, shifts, and stop/resume operations.
-8. `docs/git-integration.md` or its Korean translation, `docs/git-integration.ko.md`: optional Git provenance, `off`/`warn`/`strict` policy, checkout, and override rules.
-9. `docs/schema.md` or its Korean translation, `docs/schema.ko.md`: database schema and audit table reference when troubleshooting or reviewing workflow state.
+2. `docs/upgrade-guide.md`: release-specific changes, migration actions, and consuming-project `AGENTS.md` review.
+3. `README.md`: project overview, default roles, CR permissions, wait/shift controls, reports, and GitHub issue wrapper.
+4. `docs/using-baton-in-projects.md`: install Baton into another repository, set project `.gitignore`, and add `AGENTS.md` rules.
+5. `docs/gates.md`: named Gate ownership, release, cancellation, emergency transfer, audit, upgrade, and safety rules.
+6. `docs/planner-prompt.md`: parallel-safety and dependency policy for agents that decompose or register work.
+7. `docs/agent-prompt.md`: prompt content to attach to Codex role agents that wait for handoff or CR review work.
+8. `docs/agent-usage.md`: command examples for role setup, CR review, waits, shifts, and stop/resume operations.
+9. `docs/git-integration.md` or its Korean translation, `docs/git-integration.ko.md`: optional Git provenance, `off`/`warn`/`strict` policy, checkout, and override rules.
+10. `docs/schema.md` or its Korean translation, `docs/schema.ko.md`: database schema and audit table reference when troubleshooting or reviewing workflow state.
+11. `CHANGELOG.md`, or installed `baton guide show changelog`: behavior changes across any skipped releases.
 
 For a new database:
 
@@ -412,7 +423,7 @@ bin/baton role alias-add fe frontend
 bin/baton next --role fe
 ```
 
-Workflow permissions are stored separately from role membership. `sm` is seeded with all CR permissions, `handoff.cancel`, `handoff.register`, `handoff.evidence_correct`, emergency `gate.manage`, and `workspace.override` authority. New projects also give `planning` the registration, cancellation, evidence-correction, and CR review permissions required to decide failed or blocking completion outcomes. Schema v7 upgrades preserve existing registration behavior by granting `handoff.register` to every active role already present; an SM can revoke compatibility grants afterward.
+Workflow permissions are stored separately from role membership. `sm` is seeded with all CR permissions, `handoff.cancel`, `handoff.register`, `handoff.evidence_correct`, `notification.observe`, emergency `gate.manage`, and `workspace.override` authority. New projects also give `planning` the registration, cancellation, evidence-correction, notification-observation, and CR review permissions required to decide failed or blocking completion outcomes. Schema v7 upgrades preserve existing registration behavior by granting `handoff.register` to every active role already present; an SM can revoke compatibility grants afterward. Schema v15 grants the newly introduced `notification.observe` only to `sm` and `planning`.
 
 ```bash
 bin/baton role permission-list sm
@@ -422,6 +433,7 @@ bin/baton role permission-add architecture cr.admin
 bin/baton role permission-add architecture handoff.cancel
 bin/baton role permission-add architecture handoff.register
 bin/baton role permission-add architecture handoff.evidence_correct
+bin/baton role permission-add architecture notification.observe
 bin/baton role permission-add architecture gate.manage
 bin/baton role permission-add architecture workspace.override
 bin/baton role permission-remove sm cr.approve
@@ -547,6 +559,14 @@ bin/baton notify targets HO-FINISHED \
   --from-agent frontend-main
 ```
 
+For an already-open handoff that has no scheduling predecessor, including a CR implementation handoff created directly from an approved CR, inspect its candidates without inventing a dependency:
+
+```bash
+bin/baton notify candidates HO-READY \
+  --role planning \
+  --from-agent planner-main
+```
+
 `finish` already promotes direct dependents whose job dependencies are finished and whose Gates are released. `notify targets` retains promotion as a compatibility reconciliation path and ranks active candidates with no current claim by their most recent session update. When the receiving role is stopped by a project-local global or role control, including shift expiry, it returns `outside_shift` and no delivery candidate. The ready handoff remains `open`. Send the handoff ID to one existing candidate Codex task only when the state is `candidate`, requiring it to run `handoff show` and `claim`. Then record the real host result:
 
 ```bash
@@ -559,15 +579,47 @@ bin/baton notify record HO-READY \
   --detail "Codex accepted the follow-up."
 ```
 
-Use `--status failed --detail <reason>` when delivery fails, then try the next candidate or retain the receiver's `wait`/`watch` fallback. The compatible stored value `sent` is displayed as `host_accepted`: it proves only that the host accepted the message, not that the receiving task observed it. Baton records at most one successful notification for each handoff attempt to avoid repeated wake-up messages. An approved `retry` increments the attempt, so a new baseline may be delivered and audited without colliding with the previous successful notification. Delivery does not claim work, and no Baton agent may create a new task or send work that is not registered in Baton.
+Use `--status failed --detail <reason>` when delivery fails, then try the next candidate or retain the receiver's `wait`/`watch` fallback. A successful record is rejected when the target role is stopped or outside its project-local shift. The compatible stored value `sent` is displayed as `host_accepted`: it proves only that the host accepted the message, not that the receiving task observed it. Baton records at most one ordinary successful notification for each handoff attempt to avoid repeated wake-up messages, and later ordinary records are rejected so recovery cannot bypass `notify retry`. An approved handoff `retry` increments the workflow attempt, so a corrected baseline may be delivered and audited independently. Delivery does not claim work, and no Baton agent may create a new task or send work that is not registered in Baton.
 
 ```bash
 bin/baton agent session-list --status active
 bin/baton notify list --job HO-READY
+bin/baton notify list --limit 20
+bin/baton notify list --after-id 90 --recovery-only
 bin/baton notify status HO-READY --stale-after 15m
 ```
 
-`notify status` derives whether the current attempt is unnotified, host-accepted but unclaimed, stale, claimed by the recipient, or claimed by another agent. It does not resend messages automatically. Host acceptance means the sender does not need to wait solely to wake that successor when the push-first conditions are met. Polling remains required for CR monitoring, unassigned role work, unavailable endpoints, delivery failures, and non-Codex hosts.
+`notify list` defaults to unlimited newest-first output so the latest operational records appear before any host output cutoff. Use a positive `--limit` to bound output, explicit `--order oldest` for chronological history, exclusive `--after-id` or `--before-id` cursors for stable ranges, and `--recovery-only` for controlled recovery deliveries. These options compose with `--job`, `--status`, and JSON output. To page backward, combine `--before-id <oldest-id-from-previous-page> --limit <count>`.
+
+`notify status` preserves `notification_state` for compatibility and adds factual context for unrecorded deliveries, the latest delivery attempt, and recovery count. It derives whether the current handoff attempt is unnotified, host-accepted but unclaimed, stale, claimed by the recipient, or claimed by another agent. It does not resend messages automatically. Host acceptance means the sender does not need to wait solely to wake that successor when the push-first conditions are met. Polling remains required for CR monitoring, unassigned role work, unavailable endpoints, delivery failures, and non-Codex hosts.
+
+When a planning or SM agent verifies that a host-accepted message later ended in a receiver-side terminal failure, it may append one bounded observation:
+
+```bash
+bin/baton notify observe HO-READY \
+  --notification 42 \
+  --role planning \
+  --claimed-by planner-main \
+  --result execution_failed \
+  --reason-class policy_blocked
+```
+
+`notify observe` requires `notification.observe`. Results are limited to `execution_failed`, `execution_cancelled`, and `recipient_unreachable`; reason classes are limited to `policy_blocked`, `host_error`, `timeout`, `cancelled`, and `unknown`. It intentionally accepts no raw error detail and does not alter delivery, recovery, claim, or handoff state. Inspect it through `notify list` or the `latest_observation_*` fields from `notify status`.
+
+When the latest host-accepted delivery is stale, the handoff is still open and unclaimed, the original recipient session remains active and idle, and the target shift remains active, a project may send exactly one recovery follow-up to that same task. Record its real host result afterward:
+
+```bash
+bin/baton notify retry HO-READY \
+  --notification 42 \
+  --role planning \
+  --from-agent planner-main \
+  --status sent \
+  --reason stale_unclaimed \
+  --stale-after 15m \
+  --message-ref <host-message-id>
+```
+
+The command records but does not send the recovery message. A failed recovery also consumes the one recovery allowance for that handoff attempt. Do not redirect recovery to another recipient or continue broadcasting; return to `wait`/`watch` fallback.
 
 ### Converging Work and Message Pile-Up
 
@@ -656,7 +708,18 @@ bin/baton finish HO-YYYY-MM-DD-001 \
 bin/baton handoff successors HO-YYYY-MM-DD-001
 ```
 
-`finish` records lifecycle completion. Use `--outcome pass|fail|conditional|inconclusive` for the result of completed validation or analysis, and add `--blocking` when a non-pass result must stop success-dependent work. `--outcome-cr CR-...` may link the decision record. Use `baton fail` instead when the handoff itself could not meet its exit criteria and should enter the retry/cancel failure-review flow.
+`finish` records lifecycle completion. Use `--outcome pass|fail|conditional|inconclusive` for the result of completed validation or analysis, and add `--blocking` when a non-pass result must stop success-dependent work. Repeat `--outcome-cr CR-...` to link every related decision record; the first remains available through the legacy `outcome_cr_id` field. Blocking status remains unresolved while any linked CR is open or terminal-unimplemented.
+
+If an authorized reviewer discovers another CR after a blocking handoff has finished, append it without rewriting completion evidence or earlier links:
+
+```bash
+bin/baton handoff outcome-cr-link HO-YYYY-MM-DD-001 \
+  --cr CR-YYYY-MM-DD-003 \
+  --role planning \
+  --reason "Independent blocker found during result review."
+```
+
+This command requires `handoff.evidence_correct`, a finished blocking handoff, and an existing unlinked CR. Use `baton fail` instead when the handoff itself could not meet its exit criteria and should enter the retry/cancel failure-review flow.
 
 An explicit `--commit` must resolve to a commit in the local workspace and is stored as its canonical full ID. A deliberately external or not-yet-fetched reference requires both `--allow-unresolved-commit` and `--unresolved-reason`; this audited exception should not be used for ordinary typos or missing local work.
 
@@ -983,7 +1046,9 @@ State-changing commands run inside `BEGIN IMMEDIATE` transactions:
 - `cancel-ack`
 - `cancel-withdraw`
 - `notify targets`
+- `notify candidates`
 - `notify record`
+- `notify retry`
 - `register`
 - `gate create`
 - `gate release`

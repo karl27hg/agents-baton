@@ -16,7 +16,7 @@ Use this guide when an agent must verify or initialize a project that uses a pip
 - Delegate work only by registering Baton handoffs for configured project roles.
 - A planner may register independent handoffs for parallel execution, but must not create or invoke the agents that execute them.
 - When the project explicitly enables opt-in Codex peer notification, an agent may send a follow-up to an existing task recorded by `agent session-set`. The message must name a ready Baton handoff, and the receiver must inspect and claim it; notification is not permission or delegation state.
-- Record each attempted host message with `notify record`. A failed or unavailable endpoint falls back to `wait`/`watch`.
+- Record each ordinary host-message attempt with `notify record` and the one allowed stale recovery with `notify retry`. A failed or unavailable endpoint falls back to `wait`/`watch`.
 - If no eligible role is available, wait or report the blocker to the SM or user. Do not bypass Baton by creating a subagent.
 
 Baton cannot disable tools provided by the agent host. The project `AGENTS.md` or equivalent host policy must repeat this rule when technical enforcement is required.
@@ -36,6 +36,8 @@ Use command help for syntax and options. Use guides for role behavior and operat
 ```bash
 baton help
 baton help project migrate
+baton guide show upgrade
+baton guide show changelog
 baton guide show worker
 ```
 
@@ -127,9 +129,9 @@ baton-report summary
 
 Normal workflow commands do not migrate schemas automatically. A `database migration required` error is an operator action: keep workers stopped, run `baton migrate`, verify with `baton migrate --check`, and then resume the intended scopes.
 
-### Schema v13 Upgrade Notice
+### Schema v15 Upgrade Notice
 
-Installing a shared pipx executable does not modify any project database. Baton `v0.6.0rc7` uses schema v13. Each existing project owns its own database and must be migrated separately from that project's root. Projects already on schema v13, including RC5 and RC6 projects, need only `baton migrate --check`; RC7 adds derived blocking contexts and clearer CR inspection projections without a schema migration or data backfill.
+Installing a shared pipx executable does not modify any project database. Baton `v0.6.0` uses schema v15. Each existing project owns its own database and must be checked separately from that project's root. RC8 or RC9 schema v14 projects require migration 15 before workflow commands resume. The additive migration preserves notification and workflow rows, converts each existing non-null `outcome_cr_id` into the first ordered outcome link, and adds bounded notification observations. It does not infer additional CR links or receiver-side execution results.
 
 Before replacing the executable, run the read-only preflight with the currently compatible Baton. It returns exit `0` only when the project has a global maintenance stop and no active waiter, handoff, cancellation acknowledgement, or claimed CR review:
 
@@ -139,17 +141,20 @@ baton stop --all --reason "Baton upgrade"
 baton upgrade preflight
 ```
 
-Drain every listed object and repeat preflight until it reports `READY`. Only then replace the executable. For an existing schema v12 database, continue with:
+Drain every listed object and repeat preflight until it reports `READY`. Only then replace the executable. Read the release-specific guide before changing project instructions or resuming:
 
 ```bash
+baton guide show upgrade
 baton migrate
 baton migrate --check
 baton resume --all
 ```
 
-`baton migrate` writes a validated backup under `.baton/backups/` before applying schema v13 transactionally. Schema v13 preserves existing handoffs and audit records, adds structured completion outcomes and append-only commit-evidence corrections, backfills historical outcomes as `unspecified`, and marks existing commit references `legacy_unchecked`. It does not claim that historical commit evidence was validated. Schema v12 retry attempts and cancelled implementation replacement relationships remain preserved.
+`baton migrate` writes a validated backup under `.baton/backups/` before applying schema v15 transactionally. Schema v15 retains schema v14 notification recovery metadata, schema v13 completion evidence, and every existing workflow row. It adds ordered outcome-CR relationships and append-only notification observations.
 
-If the executable was replaced too early, the new Baton can still run `upgrade preflight` and `project info` against a known older schema and print compatibility and blocker details, but workflow transitions must be drained with the previous compatible Baton. Do not resume with an older Baton executable after schema v13 is applied. When multiple projects use the same pipx installation, repeat preflight and the project-local database migration for each project; there is no global database migration command.
+If the executable was replaced too early, the new Baton can still run `upgrade preflight` and `project info` against a known older schema and print compatibility and blocker details, but workflow transitions must be drained with the previous compatible Baton. Do not resume with an older Baton executable after schema v15 is applied. When multiple projects use the same pipx installation, repeat preflight, `guide show upgrade`, and the project-local database migration for each project; there is no global database migration command.
+
+Schema v15 grants `notification.observe` only to `planning` and `sm`. It also keeps `handoff_jobs.outcome_cr_id` as the first-link compatibility projection while `handoff_outcome_crs` becomes the complete ordered relationship set. Review project role grants after migration; do not grant observation authority to workers by default.
 
 Schema v13 grants `handoff.evidence_correct` to `planning` and `sm`. This permission appends an audited correction to a finished job; it never rewrites the original completion evidence.
 
@@ -176,3 +181,5 @@ Before a worker's first wait, require it to inspect `shift status --role <role>`
 Require planner/SM roles that receive both CR reviews and handoffs to use `watch` rather than alternating long independent waits unless push-first conditions are satisfied. A reachable Codex planner may end its current turn without a CLI waiter when it owns no active handoff or review, every expected return path is an explicit planning handoff, and every producer can notify its active session. This is addressable idle, not a Baton workflow state. CR monitoring, unassigned role work, non-Codex hosts, stale endpoints, and notification failures retain the polling fallback. Require every active claimant to inspect its handoff before commit, integration, and completion. On `cancel_requested`, the claimant pauses and inspects the reason; it resumes only after an authorized `cancel-withdraw` restores `in_progress`, or uses `cancel-ack` after cancellation is confirmed. It must not report `finish` or `fail` while cancellation is requested.
 
 Project `AGENTS.md` should require these guides and define the assigned role. If a command, version, path, migration plan, or authority decision is unclear, stop and ask the user or SM instead of guessing.
+
+After every Baton version change, the SM or project owner must read `baton guide show upgrade` and every newer entry from `baton guide show changelog`, compare the required actions with the project `AGENTS.md`, and update project instructions when commands or agent behavior changed. Baton reports this action after migration but never edits `AGENTS.md` automatically.

@@ -31,7 +31,7 @@ test "$ACTUAL_VERSION" = "$EXPECTED_VERSION"
 test -x "$PIPX_BIN_DIR/baton-report"
 test -d "$PIPX_HOME/venvs/agents-baton"
 "$PIPX_BIN_DIR/baton" help project migrate | grep -- '--source-db SOURCE_DB' >/dev/null
-test "$("$PIPX_BIN_DIR/baton" guide list)" = $'bootstrap\nworker\nplanner\ngit'
+test "$("$PIPX_BIN_DIR/baton" guide list)" = $'bootstrap\nworker\nplanner\ngit\nupgrade\nchangelog'
 "$PIPX_BIN_DIR/baton" guide show bootstrap | grep '^# Agent Bootstrap: Installed Baton' >/dev/null
 "$PIPX_BIN_DIR/baton" guide show git | grep '^# Optional Git Workspace Integration' >/dev/null
 
@@ -41,7 +41,7 @@ mkdir -p "$CONSUMER"
   cd "$CONSUMER"
   "$PIPX_BIN_DIR/baton" init
   "$PIPX_BIN_DIR/baton" migrate --check
-  "$PIPX_BIN_DIR/baton" project info | grep 'schema_version: 13' >/dev/null
+  "$PIPX_BIN_DIR/baton" project info | grep 'schema_version: 15' >/dev/null
   "$PIPX_BIN_DIR/baton" role add update-sentinel --display-name "Update Sentinel"
   "$PIPX_BIN_DIR/baton" role list >/dev/null
   "$PIPX_BIN_DIR/baton-report" summary >/dev/null
