@@ -24,38 +24,30 @@ baton project info
 
 Review this guide, the bundled changelog entries newer than the project's previous version, and the version-matched bootstrap, worker, or planner guide before updating project instructions and explicitly resuming the applicable shifts. A shared pipx update never migrates every project automatically.
 
-## Current Release: 0.6.0rc8
+## Current Release: 0.6.0rc9
 
-RC8 upgrades schema v13 to v14. The migration is additive and preserves existing notification, handoff, CR, role, control, and audit rows. Before changing the database, `baton migrate` creates and validates a project-local backup.
+RC9 keeps schema v14 unchanged. Projects already migrated by RC8 need only `baton migrate --check`; projects upgrading from RC7 or earlier must still follow the normal migration sequence, which preserves existing notification, handoff, CR, role, control, and audit rows.
 
-Changes from RC7:
+Changes from RC8:
 
-- Notification rows now have a monotonic `delivery_attempt` within each handoff attempt. Existing rows are numbered in ID order during migration.
-- `notify candidates <open-handoff>` finds eligible peer sessions without requiring a predecessor edge. Do not add a false dependency solely to create a notification path.
-- A successful `notify record` now rejects a target role that is stopped or outside its shift.
-- After an ordinary host-accepted result, further `notify record` calls for that handoff attempt are rejected; stale recovery must use `notify retry`.
-- `notify status` retains the compatible `notification_state` and adds factual `notification_context`, latest delivery ID/attempt, and recovery count fields.
-- `notify retry` records at most one same-recipient recovery delivery for an open, unclaimed handoff after the latest host-accepted notification becomes stale.
+- `notify list` now defaults to unlimited newest-first output so recent operational records appear first; use `--order oldest` for chronological history.
+- `notify list --limit N` provides an explicit bounded recent audit view without silently omitting rows by default.
+- `notify list --after-id ID` and `--before-id ID` provide exclusive, stable ID cursors that can be combined with ordering and limits.
+- `notify list --recovery-only` selects controlled recovery deliveries without post-processing JSON.
+- All new filters compose with `--job`, `--status`, and `--format json`; they do not modify notification records.
 
-`notify retry` does not send a host message. Send the recovery follow-up to the same registered recipient task first, then record the real result. The original recipient session must still be active, the target role must be inside its project-local shift, and the recipient must still have capacity. A failed recovery record also consumes the one recovery allowance; continue with `wait` or `watch` instead of broadcasting repeatedly.
-
-Example:
+Recent recovery audit example:
 
 ```bash
-baton notify status HO-READY --stale-after 15m
-
-# Send one recovery follow-up to the same registered Codex task, then record it.
-baton notify retry HO-READY \
-  --notification 42 \
-  --role planning \
-  --from-agent planner-main \
-  --status sent \
-  --reason stale_unclaimed \
-  --stale-after 15m \
-  --message-ref <host-message-id>
+baton notify list --limit 20
+baton notify list --after-id 90 --recovery-only
 ```
 
-Host acceptance is not recipient acknowledgement. Only a successful Baton `claim` acknowledges ownership. Recovery remains an optional Codex transport optimization; other hosts and unavailable endpoints continue through the persistent `next`, `wait`, or `watch` path.
+Cursor boundaries are exclusive. `--after-id 90` starts at ID 91, while `--before-id 120` ends at ID 119. Use `--before-id <oldest-id-from-previous-page> --limit N` to page backward through older records. The new options affect only presentation and require no data migration.
+
+## Stable Qualification
+
+RC9 must run in a representative project for at least two hours before promotion to stable `v0.6.0`. Review the resulting feedback and accumulated notification history. Do not promote when operation reveals data loss, migration or compatibility failure, dependency-order inversion, duplicate claim, CR integrity failure, duplicate recovery delivery, incorrect notification filtering, or another state-safety defect. Run the complete release and documentation-gap checks again immediately before stable approval.
 
 ## Project AGENTS.md Review
 

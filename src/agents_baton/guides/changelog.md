@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## v0.6.0rc9
+
+- Made unlimited newest-first output the `notify list` default for recent operational audits, with explicit `--order oldest` available for chronological history.
+- Added positive result limits, exclusive notification-ID cursors, and recovery-only filtering to `notify list`.
+- Applied the same composable notification audit filters to text and JSON output without changing schema v14 or stored notification history.
+
 ## v0.6.0rc8
 
 - Added schema migration v14 with monotonic notification delivery attempts and explicit same-recipient recovery linkage while preserving existing notification and workflow rows.

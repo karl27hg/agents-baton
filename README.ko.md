@@ -324,6 +324,8 @@ baton notify record HO-READY \
 
 실패하면 `--status failed --detail <사유>`를 기록하고 다음 후보를 시도하거나 기존 `wait`/`watch`로 복구합니다. 성공 기록은 target role이 stop 또는 shift 밖이면 거부됩니다. 호환성을 위해 DB에는 `sent`로 저장하지만 사람용 출력은 `host_accepted`로 표시하며, 이는 수신 task가 메시지를 읽거나 claim했다는 뜻이 아닙니다. `notify status HO-... --stale-after 15m`은 기존 `notification_state`와 함께 사실 기반 context, 최신 delivery attempt, recovery 횟수를 표시합니다. 최신 성공 전달이 stale이고 작업이 open/unclaimed이며 같은 recipient session과 shift가 유효할 때만 같은 task에 recovery follow-up을 한 번 보내고 `notify retry ... --notification <id> --reason stale_unclaimed --status sent|failed`로 결과를 기록할 수 있습니다. 이 명령도 메시지를 직접 보내지 않으며 실패 recovery도 1회 한도를 소비합니다. 이후에는 반복 broadcast하지 않고 `wait`/`watch`로 복구합니다. 메시지는 claim이 아니며 새 task나 subagent를 만들거나 Baton에 없는 작업을 지시해서는 안 됩니다.
 
+`notify list`는 최신 운영 기록이 host 출력 제한보다 먼저 보이도록 무제한 newest-first를 기본으로 사용합니다. 출력량은 `--limit 20`처럼 제한하고, 시간순 전체 감사에는 `--order oldest`를 명시합니다. `--after-id`와 `--before-id`는 배타적 ID 경계이며 `--recovery-only`, `--job`, `--status`, `--format json`과 조합할 수 있습니다. 이전 페이지는 `--before-id <직전 페이지의 가장 작은 ID> --limit <개수>`로 조회합니다.
+
 메시지로 다시 깨울 수 있는 Codex planner는 active handoff와 claimed review가 없고, 모든 복귀 지점이 명시적 planning handoff이며, 각 producer가 active planner session에 알릴 수 있을 때 CLI waiter 없이 `addressable idle` 상태로 현재 turn을 끝낼 수 있습니다. 이는 Baton 상태가 아닙니다. CR 알림 경로가 없거나 미지정 planning 작업, stale endpoint, 전송 실패, 비 Codex host가 있으면 `watch`를 유지합니다.
 
 `next`는 한 번만 확인하는 비대기 명령입니다. 작업이 없다는 이유로 agent가 종료되면 안 되며, shift가 활성 상태인 동안 제한된 `wait`를 반복해야 합니다.

@@ -7342,6 +7342,18 @@ def command_notify_status(args: argparse.Namespace) -> int:
 
 
 def command_notify_list(args: argparse.Namespace) -> int:
+    if args.limit is not None and args.limit <= 0:
+        raise SystemExit("ERROR: --limit must be greater than zero")
+    if args.after_id is not None and args.after_id < 0:
+        raise SystemExit("ERROR: --after-id must be zero or greater")
+    if args.before_id is not None and args.before_id <= 0:
+        raise SystemExit("ERROR: --before-id must be greater than zero")
+    if (
+        args.after_id is not None
+        and args.before_id is not None
+        and args.after_id >= args.before_id
+    ):
+        raise SystemExit("ERROR: --after-id must be less than --before-id")
     conditions: list[str] = []
     params: list[object] = []
     if args.job_id:
@@ -7350,7 +7362,19 @@ def command_notify_list(args: argparse.Namespace) -> int:
     if args.status:
         conditions.append("delivery_status = ?")
         params.append(args.status)
+    if args.after_id is not None:
+        conditions.append("id > ?")
+        params.append(args.after_id)
+    if args.before_id is not None:
+        conditions.append("id < ?")
+        params.append(args.before_id)
+    if args.recovery_only:
+        conditions.append("retry_of_notification_id is not null")
+    order = "desc" if args.order == "newest" else "asc"
     where = f"where {' and '.join(conditions)}" if conditions else ""
+    limit = "limit ?" if args.limit is not None else ""
+    if args.limit is not None:
+        params.append(args.limit)
     with connect(args.db) as con:
         init_schema(con)
         rows = con.execute(
@@ -7361,7 +7385,8 @@ def command_notify_list(args: argparse.Namespace) -> int:
                    transport, message_ref, detail, created_at
             from handoff_notifications
             {where}
-            order by id
+            order by id {order}
+            {limit}
             """,
             params,
         ).fetchall()
@@ -8445,6 +8470,30 @@ def build_parser() -> argparse.ArgumentParser:
     notify_list = notify_sub.add_parser("list", help="list notification delivery audit records")
     notify_list.add_argument("--job", dest="job_id", default="")
     notify_list.add_argument("--status", choices=("sent", "failed"), default="")
+    notify_list.add_argument(
+        "--order",
+        choices=("oldest", "newest"),
+        default="newest",
+        help="sort by notification ID; default: newest",
+    )
+    notify_list.add_argument("--limit", type=int, default=None)
+    notify_list.add_argument(
+        "--after-id",
+        type=int,
+        default=None,
+        help="show notification IDs greater than this exclusive cursor",
+    )
+    notify_list.add_argument(
+        "--before-id",
+        type=int,
+        default=None,
+        help="show notification IDs less than this exclusive cursor",
+    )
+    notify_list.add_argument(
+        "--recovery-only",
+        action="store_true",
+        help="show only controlled recovery delivery records",
+    )
     notify_list.add_argument("--format", choices=("text", "json"), default="text")
     notify_list.set_defaults(func=command_notify_list)
 

@@ -437,6 +437,8 @@ After `finish`, optionally inspect active Codex delivery candidates with `notify
 
 Send one candidate task the handoff ID and instructions to run `handoff show` and `claim`, then immediately record `notify record <ready-job> --status sent|failed`. A successful record rechecks the target shift. Baton stores `sent` for compatibility but displays it as `host_accepted`: it confirms only that the host accepted the follow-up, not that the recipient read or claimed it. Use `notify status <ready-job>` to derive unclaimed, stale, or claimed state and obtain the latest notification ID. If it becomes stale while still open/unclaimed, send at most one follow-up to the same active, idle recipient during its shift, then record it with `notify retry <ready-job> --notification <id> --reason stale_unclaimed --status sent|failed`. Failed recovery consumes the allowance. Afterward, or for unavailable and non-Codex hosts, use the recipient's normal `wait`/`watch` loop. Do not create a new task or broadcast repeatedly.
 
+`notify list` defaults to unlimited newest-first output. For a bounded recent delivery audit, add `--limit <count>`; use explicit `--order oldest` for chronological history. Exclusive `--after-id` and `--before-id` cursors, `--recovery-only`, `--job`, and `--status` can be combined and apply equally to text and JSON output.
+
 ## Wait Usage
 
 Use bounded waits by default:

@@ -581,8 +581,12 @@ Use `--status failed --detail <reason>` when delivery fails, then try the next c
 ```bash
 bin/baton agent session-list --status active
 bin/baton notify list --job HO-READY
+bin/baton notify list --limit 20
+bin/baton notify list --after-id 90 --recovery-only
 bin/baton notify status HO-READY --stale-after 15m
 ```
+
+`notify list` defaults to unlimited newest-first output so the latest operational records appear before any host output cutoff. Use a positive `--limit` to bound output, explicit `--order oldest` for chronological history, exclusive `--after-id` or `--before-id` cursors for stable ranges, and `--recovery-only` for controlled recovery deliveries. These options compose with `--job`, `--status`, and JSON output. To page backward, combine `--before-id <oldest-id-from-previous-page> --limit <count>`.
 
 `notify status` preserves `notification_state` for compatibility and adds factual context for unrecorded deliveries, the latest delivery attempt, and recovery count. It derives whether the current handoff attempt is unnotified, host-accepted but unclaimed, stale, claimed by the recipient, or claimed by another agent. It does not resend messages automatically. Host acceptance means the sender does not need to wait solely to wake that successor when the push-first conditions are met. Polling remains required for CR monitoring, unassigned role work, unavailable endpoints, delivery failures, and non-Codex hosts.
 

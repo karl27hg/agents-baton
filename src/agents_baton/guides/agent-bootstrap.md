@@ -131,7 +131,7 @@ Normal workflow commands do not migrate schemas automatically. A `database migra
 
 ### Schema v14 Upgrade Notice
 
-Installing a shared pipx executable does not modify any project database. Baton `v0.6.0rc8` uses schema v14. Each existing project owns its own database and must be migrated separately from that project's root. RC7 schema v13 projects require migration 14 before workflow commands resume. The additive migration preserves notification and workflow rows, numbers existing delivery records in ID order, and adds explicit recovery linkage and reason fields.
+Installing a shared pipx executable does not modify any project database. Baton `v0.6.0rc9` uses schema v14. Each existing project owns its own database and must be checked separately from that project's root. RC8 schema v14 projects require only `baton migrate --check`; RC7 schema v13 projects require migration 14 before workflow commands resume. The additive migration preserves notification and workflow rows, numbers existing delivery records in ID order, and adds explicit recovery linkage and reason fields.
 
 Before replacing the executable, run the read-only preflight with the currently compatible Baton. It returns exit `0` only when the project has a global maintenance stop and no active waiter, handoff, cancellation acknowledgement, or claimed CR review:
 

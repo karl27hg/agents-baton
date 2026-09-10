@@ -47,6 +47,12 @@ grep -- '--plan-token PLAN_TOKEN' "$TMP/migrate-command.txt" >/dev/null
 "$CLI" help notify retry | grep -- '--notification NOTIFICATION' >/dev/null
 "$CLI" help notify retry | grep -- '--stale-after STALE_AFTER' >/dev/null
 "$CLI" help notify list | grep -- '--job JOB_ID' >/dev/null
+"$CLI" help notify list | grep -- '--order {oldest,newest}' >/dev/null
+"$CLI" help notify list | grep 'default: newest' >/dev/null
+"$CLI" help notify list | grep -- '--limit LIMIT' >/dev/null
+"$CLI" help notify list | grep -- '--after-id AFTER_ID' >/dev/null
+"$CLI" help notify list | grep -- '--before-id BEFORE_ID' >/dev/null
+"$CLI" help notify list | grep -- '--recovery-only' >/dev/null
 "$CLI" help notify status | grep -- '--stale-after STALE_AFTER' >/dev/null
 "$CLI" help watch | grep 'CR review first' >/dev/null
 "$CLI" help watch | grep -- '--explain' >/dev/null
